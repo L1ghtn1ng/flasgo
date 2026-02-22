@@ -1,10 +1,10 @@
-# Fango Project Guidelines
+# Flasgo Project Guidelines
 
 This document defines the engineering baseline for work in this repository.
 
 ## Scope
 
-- Project: `fango`
+- Project: `flasgo`
 - Language/runtime: Python `3.14+`
 - Framework style: async-first, strongly typed, security-default
 
