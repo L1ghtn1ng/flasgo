@@ -53,7 +53,7 @@ class Settings:
     DOCS_PATH: str = "/docs"
     OPENAPI_PATH: str = "/openapi.json"
     API_TITLE: str = "Flasgo API"
-    API_VERSION: str = "0.1.0"
+    API_VERSION: str = "0.3.0"
     API_DESCRIPTION: str = ""
     SSRF_ENABLED: bool = True
     SSRF_ALLOWED_SCHEMES: set[str] = field(default_factory=lambda: {"http", "https"})

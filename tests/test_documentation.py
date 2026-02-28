@@ -35,7 +35,7 @@ def test_migration_guide_covers_canonical_flask_examples() -> None:
 def test_changelog_tracks_unreleased_and_tagged_releases() -> None:
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert "## [Unreleased]" in changelog
+    assert "## [0.3.0] - 2026-02-28" in changelog
     assert "## [0.2.0] - 2026-02-28" in changelog
     assert "## [0.1.0] - 2026-02-22" in changelog
     assert "secure Jinja templating support" in changelog
