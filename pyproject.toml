@@ -13,7 +13,7 @@ authors = [{ name = "Jay Townsend" }]
 maintainers = [{ name = "Jay Townsend" }]
 keywords = ["asgi", "async", "flasgo", "framework", "jinja2", "security", "web"]
 classifiers = [
-    "Development Status :: 3 - Beta",
+    "Development Status :: 4 - Beta",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: BSD License",
