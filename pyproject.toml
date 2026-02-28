@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flasgo"
-version = "0.1.0"
+version = "0.2.0"
 description = "Async-first Python web framework with Flask ergonomics and Django-inspired security defaults."
 readme = "README.md"
 requires-python = ">=3.14"
