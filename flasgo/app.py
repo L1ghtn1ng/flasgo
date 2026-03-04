@@ -68,27 +68,35 @@ class RouteAuth:
 
 
 def request() -> Request:
+    """Return the active request for the current handler."""
+
     req = _request_ctx.get()
     if req is None:
-        raise RuntimeError("No active request context.")
+        raise RuntimeError("No active request context. Access flasgo.request only while handling an HTTP request.")
     return req
 
 
 def session() -> Session:
+    """Return the active session for the current handler."""
+
     current = _session_ctx.get()
     if current is None:
-        raise RuntimeError("No active session context.")
+        raise RuntimeError("No active session context. Access flasgo.session only while handling an HTTP request.")
     return current
 
 
 def user() -> User:
+    """Return the active user for the current handler."""
+
     current = _user_ctx.get()
     if current is None:
-        raise RuntimeError("No active user context.")
+        raise RuntimeError("No active user context. Access flasgo.current_user only while handling an HTTP request.")
     return current
 
 
 class Flasgo:
+    """Async-first web application with Flask-style routing and secure defaults."""
+
     def __init__(
         self,
         *,
@@ -134,7 +142,10 @@ class Flasgo:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
-            response = Response.text("Unsupported scope type", status_code=500)
+            response = Response.text(
+                "Unsupported ASGI scope type. Flasgo only handles HTTP requests.",
+                status_code=500,
+            )
             await response.send(send)
             return
 
@@ -167,7 +178,10 @@ class Flasgo:
                 "response-send-failed",
                 req=req,
             )
-            fallback = Response.text("Internal Server Error", status_code=500)
+            fallback = Response.text(
+                "Internal Server Error. Check the application logs for the original failure.",
+                status_code=500,
+            )
             apply_security_headers(fallback, self.security)
             await fallback.send(send, head_only=req.method == "HEAD")
 
@@ -217,7 +231,7 @@ class Flasgo:
     def register_auth_backend(self, name: str, backend: AuthBackend) -> None:
         normalized = name.strip()
         if not normalized:
-            raise ValueError("Auth backend name must not be empty.")
+            raise ValueError("Auth backend name must not be empty. Pass a stable name such as 'default' or 'bearer'.")
         self._auth_backends[normalized] = backend
 
     def authorize(
@@ -227,7 +241,7 @@ class Flasgo:
     ) -> Callable[[Endpoint], Endpoint]:
         backend_name = backend.strip()
         if not backend_name:
-            raise ValueError("Auth backend name must not be empty.")
+            raise ValueError("Auth backend name must not be empty. Pass the name used in register_auth_backend(...).")
 
         def decorator(endpoint: Endpoint) -> Endpoint:
             route_permissions = permissions or (IsAuthenticated(),)
@@ -296,7 +310,9 @@ class Flasgo:
 
     def render_template(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
         if self.templates is None:
-            raise RuntimeError("Templates are not configured. Call configure_templates(...) first.")
+            raise RuntimeError(
+                "Templates are not configured. Call app.configure_templates(...) or pass templates=... first."
+            )
         return self.templates.render(template_name, context)
 
     def configure_static(
@@ -325,6 +341,8 @@ class Flasgo:
         return TestClient(self)
 
     def validate_outbound_url(self, url: str) -> str:
+        """Validate a user-provided outbound URL against the SSRF policy."""
+
         return self.ssrf.validate_url(url)
 
     def _handle_docs_request(self, req: Request) -> Response | None:
@@ -336,10 +354,14 @@ class Flasgo:
         if req.path not in {docs_path, openapi_path}:
             return None
         if req.method not in {"GET", "HEAD"}:
-            return Response.text("Method Not Allowed", status_code=405)
+            return Response.text(
+                "Method Not Allowed. Use GET or HEAD for the documentation endpoints.",
+                status_code=405,
+                headers={"allow": "GET, HEAD"},
+            )
 
         if req.path == openapi_path:
-            return Response.json(self._openapi_spec())
+            return Response.json(self.openapi_spec())
 
         return Response.html(
             _swagger_ui_html(
@@ -359,7 +381,9 @@ class Flasgo:
             },
         )
 
-    def _openapi_spec(self) -> dict[str, Any]:
+    def openapi_spec(self) -> dict[str, Any]:
+        """Return the cached OpenAPI document for the registered routes."""
+
         if self._openapi_cache is not None and not self._openapi_dirty:
             return self._openapi_cache
         spec = build_openapi_spec(
@@ -374,9 +398,9 @@ class Flasgo:
 
     def _validate_security_config(self) -> None:
         if not self.security.secret_key:
-            raise ValueError("SECRET_KEY must be configured.")
+            raise ValueError("SECRET_KEY must be configured. Set it to a long random value before starting Flasgo.")
         if self.security.secret_key == "dev-insecure-secret-change-this":
-            raise ValueError("SECRET_KEY uses an insecure default value.")
+            raise ValueError("SECRET_KEY uses an insecure default value. Replace it with a unique random secret.")
         if not self.settings.DEBUG and len(self.security.secret_key) < 32:
             raise ValueError("SECRET_KEY must be at least 32 characters when DEBUG is False.")
         if self.security.max_request_body_bytes <= 0:
@@ -388,13 +412,13 @@ class Flasgo:
         if self.security.security_failure_window_seconds <= 0:
             raise ValueError("SECURITY_FAILURE_WINDOW_SECONDS must be greater than 0.")
         if not self.settings.SSRF_ALLOWED_SCHEMES:
-            raise ValueError("SSRF_ALLOWED_SCHEMES must not be empty.")
+            raise ValueError("SSRF_ALLOWED_SCHEMES must not be empty. Include at least one scheme such as 'https'.")
         if not self.settings.DOCS_PATH.startswith("/"):
-            raise ValueError("DOCS_PATH must start with '/'.")
+            raise ValueError("DOCS_PATH must start with '/'. Example: '/docs'.")
         if not self.settings.OPENAPI_PATH.startswith("/"):
-            raise ValueError("OPENAPI_PATH must start with '/'.")
+            raise ValueError("OPENAPI_PATH must start with '/'. Example: '/openapi.json'.")
         if self.settings.DOCS_PATH == self.settings.OPENAPI_PATH:
-            raise ValueError("DOCS_PATH and OPENAPI_PATH must be different.")
+            raise ValueError("DOCS_PATH and OPENAPI_PATH must be different so each endpoint has its own URL.")
 
     async def _dispatch(self, req: Request) -> Response:
         if self.security.enforce_allowed_hosts and not host_is_allowed(
@@ -402,14 +426,20 @@ class Flasgo:
         ):
             self._log_security_event(logging.WARNING, "host-check-failed", req=req)
             if self._register_security_failure(req):
-                return Response.text("Too Many Requests", status_code=429)
-            return Response.text("Bad host header", status_code=400)
+                return _security_rate_limit_response()
+            return Response.text(
+                "Invalid Host header. Send a Host value in ALLOWED_HOSTS or update settings.ALLOWED_HOSTS.",
+                status_code=400,
+            )
 
         if self.security.csrf_enabled and not csrf_is_valid(req, self.security):
             self._log_security_event(logging.WARNING, "csrf-check-failed", req=req)
             if self._register_security_failure(req):
-                return Response.text("Too Many Requests", status_code=429)
-            return Response.text("CSRF validation failed", status_code=403)
+                return _security_rate_limit_response()
+            return Response.text(
+                "CSRF validation failed. Send matching CSRF cookie and header values plus a trusted Origin/Referer.",
+                status_code=403,
+            )
 
         docs_response = self._handle_docs_request(req)
         if docs_response is not None:
@@ -421,11 +451,18 @@ class Flasgo:
                 response = to_response(value)
                 return await self._run_after_middleware(req, response)
 
-        match, path_exists = self._match_route(req.path, req.method)
-        if match is None and path_exists:
-            return Response.text("Method Not Allowed", status_code=405)
+        match, allowed_methods = self._match_route(req.path, req.method)
+        if match is None and allowed_methods:
+            return Response.text(
+                f"Method Not Allowed. Use one of: {', '.join(sorted(allowed_methods))}.",
+                status_code=405,
+                headers={"allow": ", ".join(sorted(allowed_methods))},
+            )
         if match is None:
-            return Response.text("Not Found", status_code=404)
+            return Response.text(
+                f"No route matches {req.path!r}. Check the URL or register a handler for this path.",
+                status_code=404,
+            )
 
         auth_response = await self._authorize_request(req, match.endpoint)
         if auth_response is not None:
@@ -455,20 +492,20 @@ class Flasgo:
 
         return endpoint
 
-    def _match_route(self, path: str, method: str) -> tuple[MatchResult | None, bool]:
-        path_exists = False
+    def _match_route(self, path: str, method: str) -> tuple[MatchResult | None, set[str]]:
+        allowed_methods: set[str] = set()
         for route in self._routes:
             result = route.match(path, method)
             if result is not None:
-                return result, True
+                return result, set(route.methods)
             if route.path_matches(path):
-                path_exists = True
-        return None, path_exists
+                allowed_methods.update(route.methods)
+        return None, allowed_methods
 
     async def _handle_error(self, req: Request, exc: Exception) -> Response:
         if isinstance(exc, HTTPException):
             response = Response.text(
-                exc.detail or str(exc.status_code),
+                exc.detail or _status_text(exc.status_code),
                 status_code=exc.status_code,
             )
             response.headers.update({key.lower(): value for key, value in exc.headers.items()})
@@ -482,7 +519,10 @@ class Flasgo:
                 continue
             response = to_response(await _maybe_await(handler(req, exc)))
             return response
-        return Response.text("Internal Server Error", status_code=500)
+        return Response.text(
+            "Internal Server Error. Check the application logs for the original failure.",
+            status_code=500,
+        )
 
     def _load_session(self, req: Request) -> Session:
         token = req.cookies.get(self.security.session_cookie_name)
@@ -527,7 +567,11 @@ class Flasgo:
         backend = self._auth_backends.get(auth.backend)
         if backend is None:
             self._log_security_event(logging.ERROR, "auth-backend-missing", req=req)
-            return Response.text("Auth backend is not configured", status_code=500)
+            return Response.text(
+                f"Authentication backend {auth.backend!r} is not configured. "
+                "Register it with app.register_auth_backend(...).",
+                status_code=500,
+            )
 
         challenge: str | None = None
         try:
@@ -535,8 +579,11 @@ class Flasgo:
         except Exception:
             self._log_security_event(logging.ERROR, "auth-backend-error", req=req)
             if self._register_security_failure(req):
-                return Response.text("Too Many Requests", status_code=429)
-            return Response.text("Unauthorized", status_code=401)
+                return _security_rate_limit_response()
+            return Response.text(
+                "Authentication failed. Provide valid credentials and retry.",
+                status_code=401,
+            )
 
         auth_result = _normalize_auth_identity(authenticated)
         resolved_user = auth_result.user or User.anonymous()
@@ -549,7 +596,7 @@ class Flasgo:
             if not allowed:
                 self._log_security_event(logging.WARNING, "permission-denied", req=req)
                 if self._register_security_failure(req):
-                    return Response.text("Too Many Requests", status_code=429)
+                    return _security_rate_limit_response()
                 return _permission_denied_response(resolved_user, challenge=challenge)
         return None
 
@@ -579,10 +626,10 @@ class Flasgo:
         self._logger.log(
             level,
             "%s method=%s path=%s client=%s",
-            event,
-            req.method,
-            req.path,
-            req.client_ip,
+            _sanitize_log_value(event),
+            _sanitize_log_value(req.method),
+            _sanitize_log_value(req.path),
+            _sanitize_log_value(req.client_ip),
         )
 
     async def _evaluate_permission(
@@ -651,11 +698,44 @@ def _normalize_auth_identity(identity: AuthIdentity) -> AuthResult:
     return AuthResult(user=None, challenge=None)
 
 
+def _status_text(status_code: int) -> str:
+    return {
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        408: "Request Timeout",
+        413: "Payload Too Large",
+        429: "Too Many Requests",
+        500: "Internal Server Error",
+    }.get(status_code, str(status_code))
+
+
+def _sanitize_log_value(value: object | None) -> str:
+    raw = "" if value is None else str(value)
+    return raw.replace("\x00", "\\x00").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _security_rate_limit_response() -> Response:
+    return Response.text(
+        "Too many failed security checks from this client. Wait a moment before retrying.",
+        status_code=429,
+    )
+
+
 def _permission_denied_response(user: User, *, challenge: str | None) -> Response:
     if not user.is_authenticated:
         headers = {"www-authenticate": challenge} if challenge else {}
-        return Response.text("Unauthorized", status_code=401, headers=headers)
-    return Response.text("Forbidden", status_code=403)
+        return Response.text(
+            "Authentication required. Provide valid credentials and retry.",
+            status_code=401,
+            headers=headers,
+        )
+    return Response.text(
+        "Forbidden. The authenticated user does not have permission to access this route.",
+        status_code=403,
+    )
 
 
 async def _maybe_await(value: Any) -> Any:

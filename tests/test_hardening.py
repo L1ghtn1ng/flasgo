@@ -7,7 +7,7 @@ import time
 import pytest
 from flasgo import Flasgo, HTTPException, Request, User
 from flasgo.security import build_set_cookie
-from flasgo.session import SessionSigner, _b64encode, _hmac_digest
+from flasgo.session import SessionSigner, b64encode, hmac_digest
 from flasgo.testing import TestClient
 
 
@@ -97,9 +97,9 @@ def test_build_set_cookie_rejects_unsafe_value_separators(cookie_value: str) -> 
 
 
 def _build_signed_token(signer: SessionSigner, payload: dict[str, object], issued_at: int) -> str:
-    encoded_payload = _b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    encoded_payload = b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     token_payload = f"{encoded_payload}.{issued_at}".encode("ascii")
-    signature = _hmac_digest(signer.secret_key, token_payload)
+    signature = hmac_digest(signer.secret_key, token_payload)
     return f"{encoded_payload}.{issued_at}.{signature}"
 
 

@@ -66,5 +66,10 @@ def test_load_app_exits_for_missing_attr(tmp_path: Path) -> None:
     app_file = tmp_path / "app.py"
     app_file.write_text("value = 1\n", encoding="utf-8")
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="pass `--app` with the correct variable name"):
         cli_module.load_app(str(app_file))
+
+
+def test_load_app_exits_with_helpful_import_error() -> None:
+    with pytest.raises(SystemExit, match="Check that it is on PYTHONPATH and imports cleanly"):
+        cli_module.load_app("does_not_exist.module:app")

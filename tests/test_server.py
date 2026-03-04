@@ -13,7 +13,7 @@ from flasgo import server as server_module
 
 def test_build_reload_command_uses_current_process_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "-m", "example.app"], raising=False)
-    command = server_module._build_reload_command()
+    command = server_module.build_reload_command()
     assert command == "/usr/bin/python3 -m example.app"
 
 
@@ -37,7 +37,7 @@ def test_run_with_reload_spawns_current_command(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(run_process=fake_run_process))
     monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
 
-    server_module._run_with_reload(reload_dirs=[tmp_path])
+    server_module.run_with_reload(reload_dirs=[tmp_path])
 
     assert calls["paths"] == (str(tmp_path.resolve()),)
     assert calls["target"] == "/usr/bin/python3 app.py"

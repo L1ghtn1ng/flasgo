@@ -5,11 +5,15 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default
-from typing import overload
+from typing import TYPE_CHECKING, Any, overload
 from urllib.parse import parse_qs
 
 from .exceptions import HTTPException
 from .types import Receive, Scope
+
+if TYPE_CHECKING:
+    from .auth import User
+    from .session import Session
 
 
 def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
@@ -45,6 +49,8 @@ def _parse_content_type(header_value: str | None) -> tuple[str, dict[str, str]]:
 
 @dataclass(slots=True, frozen=True)
 class UploadedFile:
+    """Uploaded file parsed from a multipart form request."""
+
     name: str
     filename: str
     body: bytes
@@ -60,6 +66,8 @@ class UploadedFile:
 
 
 class FormData(Mapping[str, str]):
+    """Form fields and uploaded files parsed from a request body."""
+
     def __init__(
         self,
         fields: Mapping[str, list[str]] | None = None,
@@ -127,13 +135,19 @@ def _parse_multipart_form(body: bytes, content_type: str) -> FormData:
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body
     )
     if not message.is_multipart():
-        raise HTTPException(400, "Malformed multipart form data")
+        raise HTTPException(
+            400,
+            "Malformed multipart form data. Ensure the request body matches the declared multipart boundary.",
+        )
 
     fields: dict[str, list[str]] = {}
     files: dict[str, list[UploadedFile]] = {}
     for part in message.iter_parts():
         if part.is_multipart():
-            raise HTTPException(400, "Nested multipart form data is not supported")
+            raise HTTPException(
+                400,
+                "Nested multipart form data is not supported. Flatten the upload into standard form-data parts.",
+            )
         if part.get_content_disposition() != "form-data":
             continue
 
@@ -157,13 +171,19 @@ def _parse_multipart_form(body: bytes, content_type: str) -> FormData:
             continue
 
         charset = part.get_content_charset("utf-8") or "utf-8"
-        value = _decode_form_value(payload, charset=charset, error_detail="Invalid multipart form encoding")
+        value = _decode_form_value(
+            payload,
+            charset=charset,
+            error_detail="Invalid multipart form encoding. Use a supported charset such as UTF-8.",
+        )
         fields.setdefault(name, []).append(value)
     return FormData(fields=fields, files=files)
 
 
 @dataclass(slots=True)
 class Request:
+    """HTTP request wrapper exposed to Flasgo handlers."""
+
     scope: Scope
     receive: Receive
     headers: dict[str, str] = field(init=False)
@@ -215,11 +235,11 @@ class Request:
         return str(client[0])
 
     @property
-    def session(self) -> object | None:
+    def session(self) -> Session | None:
         return self.scope.get("session")
 
     @property
-    def user(self) -> object | None:
+    def user(self) -> User | None:
         return self.scope.get("user")
 
     async def body(self) -> bytes:
@@ -234,13 +254,13 @@ class Request:
             message = await self.receive()
             message_type = message.get("type")
             if message_type == "http.disconnect":
-                raise HTTPException(400, "Client disconnected")
+                raise HTTPException(400, "Request body was interrupted because the client disconnected early.")
             if message_type != "http.request":
                 continue
             piece = bytes(message.get("body", b""))
             seen += len(piece)
             if body_limit is not None and seen > body_limit:
-                raise HTTPException(413, "Payload Too Large")
+                raise HTTPException(413, f"Request body exceeds MAX_REQUEST_BODY_BYTES ({body_limit} bytes).")
             chunks.append(piece)
             if not message.get("more_body", False):
                 break
@@ -248,10 +268,24 @@ class Request:
         return self._body
 
     async def text(self, encoding: str = "utf-8") -> str:
-        return (await self.body()).decode(encoding)
+        try:
+            return (await self.body()).decode(encoding)
+        except LookupError as exc:
+            raise HTTPException(400, f"Unsupported text encoding {encoding!r}.") from exc
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                400,
+                f"Request body is not valid {encoding} text. Use the correct encoding or call request.body().",
+            ) from exc
 
-    async def json(self) -> object:
-        return json.loads(await self.body())
+    async def json(self) -> Any:
+        try:
+            return json.loads(await self.text())
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                400,
+                "Malformed JSON request body. Send valid JSON and set Content-Type: application/json.",
+            ) from exc
 
     async def form(self) -> FormData:
         if self._form_loaded:
@@ -263,13 +297,16 @@ class Request:
             decoded = _decode_form_value(
                 await self.body(),
                 charset=charset,
-                error_detail="Invalid form encoding",
+                error_detail="Invalid form encoding. Use a supported charset such as UTF-8.",
             )
             form = FormData(fields=parse_qs(decoded, keep_blank_values=True))
         elif content_type == "multipart/form-data":
             boundary = params.get("boundary")
             if not boundary:
-                raise HTTPException(400, "Missing multipart boundary")
+                raise HTTPException(
+                    400,
+                    "Malformed multipart form data. Include a boundary in the Content-Type header.",
+                )
             form = _parse_multipart_form(await self.body(), self.headers.get("content-type", ""))
         else:
             form = FormData()

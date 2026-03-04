@@ -20,6 +20,8 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 @dataclass(slots=True)
 class Response:
+    """HTTP response container used by Flasgo handlers and middleware."""
+
     body: bytes
     status_code: int = 200
     headers: dict[str, str] = field(default_factory=dict)
@@ -59,12 +61,12 @@ class Response:
         value: str,
         *,
         status_code: int = 200,
-        headers: dict[str, str] | None = None,
+        headers: Headers | None = None,
     ) -> Response:
         return cls(
             body=value.encode("utf-8"),
             status_code=status_code,
-            headers=headers or {},
+            headers=dict(headers or {}),
             content_type="text/plain; charset=utf-8",
         )
 
@@ -74,12 +76,12 @@ class Response:
         value: str,
         *,
         status_code: int = 200,
-        headers: dict[str, str] | None = None,
+        headers: Headers | None = None,
     ) -> Response:
         return cls(
             body=value.encode("utf-8"),
             status_code=status_code,
-            headers=headers or {},
+            headers=dict(headers or {}),
             content_type="text/html; charset=utf-8",
         )
 
@@ -92,7 +94,7 @@ class Response:
         template_dirs: str | Path | Sequence[str | Path] | None = None,
         context: Mapping[str, Any] | None = None,
         status_code: int = 200,
-        headers: dict[str, str] | None = None,
+        headers: Headers | None = None,
     ) -> Response:
         from .templating import JinjaTemplates
 
@@ -112,13 +114,13 @@ class Response:
         value: Any,
         *,
         status_code: int = 200,
-        headers: dict[str, str] | None = None,
+        headers: Headers | None = None,
     ) -> Response:
         payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         return cls(
             body=payload,
             status_code=status_code,
-            headers=headers or {},
+            headers=dict(headers or {}),
             content_type="application/json",
         )
 
@@ -128,7 +130,7 @@ class Response:
         location: str,
         *,
         status_code: int = 302,
-        headers: dict[str, str] | None = None,
+        headers: Headers | None = None,
     ) -> Response:
         response_headers = {"location": location}
         if headers:
@@ -141,10 +143,12 @@ class Response:
         )
 
 
-ResponseValue = Response | str | bytes | dict[str, Any] | list[Any] | tuple[Any, ...] | None
+ResponseValue = Response | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
 
 
 def to_response(value: ResponseValue) -> Response:
+    """Normalize supported handler return values into a :class:`Response`."""
+
     if isinstance(value, Response):
         return value
     if value is None:
@@ -158,7 +162,9 @@ def to_response(value: ResponseValue) -> Response:
         return Response(body=value)
     if isinstance(value, str):
         return Response.text(value)
-    if isinstance(value, (dict, list)):
+    if isinstance(value, Mapping):
+        return Response.json(dict(value))
+    if isinstance(value, list):
         return Response.json(value)
     if isinstance(value, tuple):
         if len(value) == 2:
@@ -167,14 +173,17 @@ def to_response(value: ResponseValue) -> Response:
         if len(value) == 3:
             body, status_code, headers = value
             return _tuple_to_response(body, status_code, headers)
-    msg = f"Unsupported response type: {type(value)!r}"
+    msg = (
+        f"Unsupported response type: {type(value)!r}. "
+        "Return a Response, str, bytes, mapping, list, or a (body, status[, headers]) tuple."
+    )
     raise TypeError(msg)
 
 
 def _tuple_to_response(
     body: Any,
     status_code: int,
-    headers: dict[str, str] | None,
+    headers: Headers | None,
 ) -> Response:
     response = to_response(body if body is not None else b"")
     response.status_code = int(status_code)

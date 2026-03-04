@@ -9,18 +9,24 @@ from dataclasses import dataclass
 from typing import Any
 
 
-def _b64encode(value: bytes) -> str:
+def b64encode(value: bytes) -> str:
+    """Return URL-safe base64 without padding."""
+
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
-def _b64decode(value: str) -> bytes:
+def b64decode(value: str) -> bytes:
+    """Decode URL-safe base64 with optional stripped padding."""
+
     missing_padding = (-len(value)) % 4
     return base64.urlsafe_b64decode(value + ("=" * missing_padding))
 
 
-def _hmac_digest(secret: str, payload: bytes) -> str:
+def hmac_digest(secret: str, payload: bytes) -> str:
+    """Return a URL-safe HMAC-SHA256 digest for a payload."""
+
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
-    return _b64encode(digest)
+    return b64encode(digest)
 
 
 @dataclass(slots=True)
@@ -64,16 +70,16 @@ class SessionSigner:
     def dumps(self, payload: dict[str, Any]) -> str:
         json_payload = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         timestamp = str(int(time.time())).encode("ascii")
-        encoded_payload = _b64encode(json_payload).encode("ascii")
+        encoded_payload = b64encode(json_payload).encode("ascii")
         token_payload = b".".join((encoded_payload, timestamp))
-        signature = _hmac_digest(self.secret_key, token_payload).encode("ascii")
+        signature = hmac_digest(self.secret_key, token_payload).encode("ascii")
         return b".".join((encoded_payload, timestamp, signature)).decode("ascii")
 
     def loads(self, token: str, *, max_age: int) -> dict[str, Any] | None:
         try:
             encoded_payload, timestamp_raw, signature = token.split(".", 2)
             token_payload = f"{encoded_payload}.{timestamp_raw}".encode("ascii")
-            expected = _hmac_digest(self.secret_key, token_payload)
+            expected = hmac_digest(self.secret_key, token_payload)
             if not hmac.compare_digest(signature, expected):
                 return None
 
@@ -84,7 +90,7 @@ class SessionSigner:
             if now - issued_at > max_age:
                 return None
 
-            payload = json.loads(_b64decode(encoded_payload).decode("utf-8"))
+            payload = json.loads(b64decode(encoded_payload).decode("utf-8"))
             if not isinstance(payload, dict):
                 return None
             return payload

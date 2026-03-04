@@ -7,6 +7,7 @@ Flasgo keeps Flask-style routing and a small API surface, but it runs as ASGI an
 - Route decorators stay familiar: `@app.get(...)`, `@app.post(...)`, and Flask-style converters such as `<int:user_id>`.
 - Route handlers can be sync or async.
 - `request.form` becomes `await request.form()`.
+- `await request.json()` and `await request.text()` raise `400` responses with fix-oriented messages when the body is malformed.
 - `redirect(...)` and `jsonify(...)` are available as first-party helpers.
 - The built-in dev server supports `reload=True`, but production should run on an ASGI server such as `uvicorn`.
 - Security defaults are stricter than Flask defaults: host validation, CSRF protection, secure headers, signed sessions, SSRF guard helpers, and no-store caching for non-static responses.
@@ -198,6 +199,7 @@ Notes:
 - Flasgo parses `application/x-www-form-urlencoded` and `multipart/form-data`.
 - `FormData.file(...)` returns an `UploadedFile` with `filename`, `content_type`, `body`, `size`, and `text()`.
 - With CSRF enabled, browser form posts should include the Flasgo CSRF token flow.
+- Unsupported methods return `405 Method Not Allowed` plus an `Allow` header listing the accepted methods.
 
 ## static files
 

@@ -108,3 +108,5 @@ def test_docs_endpoint_rejects_unsafe_method() -> None:
 
     response = client.post("/docs")
     assert response.status_code == 405
+    assert response.headers["allow"] == "GET, HEAD"
+    assert "Use GET or HEAD" in response.text

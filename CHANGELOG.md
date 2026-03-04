@@ -2,6 +2,26 @@
 
 All notable changes to `flasgo` are documented in this file.
 
+## [0.4.0] - 2026-03-04
+
+### Added
+
+- Public helper APIs for OpenAPI generation (`Flasgo.openapi_spec()`), dev-server reload control (`build_reload_command()`, `run_with_reload()`), and session signing utilities (`b64encode()`, `b64decode()`, `hmac_digest()`)
+
+### Changed
+
+- Error responses now return clearer, fix-oriented messages for invalid hosts, CSRF failures, malformed JSON, multipart parsing errors, oversized request bodies, auth failures, unsupported methods, and internal server failures
+- `405 Method Not Allowed` responses now include an `Allow` header for docs and routed endpoints
+- CLI app-loading failures now explain how to fix bad import strings, missing files, and wrong app variable names
+- Public API typing and docstrings were tightened for request/session/user proxies and response helpers
+- README and migration guide were updated to document the clearer parsing and method-handling behavior
+
+### Fixed
+
+- Dev-server and template code now compile cleanly after correcting the template loader exception syntax
+- Security event logging now sanitizes control characters before writing request-derived values to logs
+- Tests now assert the new error wording and public helper names directly
+
 ## [0.3.1] - 2026-02-28
 
 ### Changed

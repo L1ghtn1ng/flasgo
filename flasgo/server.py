@@ -70,6 +70,21 @@ def _reason_phrase(status_code: int) -> str:
     }.get(status_code, "OK")
 
 
+def _simple_error_detail(status_code: int) -> str:
+    return {
+        400: "Bad Request. Check the request line, headers, and body formatting.",
+        401: "Unauthorized. Provide valid credentials and retry.",
+        403: "Forbidden. The request was understood but is not allowed.",
+        404: "Not Found. Check the request URL.",
+        405: "Method Not Allowed. Retry with a supported HTTP method.",
+        408: "Request Timeout. Send the request body more quickly or increase the timeout.",
+        413: "Payload Too Large. Reduce the request body size or increase MAX_REQUEST_BODY_BYTES.",
+        429: "Too Many Requests. Wait a moment before retrying.",
+        431: "Request Header Fields Too Large. Reduce the request header size.",
+        500: "Internal Server Error. Check the application logs for details.",
+    }.get(status_code, _reason_phrase(status_code))
+
+
 async def run_dev_server(
     app: ASGIHandler,
     host: str,
@@ -82,7 +97,7 @@ async def run_dev_server(
     request_read_timeout_seconds: float = 10.0,
 ) -> None:
     if reload and os.environ.get(_RELOAD_ENV) != "true":
-        await asyncio.to_thread(_run_with_reload, reload_dirs=reload_dirs)
+        await asyncio.to_thread(run_with_reload, reload_dirs=reload_dirs)
         return
 
     server = await asyncio.start_server(
@@ -103,17 +118,19 @@ async def run_dev_server(
         await server.serve_forever()
 
 
-def _run_with_reload(
+def run_with_reload(
     *,
     reload_dirs: Sequence[str | Path] | None = None,
 ) -> None:
     try:
         from watchfiles import run_process
     except ImportError as exc:
-        raise RuntimeError("Reload support requires the 'watchfiles' package.") from exc
+        raise RuntimeError(
+            "Reload support requires the 'watchfiles' package. Install project dependencies and retry."
+        ) from exc
 
-    watch_paths = tuple(str(_resolve_reload_dir(path)) for path in (reload_dirs or (Path.cwd(),)))
-    command = _build_reload_command()
+    watch_paths = tuple(str(resolve_reload_dir(path)) for path in (reload_dirs or (Path.cwd(),)))
+    command = build_reload_command()
     previous = os.environ.get(_RELOAD_ENV)
     os.environ[_RELOAD_ENV] = "true"
     try:
@@ -122,7 +139,7 @@ def _run_with_reload(
             *watch_paths,
             target=command,
             target_type="command",
-            callback=_log_reload_changes,
+            callback=log_reload_changes,
             ignore_permission_denied=True,
         )
     finally:
@@ -132,7 +149,7 @@ def _run_with_reload(
             os.environ[_RELOAD_ENV] = previous
 
 
-def _resolve_reload_dir(path: str | Path) -> Path:
+def resolve_reload_dir(path: str | Path) -> Path:
     resolved = Path(path).expanduser().resolve()
     if not resolved.exists():
         msg = f"Reload directory does not exist: {resolved}"
@@ -143,16 +160,18 @@ def _resolve_reload_dir(path: str | Path) -> Path:
     return resolved
 
 
-def _build_reload_command() -> str:
+def build_reload_command() -> str:
     argv = list(getattr(sys, "orig_argv", []))
     if not argv:
         argv = [sys.executable, *sys.argv]
     if len(argv) < 2 and not Path(argv[0]).exists():
-        raise RuntimeError("Reload support requires running Flasgo from a Python script or module.")
+        raise RuntimeError(
+            "Reload support requires starting Flasgo from a Python script or module import, not an interactive shell."
+        )
     return shlex.join(argv)
 
 
-def _log_reload_changes(changes: ReloadChanges) -> None:
+def log_reload_changes(changes: ReloadChanges) -> None:
     changed_paths = ", ".join(sorted(path for _, path in changes))
     if changed_paths:
         print(f"Flasgo reload triggered by changes in: {changed_paths}")
@@ -258,7 +277,7 @@ async def _handle_connection(
 
 
 async def _write_simple_response(writer: asyncio.StreamWriter, status: int) -> None:
-    body = _reason_phrase(status).encode("utf-8")
+    body = _simple_error_detail(status).encode("utf-8")
     header = (
         f"HTTP/1.1 {status} {_reason_phrase(status)}\r\n"
         "Content-Type: text/plain; charset=utf-8\r\n"

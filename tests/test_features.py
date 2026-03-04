@@ -80,7 +80,7 @@ def test_form_parsing_rejects_missing_multipart_boundary() -> None:
     )
 
     assert response.status_code == 400
-    assert response.text == "Missing multipart boundary"
+    assert "Include a boundary in the Content-Type header" in response.text
 
 
 def test_static_files_serve_assets_with_caching_headers(tmp_path: Path) -> None:

@@ -11,6 +11,8 @@ from .app import Flasgo
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Create the Flasgo CLI argument parser."""
+
     parser = argparse.ArgumentParser(prog="flasgo")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -38,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the Flasgo CLI entrypoint."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
     handler = args.handler
@@ -59,20 +63,39 @@ def _run_command(args: argparse.Namespace) -> int:
 
 
 def load_app(target: str, *, app_name: str = "app") -> Flasgo:
+    """Load a :class:`Flasgo` app from a file path or import string."""
+
     if ":" in target:
         module_path, attr_name = target.split(":", 1)
-        module = importlib.import_module(module_path)
+        if not module_path.strip():
+            raise SystemExit("Import target must include a module path before ':'. Example: package.module:app")
+        try:
+            module = importlib.import_module(module_path)
+        except Exception as exc:
+            raise SystemExit(
+                f"Could not import module '{module_path}'. Check that it is on PYTHONPATH and imports cleanly. "
+                f"Original error: {exc}"
+            ) from exc
         resolved_name = attr_name.strip() or app_name
     elif target.endswith(".py"):
         module = _load_module_from_path(Path(target))
         resolved_name = app_name
     else:
-        module = importlib.import_module(target)
+        try:
+            module = importlib.import_module(target)
+        except Exception as exc:
+            raise SystemExit(
+                f"Could not import module '{target}'. Check that it is on PYTHONPATH and imports cleanly. "
+                f"Original error: {exc}"
+            ) from exc
         resolved_name = app_name
 
     candidate = getattr(module, resolved_name, None)
     if not isinstance(candidate, Flasgo):
-        msg = f"Target '{target}' did not resolve to a Flasgo app named '{resolved_name}'."
+        msg = (
+            f"Target '{target}' did not resolve to a Flasgo app named '{resolved_name}'. "
+            f"Define `Flasgo()` as `{resolved_name}` or pass `--app` with the correct variable name."
+        )
         raise SystemExit(msg)
     return candidate
 
@@ -80,16 +103,24 @@ def load_app(target: str, *, app_name: str = "app") -> Flasgo:
 def _load_module_from_path(path: Path) -> ModuleType:
     resolved = path.expanduser().resolve()
     if not resolved.exists():
-        raise SystemExit(f"Python file not found: {resolved}")
+        raise SystemExit(
+            f"Python file not found: {resolved}. Pass an existing file or an import string like package.module:app."
+        )
     if resolved.suffix != ".py":
-        raise SystemExit(f"Expected a .py file path, got: {resolved}")
+        raise SystemExit(f"Expected a .py file path, got: {resolved}. Use package.module:app for module imports.")
     module_name = f"_flasgo_cli_{resolved.stem}_{abs(hash(resolved))}"
     spec = importlib.util.spec_from_file_location(module_name, resolved)
     if spec is None or spec.loader is None:
-        raise SystemExit(f"Could not load module from: {resolved}")
+        raise SystemExit(f"Could not load module from: {resolved}. Check that the file is readable and valid Python.")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise SystemExit(
+            f"Could not import Flasgo app from {resolved}. Fix the import error in that file and retry. "
+            f"Original error: {exc}"
+        ) from exc
     return module
 
 

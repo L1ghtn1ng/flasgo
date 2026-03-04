@@ -169,6 +169,7 @@ uv run pytest
 - `Flasgo.register_auth_backend`, `Flasgo.authorize`
 - `Flasgo.configure_templates`, `Flasgo.render_template`
 - `Flasgo.configure_static`, `Flasgo.test_client`
+- `Flasgo.openapi_spec`
 - Auth helpers: `bearer_token_backend`, `extract_bearer_token`
 - Templating helpers: `JinjaTemplates`, `render_template`, `Response.template`
 - Request helpers: `await request.form()`, `UploadedFile`
@@ -250,6 +251,8 @@ async def signup(request: Request) -> dict[str, object]:
 
 `await request.form()` returns a `FormData` object with `get`, `getlist`, `file`, and `filelist`.
 
+When request parsing fails, Flasgo returns actionable `400` responses. For example, invalid JSON from `await request.json()` tells the caller to send valid JSON with `Content-Type: application/json`, and malformed multipart requests explain that the boundary/header is missing.
+
 ## Static files
 
 You can register static assets at app construction time or later:
@@ -325,6 +328,7 @@ Auth behavior:
 
 - Unauthenticated requests are denied with `401 Unauthorized`.
 - Authenticated requests without permission are denied with `403 Forbidden`.
+- `405 Method Not Allowed` responses include an `Allow` header so clients can retry with a supported method.
 
 ## SSRF protection helpers (CWE-918)
 

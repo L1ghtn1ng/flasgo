@@ -67,6 +67,8 @@ def test_method_not_allowed() -> None:
     response = client.post("/hello")
 
     assert response.status_code == 405
+    assert response.headers["allow"] == "GET, HEAD"
+    assert "Use one of: GET, HEAD." in response.text
 
 
 def test_invalid_host_is_rejected() -> None:
@@ -80,6 +82,7 @@ def test_invalid_host_is_rejected() -> None:
     response = client.get("/", headers={"host": "evil.example"})
 
     assert response.status_code == 400
+    assert "ALLOWED_HOSTS" in response.text
 
 
 def test_security_headers_applied() -> None:
@@ -112,6 +115,7 @@ def test_csrf_rejects_missing_token_on_post() -> None:
     response = client.post("/submit")
 
     assert response.status_code == 403
+    assert "matching CSRF cookie and header values" in response.text
 
 
 def test_csrf_accepts_double_submit_token() -> None:
@@ -219,6 +223,7 @@ def test_auth_and_current_user_context_with_permissions() -> None:
 
     denied = client.get("/whoami")
     assert denied.status_code == 401
+    assert "Provide valid credentials" in denied.text
 
     allowed = client.get("/whoami", headers={"x-user": "alice"})
     assert allowed.status_code == 200
@@ -226,6 +231,7 @@ def test_auth_and_current_user_context_with_permissions() -> None:
 
     no_scope = client.get("/admin", headers={"x-user": "bob", "x-scopes": "read"})
     assert no_scope.status_code == 403
+    assert "does not have permission" in no_scope.text
 
     with_scope = client.get("/admin", headers={"x-user": "carol", "x-scopes": "admin,read"})
     assert with_scope.status_code == 200
@@ -323,6 +329,22 @@ def test_request_body_limit_returns_413() -> None:
     client = TestClient(app)
     response = client.post("/echo", body=b"12345")
     assert response.status_code == 413
+    assert "MAX_REQUEST_BODY_BYTES" in response.text
+
+
+def test_invalid_json_returns_helpful_400() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/json")
+    async def parse_json(request: Request) -> dict[str, object]:
+        payload = await request.json()
+        return {"payload": payload}
+
+    client = TestClient(app)
+    response = client.post("/json", body=b"{not-json}", headers={"content-type": "application/json"})
+
+    assert response.status_code == 400
+    assert "Malformed JSON request body" in response.text
 
 
 def test_security_failures_are_rate_limited() -> None:
@@ -361,6 +383,30 @@ def test_security_event_logging_for_bad_host(caplog: pytest.LogCaptureFixture) -
 
     assert response.status_code == 400
     assert any("host-check-failed" in msg for msg in caplog.messages)
+
+
+def test_security_event_logging_sanitizes_control_characters(caplog: pytest.LogCaptureFixture) -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False, "LOG_SECURITY_EVENTS": True})
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.disconnect"}
+
+    req = Request(
+        scope={
+            "type": "http",
+            "method": "GET\r\nFORGED",
+            "path": "/bad\r\npath",
+            "headers": [],
+            "client": ("127.0.0.1\r\nFORGED", 5000),
+        },
+        receive=receive,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="flasgo.security"):
+        app._log_security_event(logging.WARNING, "host-check-failed\r\nforged", req=req)
+
+    assert any("\\r\\n" in message for message in caplog.messages)
+    assert all("\r" not in message and "\n" not in message for message in caplog.messages)
 
 
 def test_bearer_token_backend_helper() -> None:
@@ -410,6 +456,7 @@ def test_auth_backend_exception_fails_closed() -> None:
     client = TestClient(app)
     response = client.get("/private")
     assert response.status_code == 401
+    assert "Provide valid credentials" in response.text
 
 
 def test_register_auth_backend_rejects_empty_name() -> None:
