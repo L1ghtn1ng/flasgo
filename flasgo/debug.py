@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import platform
 import traceback
@@ -10,6 +12,13 @@ from .response import Response
 
 
 class Debug:
+    """
+    Provides debug error pages for template errors during development.
+
+    When DEBUG is enabled, renders detailed error pages for Jinja2 template
+    errors including the stack trace, request details, and environment info.
+    """
+
     @staticmethod
     def render_template_debug_error(req: Request, exc: Exception, debug: bool) -> Response | None:
         if not debug:
@@ -20,13 +29,13 @@ class Debug:
         exc_info = (type(exc), exc, exc.__traceback__)
         stack_trace = "".join(traceback.format_exception(*exc_info))
 
-        template_name = getattr(exc, "filename", None) or getattr(exc, "name", None) or "Unknown"
-        lineno = getattr(exc, "lineno", None)
+        template_name: str = getattr(exc, "filename", None) or getattr(exc, "name", None) or "Unknown"
+        lineno: int | None = getattr(exc, "lineno", None)
 
         debug_template_path = Path(__file__).parent / "debug_templates" / "debug_error.html"
         template_content = debug_template_path.read_text()
 
-        safe_environ = {
+        safe_environ: dict[str, str] = {
             k: v
             for k, v in os.environ.items()
             if k.startswith(("PATH", "PYTHON", "LANG", "LC_", "HOME", "USER", "SHELL", "TERM"))
