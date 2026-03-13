@@ -18,6 +18,7 @@ from .auth import (
     PermissionLike,
     User,
 )
+from .debug import Debug
 from .exceptions import HTTPException
 from .openapi import build_openapi_spec
 from .request import Request
@@ -445,6 +446,10 @@ class Flasgo:
         if docs_response is not None:
             return docs_response
 
+        debug_css_response = Debug.handle_debug_css(req, self.settings.DEBUG)
+        if debug_css_response is not None:
+            return debug_css_response
+
         for fn in self._before:
             value = await _maybe_await(fn(req))
             if value is not None:
@@ -510,6 +515,10 @@ class Flasgo:
             )
             response.headers.update({key.lower(): value for key, value in exc.headers.items()})
             return response
+
+        debug_response = Debug.render_template_debug_error(req, exc, self.settings.DEBUG)
+        if debug_response is not None:
+            return debug_response
 
         self._log_security_event(logging.ERROR, "unhandled-exception", req=req)
 

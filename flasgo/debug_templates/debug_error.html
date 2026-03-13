@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ error_type }}</title>
+    <link rel="stylesheet" href="/__flasgo_debug__/debug_error.css" />
+  </head>
+  <body>
+    <div class="frame">
+      <div class="header">
+        <h1 class="exception-title">{{ error_type }}</h1>
+        <p class="exception-message">{{ error_message }}</p>
+      </div>
+      <div class="content">
+        <div class="details">
+          <div class="detail-block">
+            <div class="location">
+              Template: <strong>{{ template_name }}</strong>{% if lineno %} at line <strong>{{ lineno }}</strong>{% endif %}
+            </div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-header">Request</div>
+            <div class="detail-content">
+              <div class="detail-row">
+                <span class="detail-label">Method:</span>
+                <span class="detail-value">{{ request_method }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">URL:</span>
+                <span class="detail-value">{{ request_path }}</span>
+              </div>
+            </div>
+          </div>
+            <div class="detail-block">
+            <div class="detail-header">System</div>
+            <div class="detail-content">
+              <div class="detail-row">
+                <span class="detail-label">Platform:</span>
+                <span class="detail-value">{{ platform }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">PID:</span>
+                <span class="detail-value">{{ pid }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="detail-block">
+            <div class="detail-header">Environment</div>
+            <pre class="detail-content trace">{% for k, v in environ.items() %}{{ k }}={{ v }}
+{% endfor %}</pre>
+          </div>
+          <div class="detail-block">
+            <div class="detail-header">Stack Trace</div>
+            <pre class="detail-content trace">{{ stack_trace | escape }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
