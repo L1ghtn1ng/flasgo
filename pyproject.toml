@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flasgo"
-version = "0.4.0"
+version = "0.4.1"
 description = "Async-first Python web framework with Flask ergonomics and Django-inspired security defaults."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -43,7 +43,7 @@ flasgo = "flasgo.cli:main"
 [dependency-groups]
 dev = [
   "pytest==9.0.2",
-  "ruff==0.15.5",
+  "ruff==0.15.6",
   "ty==0.0.22",
 ]
 
@@ -53,7 +53,13 @@ target-version = "py314"
 src = ["flasgo", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+select = ["E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "ASYNC",
+    "RUF"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

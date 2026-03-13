@@ -2,6 +2,21 @@
 
 All notable changes to `flasgo` are documented in this file.
 
+## [0.4.1] - 2026-03-13
+
+### Added
+
+- Debug-mode template failures now render a dedicated HTML error page with richer traceback and environment details to improve local development diagnostics (`#20`)
+
+### Changed
+
+- Debug test coverage now uses the built-in `TestClient` consistently, and templating coverage now includes custom template test registration scenarios
+- Dependency updates (`#15`, `#16`, `#17`, `#18`, `#19`, `#21`, `#22`, `#23`, `#24`, `#25`): bumped `ty` to `0.0.21`, `ruff` to `0.15.5`, `astral-sh/setup-uv` to `7.4.0`, `github/codeql-action` to `4.32.6`, `step-security/harden-runner` to `2.15.1`, `actions/dependency-review-action` to `4.9.0`, and `actions/upload-artifact` to `7.0.0`
+
+### Fixed
+
+- Template test registration now keeps custom Jinja test callables correctly typed when they are attached to the environment
+
 ## [0.4.0] - 2026-03-04
 
 ### Added
