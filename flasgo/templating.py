@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 from jinja2 import BaseLoader, StrictUndefined, Template, TemplateNotFound, select_autoescape
 from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -119,7 +119,7 @@ def create_template_environment(
     if filters:
         environment.filters.update(filters)
     if tests:
-        environment.tests.update(tests)
+        cast(dict[str, Callable[..., Any]], environment.tests).update(tests)
     return environment
 
 

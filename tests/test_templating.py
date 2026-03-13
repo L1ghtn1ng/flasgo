@@ -96,6 +96,18 @@ def test_environment_sandbox_blocks_unsafe_attribute_access(tmp_path: Path) -> N
         template.render()
 
 
+def test_environment_registers_custom_template_tests(tmp_path: Path) -> None:
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "custom-test.html").write_text("{{ user is admin }}", encoding="utf-8")
+
+    environment = create_template_environment(template_dir, tests={"admin": lambda value: value == "alice"})
+    template = environment.get_template("custom-test.html")
+
+    assert template.render(user="alice") == "True"
+    assert template.render(user="bob") == "False"
+
+
 def test_loader_is_a_jinja_base_loader(tmp_path: Path) -> None:
     template_dir = tmp_path / "templates"
     template_dir.mkdir()
