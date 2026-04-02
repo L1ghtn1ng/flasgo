@@ -44,7 +44,7 @@ flasgo = "flasgo.cli:main"
 dev = [
   "pytest==9.0.2",
   "ruff==0.15.8",
-  "ty==0.0.25",
+  "ty==0.0.27",
 ]
 
 [tool.ruff]
