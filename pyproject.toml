@@ -43,7 +43,7 @@ flasgo = "flasgo.cli:main"
 [dependency-groups]
 dev = [
   "pytest==9.0.2",
-  "ruff==0.15.7",
+  "ruff==0.15.8",
   "ty==0.0.25",
 ]
 
