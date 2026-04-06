@@ -1,5 +1,5 @@
 # Flasgo
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/L1ghtn1ng/flasgo)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/L1ghtn1ng/flasgo) [![PyPI version](https://badge.fury.io/py/flasgo.svg)](https://badge.fury.io/py/flasgo)
 
 Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
