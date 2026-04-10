@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-    "uvicorn[standard]==0.42.0",
+    "uvicorn[standard]==0.44.0",
     "Jinja2==3.1.6",
     "watchfiles==1.1.1",
 ]
