@@ -49,7 +49,7 @@ def test_docs_endpoint_escapes_settings_in_html_and_javascript() -> None:
     app = Flasgo(
         settings={
             "ENABLE_DOCS": True,
-            "API_TITLE": '</title><img src=x onerror=alert(1)>',
+            "API_TITLE": "</title><img src=x onerror=alert(1)>",
             "OPENAPI_PATH": '/openapi.json";alert(1);//',
         }
     )

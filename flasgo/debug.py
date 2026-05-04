@@ -41,17 +41,21 @@ class Debug:
             if k.startswith(("PATH", "PYTHON", "LANG", "LC_", "HOME", "USER", "SHELL", "TERM"))
         }
 
-        html = Environment(autoescape=True).from_string(template_content).render(
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            template_name=template_name,
-            lineno=lineno,
-            stack_trace=stack_trace,
-            request_method=req.method,
-            request_path=req.path,
-            environ=safe_environ,
-            platform=platform.platform(),
-            pid=os.getpid(),
+        html = (
+            Environment(autoescape=True)
+            .from_string(template_content)
+            .render(
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                template_name=template_name,
+                lineno=lineno,
+                stack_trace=stack_trace,
+                request_method=req.method,
+                request_path=req.path,
+                environ=safe_environ,
+                platform=platform.platform(),
+                pid=os.getpid(),
+            )
         )
         return Response.html(html, status_code=500)
 
