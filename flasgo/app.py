@@ -27,6 +27,7 @@ from .ratelimit import (
     RateLimiter,
     build_rate_limit_response,
     endpoint_rate_limits,
+    rate_limit,
     rate_limit_success_headers,
 )
 from .request import Request
@@ -271,8 +272,6 @@ class Flasgo:
         scope: str | None = None,
         key_func: Callable[[Request], str | None] | None = None,
     ) -> Callable[[Endpoint], Endpoint]:
-        from .ratelimit import rate_limit
-
         return rate_limit(requests, per=per, scope=scope, key_func=key_func)
 
     def add_route(
@@ -505,12 +504,16 @@ class Flasgo:
 
     async def _check_rate_limits(self, req: Request, endpoint: Endpoint) -> dict[str, str] | Response:
         headers: dict[str, str] = {}
-        for index, rule in enumerate(endpoint_rate_limits(endpoint)):
-            decision = await self._rate_limiter.check(
-                rule,
-                req,
-                endpoint_id=f"{id(endpoint)}:{index}",
-            )
+        rules_list = list(endpoint_rate_limits(endpoint))
+        if not rules_list:
+            return headers
+
+        # Check all rules atomically using batch method
+        rules_with_ids = [(rule, f"{id(endpoint)}:{index}") for index, rule in enumerate(rules_list)]
+        decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
+
+        # Process decisions
+        for decision in decisions:
             if not decision.allowed:
                 self._log_security_event(logging.WARNING, "rate-limit-exceeded", req=req)
                 return build_rate_limit_response(decision)

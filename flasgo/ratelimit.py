@@ -71,6 +71,7 @@ class RateLimiter:
             request_times = self._buckets.setdefault(bucket_key, deque())
             self._drop_expired_requests(request_times, rule=rule, now=now)
 
+            # Read-only evaluation: check if request would be allowed
             if len(request_times) >= rule.requests:
                 retry_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
                 return RateLimitDecision(
@@ -81,6 +82,7 @@ class RateLimiter:
                     retry_after=retry_after,
                 )
 
+            # Request is allowed - now mutate state by appending timestamp
             request_times.append(now)
             remaining = max(0, rule.requests - len(request_times))
             reset_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
@@ -91,6 +93,84 @@ class RateLimiter:
                 reset_after=reset_after,
                 retry_after=0,
             )
+
+    async def check_batch(
+        self,
+        rules: list[tuple[RateLimitRule, str]],
+        req: Request,
+    ) -> list[RateLimitDecision]:
+        """Check multiple rate limit rules atomically.
+
+        Performs read-only evaluation for all rules first, and only appends
+        timestamps if every rule would allow the request. This prevents earlier
+        passing rules from consuming quota if a later rule denies.
+
+        Args:
+            rules: List of (rule, endpoint_id) tuples to check
+            req: The incoming request
+
+        Returns:
+            List of RateLimitDecision objects, one per rule
+        """
+        if not rules:
+            return []
+
+        now = time.monotonic()
+
+        async with self._lock:
+            if len(self._buckets) > self.max_keys:
+                self._prune(now)
+
+            # Phase 1: Read-only evaluation for all rules
+            evaluations = []
+            for rule, endpoint_id in rules:
+                client_key = _rate_limit_key(rule, req)
+                scope = rule.scope or endpoint_id
+                bucket_key = (scope, client_key)
+
+                request_times = self._buckets.setdefault(bucket_key, deque())
+                self._drop_expired_requests(request_times, rule=rule, now=now)
+
+                if len(request_times) >= rule.requests:
+                    retry_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
+                    evaluations.append((
+                        bucket_key,
+                        rule,
+                        request_times,
+                        RateLimitDecision(
+                            allowed=False,
+                            limit=rule.requests,
+                            remaining=0,
+                            reset_after=retry_after,
+                            retry_after=retry_after,
+                        ),
+                    ))
+                else:
+                    reset_after = _seconds_until_reset(request_times[0], rule=rule, now=now) if request_times else 0
+                    remaining = max(0, rule.requests - len(request_times) - 1)  # -1 for the request we're about to add
+                    evaluations.append((
+                        bucket_key,
+                        rule,
+                        request_times,
+                        RateLimitDecision(
+                            allowed=True,
+                            limit=rule.requests,
+                            remaining=remaining,
+                            reset_after=reset_after,
+                            retry_after=0,
+                        ),
+                    ))
+
+            # Phase 2: Check if any rule denied
+            all_allowed = all(decision.allowed for _, _, _, decision in evaluations)
+
+            # Phase 3: If all allowed, append timestamps atomically
+            if all_allowed:
+                for _bucket_key, _rule, request_times, _ in evaluations:
+                    request_times.append(now)
+
+            # Return decisions
+            return [decision for _, _, _, decision in evaluations]
 
     def _drop_expired_requests(
         self,
@@ -174,7 +254,7 @@ def _rate_limit_headers(decision: RateLimitDecision) -> dict[str, str]:
 def _rate_limit_key(rule: RateLimitRule, req: Request) -> str:
     if rule.key_func is not None:
         key = rule.key_func(req)
-        if key:
+        if key is not None:
             return str(key)
     return req.client_ip or "unknown"
 
