@@ -13,6 +13,7 @@ from flasgo import (
     bearer_token_backend,
     current_user,
     jsonify,
+    rate_limit,
     request,
 )
 from flasgo.app import session
@@ -54,6 +55,100 @@ def test_flask_style_route_params() -> None:
 
     assert response.status_code == 201
     assert response.json() == {"user_id": 42}
+
+
+def test_ratelimit_decorator_blocks_client_ip_and_adds_retry_headers() -> None:
+    app = Flasgo()
+    calls = 0
+
+    @app.get("/limited")
+    @app.ratelimit(2, per=60)
+    def limited() -> str:
+        nonlocal calls
+        calls += 1
+        return "ok"
+
+    client = TestClient(app)
+
+    first = client.get("/limited")
+    second = client.get("/limited")
+    blocked = client.get("/limited")
+
+    assert first.status_code == 200
+    assert first.headers["ratelimit-limit"] == "2"
+    assert first.headers["ratelimit-remaining"] == "1"
+    assert second.status_code == 200
+    assert second.headers["ratelimit-remaining"] == "0"
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"].isdigit()
+    assert blocked.headers["ratelimit-remaining"] == "0"
+    assert blocked.json() == {
+        "error": "too_many_requests",
+        "detail": "Too many requests from this client. Wait before retrying.",
+    }
+    assert calls == 2
+
+
+def test_ratelimit_scope_can_cover_multiple_endpoints() -> None:
+    app = Flasgo()
+
+    @app.get("/one")
+    @rate_limit(2, per=60, scope="shared-api")
+    def one() -> str:
+        return "one"
+
+    @app.get("/two")
+    @rate_limit(2, per=60, scope="shared-api")
+    def two() -> str:
+        return "two"
+
+    client = TestClient(app)
+
+    assert client.get("/one").status_code == 200
+    assert client.get("/two").status_code == 200
+    blocked = client.get("/one")
+
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"].isdigit()
+
+
+def test_ratelimit_key_func_separates_clients() -> None:
+    app = Flasgo()
+
+    @app.get("/by-key")
+    @app.ratelimit(1, per=60, key_func=lambda req: req.headers.get("x-api-key"))
+    def by_key() -> str:
+        return "ok"
+
+    client = TestClient(app)
+
+    assert client.get("/by-key", headers={"x-api-key": "alpha"}).status_code == 200
+    assert client.get("/by-key", headers={"x-api-key": "alpha"}).status_code == 429
+    assert client.get("/by-key", headers={"x-api-key": "beta"}).status_code == 200
+
+
+def test_ratelimit_key_func_can_use_authenticated_user() -> None:
+    app = Flasgo()
+
+    def header_backend(req: Request) -> User | None:
+        user_id = req.headers.get("x-user")
+        if not user_id:
+            return None
+        return User(id=user_id, is_authenticated=True)
+
+    app.register_auth_backend("headers", header_backend)
+
+    @app.get("/per-user")
+    @app.ratelimit(1, per=60, key_func=lambda req: req.user.id if req.user else req.client_ip)
+    @app.authorize(IsAuthenticated(), backend="headers")
+    def per_user() -> str:
+        return "ok"
+
+    client = TestClient(app)
+
+    assert client.get("/per-user", headers={"x-user": "alice"}).status_code == 200
+    assert client.get("/per-user", headers={"x-user": "alice"}).status_code == 429
+    assert client.get("/per-user", headers={"x-user": "bob"}).status_code == 200
 
 
 def test_method_not_allowed() -> None:

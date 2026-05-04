@@ -23,6 +23,12 @@ from .auth import (
 from .debug import Debug
 from .exceptions import HTTPException
 from .openapi import build_openapi_spec
+from .ratelimit import (
+    RateLimiter,
+    build_rate_limit_response,
+    endpoint_rate_limits,
+    rate_limit_success_headers,
+)
 from .request import Request
 from .response import Response, ResponseValue, to_response
 from .routing import Endpoint, MatchResult, Route
@@ -121,6 +127,7 @@ class Flasgo:
         self._session_signer = SessionSigner(self.security.secret_key)
         self._auth_backends: dict[str, AuthBackend] = {"default": _default_auth_backend}
         self._route_auth: dict[Endpoint, RouteAuth] = {}
+        self._rate_limiter = RateLimiter()
         self._openapi_cache: dict[str, Any] | None = None
         self._openapi_dirty = True
         self._security_failures: dict[str, tuple[float, int]] = {}
@@ -255,6 +262,18 @@ class Flasgo:
             return endpoint
 
         return decorator
+
+    def ratelimit(
+        self,
+        requests: int,
+        *,
+        per: float,
+        scope: str | None = None,
+        key_func: Callable[[Request], str | None] | None = None,
+    ) -> Callable[[Endpoint], Endpoint]:
+        from .ratelimit import rate_limit
+
+        return rate_limit(requests, per=per, scope=scope, key_func=key_func)
 
     def add_route(
         self,
@@ -475,9 +494,28 @@ class Flasgo:
         if auth_response is not None:
             return auth_response
 
+        rate_limit_result = await self._check_rate_limits(req, match.endpoint)
+        if isinstance(rate_limit_result, Response):
+            return await self._run_after_middleware(req, rate_limit_result)
+
         raw_response = await self._call_endpoint(req, match)
         response = to_response(raw_response)
+        response.headers.update(rate_limit_result)
         return await self._run_after_middleware(req, response)
+
+    async def _check_rate_limits(self, req: Request, endpoint: Endpoint) -> dict[str, str] | Response:
+        headers: dict[str, str] = {}
+        for index, rule in enumerate(endpoint_rate_limits(endpoint)):
+            decision = await self._rate_limiter.check(
+                rule,
+                req,
+                endpoint_id=f"{id(endpoint)}:{index}",
+            )
+            if not decision.allowed:
+                self._log_security_event(logging.WARNING, "rate-limit-exceeded", req=req)
+                return build_rate_limit_response(decision)
+            headers.update(rate_limit_success_headers(decision))
+        return headers
 
     async def _run_after_middleware(self, req: Request, response: Response) -> Response:
         current = response
