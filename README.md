@@ -148,10 +148,47 @@ Put a reverse proxy/load balancer in front (Caddy, Cloudflare, etc.) for TLS ter
 - Static file path traversal and symlink escape protections.
 - Request body/head limits and read timeouts in the built-in dev server.
 - Optional per-client throttling for repeated security failures (`429`).
+- Per-route rate limiting with `@app.ratelimit(...)` / `@rate_limit(...)`, using the ASGI client IP by default.
 - Security event logging for host/CSRF/authz denials.
 - Hardened headers (`CSP`, `HSTS`, `X-Frame-Options`, `Referrer-Policy`, etc.).
 
 These defaults are intended to help teams avoid common OWASP Top 10 2025 failure modes around broken access control, cryptographic failures, security misconfiguration, software and data integrity issues, and SSRF.
+
+## Rate limiting
+
+Use `@app.ratelimit(requests, per=seconds)` on any route that needs abuse protection. Flasgo uses an in-process sliding-window counter keyed by the direct ASGI client IP address by default, returns `429 Too Many Requests` without running the endpoint body, and includes `Retry-After`, `RateLimit-*`, and `X-RateLimit-*` headers so clients know when to retry.
+
+```python
+from flasgo import Flasgo, rate_limit
+
+app = Flasgo()
+
+@app.post("/login")
+@app.ratelimit(5, per=60)
+def login():
+    return {"ok": True}
+
+@app.get("/reports")
+@rate_limit(20, per=60, scope="expensive-reports")
+def reports():
+    return {"reports": []}
+
+@app.get("/report-summary")
+@rate_limit(20, per=60, scope="expensive-reports")
+def report_summary():
+    return {"summary": []}
+```
+
+Routes with the same `scope` share one quota, which is useful when several endpoints perform the same expensive operation. For authenticated APIs, pass a `key_func` to limit by a stable user or API-key identity instead of only by IP:
+
+```python
+@app.get("/me")
+@app.ratelimit(100, per=60, key_func=lambda req: req.user.id if req.user else req.client_ip)
+def me():
+    return {"ok": True}
+```
+
+The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. In multi-process or multi-host production deployments, use a shared external limiter at the edge or a future shared-storage backend so all workers enforce the same quota.
 
 ## Developer commands
 
@@ -161,12 +198,31 @@ uv run ty check
 uv run pytest
 ```
 
+## Codebase guide
+
+Flasgo keeps each framework concern in a small module so new contributors can change one area without needing to understand the whole project at once:
+
+- `flasgo/app.py`: ASGI entrypoint, request dispatch, middleware, routing integration, sessions, auth checks, rate-limit enforcement, and error handling.
+- `flasgo/routing.py`: Flask-style path parsing and route matching.
+- `flasgo/request.py`: request headers, cookies, query strings, body parsing, JSON, and forms.
+- `flasgo/response.py`: response objects, response coercion, redirects, JSON, templates, and header validation.
+- `flasgo/security.py`: security configuration, CSRF, allowed hosts, secure cookies, and default security headers.
+- `flasgo/ratelimit.py`: route decorator metadata and the in-process sliding-window limiter.
+- `flasgo/auth.py`: users, auth backends, permissions, and bearer-token helpers.
+- `flasgo/session.py`: signed session serialization.
+- `flasgo/staticfiles.py`: static file resolution and safe file serving.
+- `flasgo/templating.py`: Jinja environment setup and template loading protections.
+- `flasgo/testing.py`: synchronous and async ASGI test client.
+
+When adding a feature, prefer the existing pattern: keep public decorators on `Flasgo`, keep standalone helpers importable from `flasgo`, add focused tests beside related behavior, and run the three developer commands above before handing off.
+
 ## API surface (initial)
 
 - CLI: `flasgo run app.py --reload`, `flasgo run package.module:app --reload`
 - `Flasgo.route`, `Flasgo.get`, `Flasgo.post`, `Flasgo.put`, `Flasgo.patch`, `Flasgo.delete`
 - `Flasgo.before_request`, `Flasgo.after_request`, `Flasgo.errorhandler`
 - `Flasgo.register_auth_backend`, `Flasgo.authorize`
+- `Flasgo.ratelimit`, `rate_limit`
 - `Flasgo.configure_templates`, `Flasgo.render_template`
 - `Flasgo.configure_static`, `Flasgo.test_client`
 - `Flasgo.openapi_spec`

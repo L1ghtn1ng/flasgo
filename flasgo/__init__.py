@@ -12,6 +12,7 @@ from .auth import (
 )
 from .exceptions import HTTPException, abort
 from .globals import current_user, jsonify, redirect, request, session
+from .ratelimit import RateLimitRule, rate_limit
 from .request import FormData, Request, UploadedFile
 from .response import Response
 from .session import Session
@@ -38,6 +39,7 @@ __all__ = [
     "HasScope",
     "IsAuthenticated",
     "JinjaTemplates",
+    "RateLimitRule",
     "Request",
     "Response",
     "SSRFConfig",
@@ -59,6 +61,7 @@ __all__ = [
     "current_user",
     "extract_bearer_token",
     "jsonify",
+    "rate_limit",
     "redirect",
     "render_template",
     "request",
