@@ -30,8 +30,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/L1ghtn1ng/flasgo"
-Documentation = "https://github.com/L1ghtn1ng/flasgo#readme"
+Homepage = "https://flasgo.dev"
+Documentation = "https://flasgo.dev"
 Repository = "https://github.com/L1ghtn1ng/flasgo"
 Issues = "https://github.com/L1ghtn1ng/flasgo/issues"
 Releases = "https://github.com/L1ghtn1ng/flasgo/releases"
