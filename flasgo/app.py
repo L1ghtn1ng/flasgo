@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import inspect
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -35,7 +37,7 @@ from .security import (
 from .server import run_dev_server
 from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings
-from .ssrf import SSRFConfig, SSRFGuard
+from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
 from .templating import JinjaTemplates
 from .types import Receive, Scope, Send
@@ -341,10 +343,10 @@ class Flasgo:
 
         return TestClient(self)
 
-    def validate_outbound_url(self, url: str) -> str:
-        """Validate a user-provided outbound URL against the SSRF policy."""
+    def resolve_outbound_url(self, url: str) -> SSRFResolvedURL:
+        """Validate an outbound URL and return a pinned connection target."""
 
-        return self.ssrf.validate_url(url)
+        return self.ssrf.resolve_url(url)
 
     def _handle_docs_request(self, req: Request) -> Response | None:
         if not self.settings.ENABLE_DOCS:
@@ -667,12 +669,14 @@ class Flasgo:
 
 
 def _swagger_ui_html(*, openapi_path: str, title: str) -> str:
+    safe_title = html.escape(title, quote=True)
+    openapi_path_json = json.dumps(openapi_path)
     return f"""<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{title} Docs</title>
+    <title>{safe_title} Docs</title>
     <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
     <style>
       html, body {{
@@ -689,7 +693,7 @@ def _swagger_ui_html(*, openapi_path: str, title: str) -> str:
     <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
     <script>
       window.ui = SwaggerUIBundle({{
-        url: "{openapi_path}",
+        url: {openapi_path_json},
         dom_id: "#swagger-ui",
         deepLinking: true,
       }});

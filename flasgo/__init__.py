@@ -16,7 +16,7 @@ from .request import FormData, Request, UploadedFile
 from .response import Response
 from .session import Session
 from .settings import Settings
-from .ssrf import SSRFConfig, SSRFGuard, SSRFViolation
+from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL, SSRFViolation
 from .templating import (
     BaseLoader,
     JinjaTemplates,
@@ -42,6 +42,7 @@ __all__ = [
     "Response",
     "SSRFConfig",
     "SSRFGuard",
+    "SSRFResolvedURL",
     "SSRFViolation",
     "SecureTemplateLoader",
     "Session",

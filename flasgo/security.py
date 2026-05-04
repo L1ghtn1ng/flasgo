@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -100,16 +101,58 @@ class SecurityConfig:
 
 
 def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
-    if host is None:
+    hostname = _host_header_hostname(host)
+    if hostname is None:
         return False
-    hostname = host.split(":", 1)[0].strip().lower()
     for pattern in allowed_hosts:
-        p = pattern.lower()
+        p = _allowed_host_pattern(pattern)
+        if p is None:
+            continue
         if p == hostname:
             return True
         if p.startswith(".") and hostname.endswith(p):
             return True
     return False
+
+
+def _host_header_hostname(host: str | None) -> str | None:
+    if host is None:
+        return None
+    raw = host.strip().lower()
+    if not raw or any(char in raw for char in ("\x00", "\r", "\n", "/", "\\", "@")):
+        return None
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end <= 1:
+            return None
+        hostname = raw[1:end]
+        remainder = raw[end + 1 :]
+        if remainder and (not remainder.startswith(":") or not remainder[1:].isdigit()):
+            return None
+        return hostname.rstrip(".") or None
+    if raw.count(":") > 1:
+        return None
+    if ":" in raw:
+        hostname, port = raw.rsplit(":", 1)
+        if not port.isdigit():
+            return None
+    else:
+        hostname = raw
+    return hostname.rstrip(".") or None
+
+
+def _allowed_host_pattern(pattern: str) -> str | None:
+    normalized = _host_header_hostname(pattern)
+    if normalized is not None:
+        return normalized
+    raw = pattern.strip().lower().rstrip(".")
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        pass
+    if raw.startswith(".") and raw.count(":") == 0:
+        return raw
+    return None
 
 
 def ensure_csrf_cookie(request: Request, response: Response, config: SecurityConfig) -> None:

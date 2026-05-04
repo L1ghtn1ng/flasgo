@@ -45,6 +45,25 @@ def test_docs_endpoint_serves_swagger_ui() -> None:
     assert "unpkg.com" in response.headers["content-security-policy"]
 
 
+def test_docs_endpoint_escapes_settings_in_html_and_javascript() -> None:
+    app = Flasgo(
+        settings={
+            "ENABLE_DOCS": True,
+            "API_TITLE": '</title><img src=x onerror=alert(1)>',
+            "OPENAPI_PATH": '/openapi.json";alert(1);//',
+        }
+    )
+    client = TestClient(app)
+
+    response = client.get("/docs")
+
+    assert response.status_code == 200
+    assert "</title><img" not in response.text
+    assert "&lt;/title&gt;&lt;img src=x onerror=alert(1)&gt; Docs" in response.text
+    assert 'url: "/openapi.json\\";alert(1);//"' in response.text
+    assert 'url: "/openapi.json";alert(1);//"' not in response.text
+
+
 def test_openapi_spec_updates_after_new_route_registration() -> None:
     app = Flasgo(settings={"ENABLE_DOCS": True})
 

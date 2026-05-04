@@ -332,7 +332,7 @@ Auth behavior:
 
 ## SSRF protection helpers (CWE-918)
 
-For outbound URLs from user input, validate before fetching:
+For outbound URLs from user input, resolve a pinned connection target before fetching:
 
 ```python
 from flasgo import Flasgo
@@ -344,10 +344,10 @@ app = Flasgo(
     }
 )
 
-safe_url = app.validate_outbound_url("https://api.example.com/data")
+target = app.resolve_outbound_url("https://api.example.com/data")
 ```
 
-By default, Flasgo blocks unsafe schemes, embedded credentials, localhost/private network targets, and unresolved hosts.
+By default, Flasgo blocks unsafe schemes, embedded credentials, localhost/private network targets, and unresolved hosts. Connect to `target.url` and send `target.host_header` as the HTTP `Host` header when your HTTP client supports it.
 
 ## Automatic API docs
 

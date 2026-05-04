@@ -2,6 +2,29 @@
 
 All notable changes to `flasgo` are documented in this file.
 
+## [0.5.0] - 2026-05-04
+
+### Breaking Changes
+
+- Removed `Flasgo.validate_outbound_url()` and `SSRFGuard.validate_url()` in favor of `Flasgo.resolve_outbound_url()` and `SSRFGuard.resolve_url()`, which return a pinned `SSRFResolvedURL` target for safer outbound fetches.
+
+### Added
+
+- Added `SSRFResolvedURL` to the public API so callers can connect to a resolved IP while preserving the original `Host` header.
+- Added regression coverage for pinned SSRF targets, invalid outbound URL ports, disabled SSRF behavior, allowed userinfo preservation, docs UI escaping, debug error page escaping, and stricter Host header parsing.
+
+### Changed
+
+- SSRF tests now use Cloudflare's public `1.1.1.1` IPv4 address for public-resolution fixtures.
+- Documentation now recommends `resolve_outbound_url()` for user-controlled outbound URLs and explains how to use `target.url` with `target.host_header`.
+- Host header validation now handles bracketed IPv6 hosts and rejects malformed host ports.
+
+### Fixed
+
+- Docs UI settings are now escaped in both HTML and JavaScript contexts to prevent reflected injection through `API_TITLE` or `OPENAPI_PATH`.
+- Debug-mode template error pages now render with autoescaping enabled to prevent reflected HTML/script execution in development diagnostics.
+- SSRF pinned URLs now preserve explicitly allowed userinfo and no longer inspect malformed URLs when SSRF protection is disabled.
+
 ## [0.4.1] - 2026-03-13
 
 ### Added

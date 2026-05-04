@@ -5,7 +5,7 @@ import platform
 import traceback
 from pathlib import Path
 
-from jinja2 import Template, TemplateError
+from jinja2 import Environment, TemplateError
 
 from .request import Request
 from .response import Response
@@ -41,7 +41,7 @@ class Debug:
             if k.startswith(("PATH", "PYTHON", "LANG", "LC_", "HOME", "USER", "SHELL", "TERM"))
         }
 
-        html = Template(template_content).render(
+        html = Environment(autoescape=True).from_string(template_content).render(
             error_type=type(exc).__name__,
             error_message=str(exc),
             template_name=template_name,

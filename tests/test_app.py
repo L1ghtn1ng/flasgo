@@ -85,6 +85,32 @@ def test_invalid_host_is_rejected() -> None:
     assert "ALLOWED_HOSTS" in response.text
 
 
+def test_bracketed_ipv6_host_is_allowed() -> None:
+    app = Flasgo(settings={"ALLOWED_HOSTS": {"::1"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    response = client.get("/", headers={"host": "[::1]:8000"})
+
+    assert response.status_code == 200
+
+
+def test_malformed_host_port_is_rejected() -> None:
+    app = Flasgo(security=SecurityConfig(csrf_enabled=False))
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    response = client.get("/", headers={"host": "localhost:bad"})
+
+    assert response.status_code == 400
+
+
 def test_security_headers_applied() -> None:
     app = Flasgo()
 

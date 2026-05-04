@@ -71,7 +71,7 @@ Flasgo ships with security features enabled by default, but deployment still mat
 - Keep CSRF protections enabled for browser-facing apps.
 - Keep signed cookies and secure cookie flags enabled behind HTTPS.
 - Leave docs disabled unless you explicitly need them, and keep `DOCS_PATH` and `OPENAPI_PATH` distinct.
-- Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them.
+- Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them. Prefer pinned targets from `resolve_outbound_url()` when your HTTP client supports connecting by IP with the original `Host` header.
 - Put a reverse proxy or edge service in front of the app for TLS termination and network controls.
 
 Thank you for helping keep Flasgo secure.
