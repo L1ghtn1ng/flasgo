@@ -513,11 +513,18 @@ class Flasgo:
         decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
 
         # Process decisions
+        allowed_decisions = []
         for decision in decisions:
             if not decision.allowed:
                 self._log_security_event(logging.WARNING, "rate-limit-exceeded", req=req)
                 return build_rate_limit_response(decision)
-            headers.update(rate_limit_success_headers(decision))
+            allowed_decisions.append(decision)
+
+        # Choose the most restrictive allowed decision (smallest remaining tokens)
+        if allowed_decisions:
+            canonical_decision = min(allowed_decisions, key=lambda d: (d.remaining, d.reset_after))
+            headers.update(rate_limit_success_headers(canonical_decision))
+
         return headers
 
     async def _run_after_middleware(self, req: Request, response: Response) -> Response:

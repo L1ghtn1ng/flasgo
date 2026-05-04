@@ -56,6 +56,7 @@ class RateLimiter:
             raise ValueError("RateLimiter max_keys must be greater than 0.")
         self.max_keys = max_keys
         self._buckets: dict[tuple[str, str], deque[float]] = {}
+        self._bucket_windows: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
 
     async def check(self, rule: RateLimitRule, req: Request, *, endpoint_id: str) -> RateLimitDecision:
@@ -69,6 +70,9 @@ class RateLimiter:
                 self._prune(now)
 
             request_times = self._buckets.setdefault(bucket_key, deque())
+            # Track the maximum window for this bucket across all rules
+            current_window = self._bucket_windows.get(bucket_key, 0.0)
+            self._bucket_windows[bucket_key] = max(current_window, rule.window_seconds)
             self._drop_expired_requests(request_times, rule=rule, now=now)
 
             # Read-only evaluation: check if request would be allowed
@@ -129,6 +133,9 @@ class RateLimiter:
                 bucket_key = (scope, client_key)
 
                 request_times = self._buckets.setdefault(bucket_key, deque())
+                # Track the maximum window for this bucket across all rules
+                current_window = self._bucket_windows.get(bucket_key, 0.0)
+                self._bucket_windows[bucket_key] = max(current_window, rule.window_seconds)
                 self._drop_expired_requests(request_times, rule=rule, now=now)
 
                 if len(request_times) >= rule.requests:
@@ -146,7 +153,12 @@ class RateLimiter:
                         ),
                     ))
                 else:
-                    reset_after = _seconds_until_reset(request_times[0], rule=rule, now=now) if request_times else 0
+                    # When request_times is empty, compute post-insert reset (window length from now)
+                    if request_times:
+                        reset_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
+                    else:
+                        # Post-insert state: the new timestamp (now) will be the oldest
+                        reset_after = _seconds_until_reset(now, rule=rule, now=now)
                     remaining = max(0, rule.requests - len(request_times) - 1)  # -1 for the request we're about to add
                     evaluations.append((
                         bucket_key,
@@ -184,19 +196,32 @@ class RateLimiter:
             request_times.popleft()
 
     def _prune(self, now: float) -> None:
-        """Keep memory bounded when many unique clients hit limited routes."""
+        """Keep memory bounded when many unique clients hit limited routes.
 
+        Uses per-bucket configured window to determine retention. Buckets are
+        evicted only after their last request is older than their window, ensuring
+        buckets with long windows aren't prematurely removed.
+        """
+        # Remove empty buckets and those whose last request is beyond their window
         for key, request_times in list(self._buckets.items()):
             if not request_times:
                 self._buckets.pop(key, None)
+                self._bucket_windows.pop(key, None)
                 continue
-            if request_times[-1] < now - 86_400:
+            # Use bucket's configured longest window for retention
+            bucket_window = self._bucket_windows.get(key, 86_400)
+            retention_seconds = bucket_window * 2  # Keep for 2x window to be safe
+            if request_times[-1] < now - retention_seconds:
                 self._buckets.pop(key, None)
+                self._bucket_windows.pop(key, None)
+
+        # If still over max_keys, trim oldest buckets by last request time
         if len(self._buckets) <= self.max_keys:
             return
         oldest_keys = sorted(self._buckets, key=lambda key: self._buckets[key][-1])
         for key in oldest_keys[: len(self._buckets) - self.max_keys]:
             self._buckets.pop(key, None)
+            self._bucket_windows.pop(key, None)
 
 
 def rate_limit(
