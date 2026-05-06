@@ -33,7 +33,7 @@ pip install flasgo
 
 ```bash
 uv venv
-uv sync --group dev
+uv sync --all-groups
 ```
 
 Create `app.py`:
