@@ -2,6 +2,25 @@
 
 All notable changes to `flasgo` are documented in this file.
 
+## [0.5.1] - 2026-05-06
+
+### Added
+
+- Added per-route rate limiting with `@app.ratelimit(...)` and the standalone `@rate_limit(...)` decorator, including shared scopes, custom key functions, `429 Too Many Requests` responses, and standard rate-limit headers.
+- Added `RateLimitRule` and `rate_limit` to the public `flasgo` package API.
+- Added documentation for route rate limiting, production deployment notes, and a codebase guide for contributors.
+- Added regression coverage for client-IP limits, shared route scopes, custom key functions, and authenticated-user rate-limit keys.
+
+### Changed
+
+- Updated project metadata to point the homepage and documentation URLs at `https://flasgo.dev`.
+- Refreshed `uv.lock`.
+- Added `releases.astral.sh` to the CI egress allowlist for release tooling.
+
+### Fixed
+
+- Updated the README PyPI badge to use the live PyPI version endpoint so it reflects the latest published `flasgo` release.
+
 ## [0.5.0] - 2026-05-04
 
 ### Breaking Changes
