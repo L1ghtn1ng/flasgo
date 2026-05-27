@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections import deque
 
+import flasgo.ratelimit as ratelimit_module
 import pytest
 from flasgo import (
     Flasgo,
@@ -17,6 +20,7 @@ from flasgo import (
     request,
 )
 from flasgo.app import session
+from flasgo.ratelimit import RateLimiter, RateLimitRule
 from flasgo.security import SecurityConfig
 from flasgo.testing import TestClient
 
@@ -110,6 +114,49 @@ def test_ratelimit_scope_can_cover_multiple_endpoints() -> None:
 
     assert blocked.status_code == 429
     assert blocked.headers["retry-after"].isdigit()
+
+
+def test_ratelimit_duplicate_shared_scope_counts_request_once() -> None:
+    app = Flasgo()
+
+    @app.get("/limited")
+    @rate_limit(2, per=60, scope="shared-api")
+    @rate_limit(2, per=60, scope="shared-api")
+    def limited() -> str:
+        return "ok"
+
+    client = TestClient(app)
+
+    first = client.get("/limited")
+    second = client.get("/limited")
+    blocked = client.get("/limited")
+
+    assert first.status_code == 200
+    assert first.headers["ratelimit-remaining"] == "1"
+    assert second.status_code == 200
+    assert second.headers["ratelimit-remaining"] == "0"
+    assert blocked.status_code == 429
+
+
+def test_ratelimit_batch_prunes_expired_bucket_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = RateLimiter()
+    rule = RateLimitRule(1, window_seconds=1, scope="shared-api")
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    req = Request({"headers": [], "client": ("127.0.0.1", 5000)}, receive)
+    limiter._buckets[("shared-api", "127.0.0.1")] = deque([0.0, 2.0])
+    limiter._bucket_windows[("shared-api", "127.0.0.1")] = rule.window_seconds
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: 4.0)
+
+    async def run_checks() -> None:
+        decisions = await limiter.check_batch([(rule, "endpoint")], req)
+        assert decisions[0].allowed
+
+    asyncio.run(run_checks())
+
+    assert list(limiter._buckets[("shared-api", "127.0.0.1")]) == [4.0]
 
 
 def test_ratelimit_key_func_separates_clients() -> None:

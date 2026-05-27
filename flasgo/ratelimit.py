@@ -125,21 +125,32 @@ class RateLimiter:
             if len(self._buckets) > self.max_keys:
                 self._prune(now)
 
-            # Phase 1: Read-only evaluation for all rules
-            evaluations = []
+            entries = []
             for rule, endpoint_id in rules:
                 client_key = _rate_limit_key(rule, req)
                 scope = rule.scope or endpoint_id
                 bucket_key = (scope, client_key)
 
                 request_times = self._buckets.setdefault(bucket_key, deque())
-                # Track the maximum window for this bucket across all rules
                 current_window = self._bucket_windows.get(bucket_key, 0.0)
                 self._bucket_windows[bucket_key] = max(current_window, rule.window_seconds)
-                self._drop_expired_requests(request_times, rule=rule, now=now)
+                entries.append((bucket_key, rule, request_times))
 
-                if len(request_times) >= rule.requests:
-                    retry_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
+            seen_bucket_keys = set()
+            for bucket_key, _rule, request_times in entries:
+                if bucket_key in seen_bucket_keys:
+                    continue
+                seen_bucket_keys.add(bucket_key)
+                cutoff = now - self._bucket_windows[bucket_key]
+                while request_times and request_times[0] <= cutoff:
+                    request_times.popleft()
+
+            evaluations = []
+            for bucket_key, rule, request_times in entries:
+                cutoff = now - rule.window_seconds
+                recent_times = [timestamp for timestamp in request_times if timestamp > cutoff]
+                if len(recent_times) >= rule.requests:
+                    retry_after = _seconds_until_reset(recent_times[0], rule=rule, now=now)
                     evaluations.append((
                         bucket_key,
                         rule,
@@ -153,13 +164,9 @@ class RateLimiter:
                         ),
                     ))
                 else:
-                    # When request_times is empty, compute post-insert reset (window length from now)
-                    if request_times:
-                        reset_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
-                    else:
-                        # Post-insert state: the new timestamp (now) will be the oldest
-                        reset_after = _seconds_until_reset(now, rule=rule, now=now)
-                    remaining = max(0, rule.requests - len(request_times) - 1)  # -1 for the request we're about to add
+                    oldest = recent_times[0] if recent_times else now
+                    reset_after = _seconds_until_reset(oldest, rule=rule, now=now)
+                    remaining = max(0, rule.requests - len(recent_times) - 1)
                     evaluations.append((
                         bucket_key,
                         rule,
@@ -173,15 +180,16 @@ class RateLimiter:
                         ),
                     ))
 
-            # Phase 2: Check if any rule denied
             all_allowed = all(decision.allowed for _, _, _, decision in evaluations)
 
-            # Phase 3: If all allowed, append timestamps atomically
             if all_allowed:
-                for _bucket_key, _rule, request_times, _ in evaluations:
+                seen_bucket_keys = set()
+                for bucket_key, _rule, request_times, _ in evaluations:
+                    if bucket_key in seen_bucket_keys:
+                        continue
+                    seen_bucket_keys.add(bucket_key)
                     request_times.append(now)
 
-            # Return decisions
             return [decision for _, _, _, decision in evaluations]
 
     def _drop_expired_requests(
