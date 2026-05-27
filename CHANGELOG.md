@@ -2,6 +2,12 @@
 
 All notable changes to `flasgo` are documented in this file.
 
+## [0.5.2] - 2026-05-27
+
+### Fixed
+
+- Fixed shared-scope rate limiting so multiple rules attached to the same route count each request once, preserve atomic denial behavior, and prune expired bucket entries without dropping data needed by longer-window rules.
+
 ## [0.5.1] - 2026-05-06
 
 ### Added
