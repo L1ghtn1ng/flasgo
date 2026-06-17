@@ -248,7 +248,7 @@ def rate_limit(
     rule = RateLimitRule(requests=requests, window_seconds=per, scope=scope, key_func=key_func)
 
     def decorator(endpoint: Endpoint) -> Endpoint:
-        rules = list(getattr(endpoint, "__flasgo_rate_limits__", ()))
+        rules: list[RateLimitRule] = list(getattr(endpoint, "__flasgo_rate_limits__", ()))
         rules.append(rule)
         endpoint.__dict__["__flasgo_rate_limits__"] = tuple(rules)
         return endpoint

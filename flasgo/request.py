@@ -5,7 +5,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 from urllib.parse import parse_qs
 
 from .exceptions import HTTPException
@@ -14,6 +14,8 @@ from .types import Receive, Scope
 if TYPE_CHECKING:
     from .auth import User
     from .session import Session
+
+_T = TypeVar("_T")
 
 
 def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
@@ -89,18 +91,12 @@ class FormData(Mapping[str, str]):
         return len(self._fields)
 
     @overload
-    def get(self, key: str, /) -> str | None: ...
+    def get(self, key: object, /) -> str | None: ...
 
     @overload
-    def get(self, key: str, /, default: str) -> str: ...
+    def get(self, key: object, /, default: _T) -> str | _T: ...
 
-    @overload
-    def get(self, key: str, /, default: None) -> str | None: ...
-
-    @overload
-    def get(self, key: str, /, default: object) -> str | object: ...
-
-    def get(self, key: str, /, default: object = None) -> str | object:
+    def get(self, key: object, /, default: object = None) -> str | object:
         values = self._fields.get(key)
         if not values:
             return default
