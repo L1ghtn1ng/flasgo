@@ -2,6 +2,17 @@
 
 All notable changes to `flasgo` are documented in this file.
 
+## [0.5.3] - 2026-07-06
+
+### Fixed
+
+- Static file `304 Not Modified` responses now keep their `public` cache-control headers instead of being overwritten by the no-store enforcement, so conditional revalidation preserves client caching.
+- CSRF trusted-origin matching now compares the `Origin` scheme case-insensitively, matching the already case-insensitive host comparison.
+- Bearer token extraction now matches the authorization scheme case-insensitively per RFC 7235, so `bearer <token>` is accepted alongside `Bearer <token>`.
+- OpenAPI output for optional annotations (`X | None`) now emits OpenAPI 3.1-style `anyOf` with `{"type": "null"}` instead of the 3.0-only `nullable: true`.
+- OpenAPI generation now resolves deferred (string) type annotations, so handlers using `from __future__ import annotations` produce accurate parameter and response schemas.
+- Responses now recompute `content-length` when sent, so bodies mutated by `after_request` middleware no longer produce a stale length header.
+
 ## [0.5.2] - 2026-05-27
 
 ### Fixed

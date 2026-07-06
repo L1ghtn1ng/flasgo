@@ -5,7 +5,6 @@ multi-ecosystem-groups:
       interval: daily
       timezone: Europe/London
     open-pull-requests-limit: 10
-    target-branch: main
 updates:
 - package-ecosystem: github-actions
   directory: "/"

@@ -120,6 +120,30 @@ def test_static_files_support_conditional_get(tmp_path: Path) -> None:
     assert initial.status_code == 200
     assert cached.status_code == 304
     assert cached.body == b""
+    assert cached.headers["cache-control"] == initial.headers["cache-control"]
+    assert cached.headers["cache-control"].startswith("public")
+    assert "pragma" not in cached.headers
+
+
+def test_content_length_tracks_body_mutated_by_after_request() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.get("/greet")
+    def greet() -> str:
+        return "hi"
+
+    @app.after_request
+    def rewrite(request: Request, response: Response) -> Response:
+        _ = request
+        response.body = b"hello world"
+        return response
+
+    client = app.test_client()
+    response = client.get("/greet")
+
+    assert response.status_code == 200
+    assert response.body == b"hello world"
+    assert response.headers["content-length"] == str(len(b"hello world"))
 
 
 def test_static_files_block_path_escape_and_hidden_files(tmp_path: Path) -> None:

@@ -62,7 +62,7 @@ def extract_bearer_token(authorization_header: str | None, *, scheme: str = "Bea
     if not authorization_header:
         return None
     prefix = f"{scheme.strip()} "
-    if not authorization_header.startswith(prefix):
+    if authorization_header[: len(prefix)].lower() != prefix.lower():
         return None
     token = authorization_header[len(prefix) :].strip()
     return token or None

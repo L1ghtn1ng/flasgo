@@ -33,6 +33,23 @@ def test_openapi_json_contains_registered_routes() -> None:
     assert path_item["summary"] == "Get user."
 
 
+def test_openapi_optional_annotations_use_null_type() -> None:
+    app = Flasgo(settings={"ENABLE_DOCS": True})
+
+    @app.get("/items")
+    def list_items(tag: str | None = None) -> dict[str, str]:
+        _ = tag
+        return {"ok": "true"}
+
+    client = TestClient(app)
+    spec = cast(dict[str, Any], client.get("/openapi.json").json())
+    path_item = cast(dict[str, Any], spec["paths"]["/items"]["get"])
+    params = {param["name"]: param for param in path_item["parameters"]}
+    schema = params["tag"]["schema"]
+    assert schema == {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert "nullable" not in schema
+
+
 def test_docs_endpoint_serves_swagger_ui() -> None:
     app = Flasgo(settings={"ENABLE_DOCS": True})
     client = TestClient(app)

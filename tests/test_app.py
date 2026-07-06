@@ -443,6 +443,43 @@ def test_csrf_rejects_mismatched_origin() -> None:
     assert response.status_code == 403
 
 
+def test_csrf_trusted_origin_scheme_is_case_insensitive() -> None:
+    app = Flasgo(settings={"CSRF_TRUSTED_ORIGINS": {"https://partner.example"}})
+
+    @app.get("/seed")
+    def seed() -> str:
+        return "seed"
+
+    @app.post("/submit")
+    def submit() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    seed_response = client.get("/seed")
+    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    assert csrf_token is not None
+
+    trusted = client.post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-csrf={csrf_token}",
+            "x-csrf-token": csrf_token,
+            "origin": "HTTPS://Partner.example",
+        },
+    )
+    assert trusted.status_code == 200
+
+    untrusted = client.post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-csrf={csrf_token}",
+            "x-csrf-token": csrf_token,
+            "origin": "https://evil.example",
+        },
+    )
+    assert untrusted.status_code == 403
+
+
 def test_invalid_response_header_is_blocked() -> None:
     app = Flasgo(security=SecurityConfig(csrf_enabled=False))
 
@@ -605,6 +642,13 @@ def test_bearer_token_backend_helper() -> None:
     valid = client.get("/me", headers={"authorization": "Bearer token-123"})
     assert valid.status_code == 200
     assert valid.json() == {"id": "alice"}
+
+    lowercase_scheme = client.get("/me", headers={"authorization": "bearer token-123"})
+    assert lowercase_scheme.status_code == 200
+    assert lowercase_scheme.json() == {"id": "alice"}
+
+    wrong_scheme = client.get("/me", headers={"authorization": "Basic token-123"})
+    assert wrong_scheme.status_code == 401
 
 
 def test_auth_backend_exception_fails_closed() -> None:

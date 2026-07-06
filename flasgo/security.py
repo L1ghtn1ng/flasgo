@@ -217,7 +217,7 @@ def _origin_matches_request(origin_value: str, request: Request, config: Securit
     for trusted in config.csrf_trusted_origins:
         normalized = trusted.strip().lower()
         if "://" in normalized:
-            if f"{parsed.scheme}://{origin_host}" == normalized:
+            if f"{origin_scheme}://{origin_host}" == normalized:
                 return True
             continue
         if origin_host == normalized:

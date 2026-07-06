@@ -83,6 +83,7 @@ def build_static_response(
                 "last-modified": _http_date(stat.st_mtime),
                 "cache-control": f"public, max-age={directory.cache_max_age}",
             },
+            allow_public_cache=True,
         )
 
     try:

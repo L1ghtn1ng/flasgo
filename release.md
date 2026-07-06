@@ -11,11 +11,15 @@ This file documents how releases are cut and published for `flasgo`.
   - Runs on git tags matching `v*`.
   - Verifies tag version equals `pyproject.toml` `project.version`.
   - Builds with `uv build`.
-  - Publishes with `uv publish`.
+  - Publishes with PyPI Trusted Publishing using `pypa/gh-action-pypi-publish`.
 
-## Required GitHub secret
+## Required PyPI configuration
 
-- `PYPI_API_TOKEN`: PyPI API token used by `uv publish`.
+- Configure a Trusted Publisher for the `flasgo` PyPI project:
+  - Repository: `L1ghtn1ng/flasgo`
+  - Workflow: `release-pypi.yml`
+  - Environment: `pypi`
+- No PyPI API token or GitHub secret is required for publishing.
 
 ## Release checklist
 

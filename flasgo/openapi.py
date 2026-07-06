@@ -49,7 +49,10 @@ def _build_operation(
     method: str,
     known_operation_ids: set[str],
 ) -> dict[str, Any]:
-    signature = inspect.signature(route.endpoint)
+    try:
+        signature = inspect.signature(route.endpoint, eval_str=True)
+    except (NameError, TypeError, ValueError):
+        signature = inspect.signature(route.endpoint)
     path_params, path_param_names = _path_parameters(route.raw_path)
     query_params = _query_parameters(signature, path_param_names=path_param_names)
     parameters = [*path_params, *query_params]
@@ -210,10 +213,10 @@ def _annotation_schema(annotation: object) -> dict[str, Any]:
             schema["type"] = "string"
         return schema
     if origin in (Union, types.UnionType):
-        union_members = [arg for arg in args if arg is not type(None)]
-        if len(union_members) == 1:
-            schema = _annotation_schema(union_members[0])
-            schema["nullable"] = True
-            return schema
-        return {"anyOf": [_annotation_schema(arg) for arg in union_members]}
+        member_schemas = [_annotation_schema(arg) for arg in args if arg is not type(None)]
+        if type(None) in args:
+            member_schemas.append({"type": "null"})
+        if len(member_schemas) == 1:
+            return member_schemas[0]
+        return {"anyOf": member_schemas}
     return {"type": "string"}

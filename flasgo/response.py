@@ -39,6 +39,7 @@ class Response:
             _validate_set_cookie(cookie)
 
     async def send(self, send: Send, *, head_only: bool = False) -> None:
+        self.headers["content-length"] = str(len(self.body))
         for key, value in self.headers.items():
             _validate_header(key, value)
         for cookie in self.cookies:
