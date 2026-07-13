@@ -1,7 +1,5 @@
 # Changelog
 
-All notable changes to `flasgo` are documented in this file.
-
 ## [0.5.3] - 2026-07-06
 
 ### Fixed
