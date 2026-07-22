@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-    "uvicorn[standard]==0.50.2",
+    "uvicorn[standard]==0.51.0",
     "Jinja2==3.1.6",
     "watchfiles==1.2.0",
 ]
@@ -43,8 +43,8 @@ flasgo = "flasgo.cli:main"
 [dependency-groups]
 dev = [
   "pytest==9.1.1",
-  "ruff==0.15.20",
-  "ty==0.0.56",
+  "ruff==0.15.21",
+  "ty==0.0.59",
 ]
 
 [tool.ruff]
