@@ -49,11 +49,23 @@ class Settings:
     SECURITY_FAILURE_RATE_LIMIT: int = 50
     SECURITY_FAILURE_WINDOW_SECONDS: int = 60
     LOG_SECURITY_EVENTS: bool = True
+    TRUST_INCOMING_REQUEST_ID: bool = False
+    LOG_FORMAT: str = "text"
+    LOG_LEVEL: str = "INFO"
+    WEBSOCKET_ENFORCE_ORIGIN: bool = True
+    WEBSOCKET_ALLOWED_ORIGINS: set[str] = field(default_factory=set)
+    WEBSOCKET_ALLOW_MISSING_ORIGIN: bool = False
+    WEBSOCKET_MAX_MESSAGE_BYTES: int = 65_536
+    WEBSOCKET_MAX_MESSAGES_PER_MINUTE: int = 120
+    SERVER_LIMIT_CONCURRENCY: int = 1_000
+    METRICS_ENABLED: bool = False
+    METRICS_PATH: str = "/metrics"
+    METRICS_BEARER_TOKEN: str | None = None
     ENABLE_DOCS: bool = False
     DOCS_PATH: str = "/docs"
     OPENAPI_PATH: str = "/openapi.json"
     API_TITLE: str = "Flasgo API"
-    API_VERSION: str = "0.3.0"
+    API_VERSION: str = "0.6.0"
     API_DESCRIPTION: str = ""
     SSRF_ENABLED: bool = True
     SSRF_ALLOWED_SCHEMES: set[str] = field(default_factory=lambda: {"http", "https"})

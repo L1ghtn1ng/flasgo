@@ -151,34 +151,38 @@ class RateLimiter:
                 recent_times = [timestamp for timestamp in request_times if timestamp > cutoff]
                 if len(recent_times) >= rule.requests:
                     retry_after = _seconds_until_reset(recent_times[0], rule=rule, now=now)
-                    evaluations.append((
-                        bucket_key,
-                        rule,
-                        request_times,
-                        RateLimitDecision(
-                            allowed=False,
-                            limit=rule.requests,
-                            remaining=0,
-                            reset_after=retry_after,
-                            retry_after=retry_after,
-                        ),
-                    ))
+                    evaluations.append(
+                        (
+                            bucket_key,
+                            rule,
+                            request_times,
+                            RateLimitDecision(
+                                allowed=False,
+                                limit=rule.requests,
+                                remaining=0,
+                                reset_after=retry_after,
+                                retry_after=retry_after,
+                            ),
+                        )
+                    )
                 else:
                     oldest = recent_times[0] if recent_times else now
                     reset_after = _seconds_until_reset(oldest, rule=rule, now=now)
                     remaining = max(0, rule.requests - len(recent_times) - 1)
-                    evaluations.append((
-                        bucket_key,
-                        rule,
-                        request_times,
-                        RateLimitDecision(
-                            allowed=True,
-                            limit=rule.requests,
-                            remaining=remaining,
-                            reset_after=reset_after,
-                            retry_after=0,
-                        ),
-                    ))
+                    evaluations.append(
+                        (
+                            bucket_key,
+                            rule,
+                            request_times,
+                            RateLimitDecision(
+                                allowed=True,
+                                limit=rule.requests,
+                                remaining=remaining,
+                                reset_after=reset_after,
+                                retry_after=0,
+                            ),
+                        )
+                    )
 
             all_allowed = all(decision.allowed for _, _, _, decision in evaluations)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import types
 from collections.abc import Coroutine
@@ -66,3 +67,39 @@ def test_app_run_uses_debug_reload_by_default(monkeypatch: pytest.MonkeyPatch) -
     app.run()
 
     assert seen["kwargs"]["reload"] is True
+
+
+def test_dev_server_uses_hardened_uvicorn_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+    seen: dict[str, object] = {}
+
+    class FakeConfig:
+        def __init__(self, configured_app: object, **kwargs: object) -> None:
+            seen["app"] = configured_app
+            seen.update(kwargs)
+
+    class FakeServer:
+        def __init__(self, config: object) -> None:
+            seen["config"] = config
+
+        async def serve(self) -> None:
+            seen["served"] = True
+
+    monkeypatch.setattr(server_module.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(server_module.uvicorn, "Server", FakeServer)
+
+    asyncio.run(
+        server_module.run_dev_server(
+            app,
+            "127.0.0.1",
+            8000,
+            websocket_max_message_bytes=4096,
+            limit_concurrency=100,
+        )
+    )
+
+    assert seen["lifespan"] == "on"
+    assert seen["proxy_headers"] is False
+    assert seen["ws_max_size"] == 4096
+    assert seen["ws_per_message_deflate"] is False
+    assert seen["limit_concurrency"] == 100

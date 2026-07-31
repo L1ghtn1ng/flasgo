@@ -3,7 +3,7 @@
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| Latest `0.4.x` release | ✅ |
+| Latest `0.6.x` release | ✅ |
 | Older `0.x` releases | ❌ |
 
 Security fixes are made against `main` first and may be backported to the latest release line when practical. If you are running an older release, upgrade to the newest available version before requesting support.
@@ -47,8 +47,19 @@ Flasgo is an async-first Python web framework with secure defaults. Reports are 
 - Security event logging and failure throttling.
 - SSRF validation helpers for outbound URLs.
 - API docs exposure, especially cases where docs become reachable when `ENABLE_DOCS=False`.
+- WebSocket origin, host, authentication, message-size, rate, or close-state enforcement.
+- Metrics authentication, request-ID trust, and structured log injection.
 
 Reports involving bypasses of these defaults, privilege escalation, request smuggling, header injection, path traversal, template escape, session integrity, or SSRF are high priority.
+
+## OWASP Top 10:2025
+
+Flasgo's defaults are designed around the OWASP Top 10:2025 categories: route authorization and deny-before-accept
+WebSockets (A01/A07), validated settings and disabled-by-default docs/metrics (A02), pinned dependencies and lockfile
+auditing (A03), strong secret and signed-session requirements (A04/A08), bounded parsing plus response/header/log
+validation (A05), same-origin WebSocket and SSRF protections (A06), structured security events and request
+correlation (A09), and fail-closed lifecycle/auth handling without invalid second responses (A10). Applications still
+need their own authorization policy, secret management, dependency updates, monitoring, and deployment controls.
 
 ## Safe Harbor for Researchers
 
@@ -71,6 +82,14 @@ Flasgo ships with security features enabled by default, but deployment still mat
 - Keep CSRF protections enabled for browser-facing apps.
 - Keep signed cookies and secure cookie flags enabled behind HTTPS.
 - Leave docs disabled unless you explicitly need them, and keep `DOCS_PATH` and `OPENAPI_PATH` distinct.
+- Keep WebSocket origin enforcement enabled. Allow only exact trusted origins and do not allow missing origins for
+  browser sessions that use cookie authentication.
+- Keep WebSocket message and concurrency limits enabled, and apply tighter edge limits for public deployments.
+- Keep metrics disabled unless needed; when enabled, use a dedicated 32-character-or-longer bearer secret and
+  restrict the endpoint at the network edge too.
+- Trust incoming request IDs only when a trusted proxy replaces client-supplied values.
+- Treat migration files as trusted executable code: review generated revisions before applying them and restrict who
+  can modify the migration directory.
 - Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them. Prefer pinned targets from `resolve_outbound_url()` when your HTTP client supports connecting by IP with the original `Host` header.
 - Put a reverse proxy or edge service in front of the app for TLS termination and network controls.
 

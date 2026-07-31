@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flasgo"
-version = "0.5.4"
+version = "0.6.0"
 description = "Async-first Python web framework with Flask ergonomics and Django-inspired security defaults."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -29,6 +29,10 @@ dependencies = [
     "watchfiles==1.2.0",
 ]
 
+[project.optional-dependencies]
+db = ["alembic==1.18.5"]
+metrics = ["prometheus-client==0.26.0"]
+
 [project.urls]
 Homepage = "https://flasgo.dev"
 Documentation = "https://flasgo.dev"
@@ -42,6 +46,8 @@ flasgo = "flasgo.cli:main"
 
 [dependency-groups]
 dev = [
+  "alembic==1.18.5",
+  "prometheus-client==0.26.0",
   "pytest==9.1.1",
   "ruff==0.15.22",
   "ty==0.0.60",

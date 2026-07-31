@@ -51,7 +51,7 @@ def _build_operation(
 ) -> dict[str, Any]:
     try:
         signature = inspect.signature(route.endpoint, eval_str=True)
-    except (NameError, TypeError, ValueError):
+    except NameError, TypeError, ValueError:
         signature = inspect.signature(route.endpoint)
     path_params, path_param_names = _path_parameters(route.raw_path)
     query_params = _query_parameters(signature, path_param_names=path_param_names)

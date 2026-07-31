@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.6.0] - 2026-07-31
+
+### Added
+
+- ASGI WebSocket routing and helpers with pre-accept host, exact-origin, session, and authorization checks; bounded
+  messages and per-connection message throttling; strict close/subprotocol handling; and sync/async test sessions.
+- ASGI lifespan support through one `@app.lifespan` async generator, process-global `app.state`, and lifecycle-aware
+  test-client contexts.
+- Response-attached background tasks that run after a successful send with failure isolation and request correlation.
+- Locally generated request IDs, optional JSON logging, bounded structured HTTP/WS/lifespan/background events, and
+  an authenticated optional Prometheus metrics extra.
+- `flasgo routes`, `flasgo openapi`, and `flasgo check`, plus optional Alembic-backed `flasgo db` migration commands.
+
+### Changed
+
+- `app.run()` and `flasgo run` now use Uvicorn for correct HTTP, WebSocket, and lifespan protocol handling.
+- Flasgo now supports Python 3.14 and newer only.
+- HTTP responses are completely validated before their first ASGI send, and send failures never trigger an invalid
+  second response.
+
+### Security
+
+- WebSocket handshakes deny missing origins by default, require exact same-origin or allowlisted origins, validate
+  authentication before acceptance, and do not persist session changes.
+- Metrics are disabled by default and require a dedicated bearer token of at least 32 characters when enabled.
+- Incoming request IDs are ignored by default and must pass a strict bounded format when explicitly trusted.
+
 ## [0.5.4] - 2026-07-26
 
 ### Changed

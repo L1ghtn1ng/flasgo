@@ -225,3 +225,41 @@ def _origin_matches_request(origin_value: str, request: Request, config: Securit
         if normalized.startswith(".") and origin_host.split(":", 1)[0].endswith(normalized):
             return True
     return False
+
+
+def websocket_origin_is_allowed(
+    origin_value: str,
+    *,
+    request_scheme: str,
+    request_host: str,
+    allowed_origins: set[str],
+) -> bool:
+    """Validate a WebSocket Origin using exact origins only."""
+
+    candidate = _canonical_origin(origin_value)
+    if candidate is None:
+        return False
+    same_origin = _canonical_origin(f"{request_scheme}://{request_host}")
+    if candidate == same_origin:
+        return True
+    return candidate in {_canonical_origin(item) for item in allowed_origins}
+
+
+def _canonical_origin(value: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value.strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return scheme, parsed.hostname.lower(), port or (443 if scheme == "https" else 80)

@@ -231,6 +231,10 @@ class Request:
         return str(client[0])
 
     @property
+    def request_id(self) -> str:
+        return str(self.scope.get("request_id", ""))
+
+    @property
     def session(self) -> Session | None:
         return self.scope.get("session")
 
@@ -239,6 +243,8 @@ class Request:
         return self.scope.get("user")
 
     async def body(self) -> bytes:
+        if self.scope.get("flasgo.websocket_upgrade"):
+            raise RuntimeError("Request body is not available on a WebSocket upgrade view.")
         if self._body is not None:
             return self._body
 

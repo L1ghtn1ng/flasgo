@@ -107,7 +107,51 @@ You can still use `uvicorn` with reload:
 uv run uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-`app.run(...)` uses the built-in dev server and should only be used for local development.
+`app.run(...)` and `flasgo run` use Uvicorn with proxy-header trust disabled, bounded WebSocket queues/messages,
+lifespan enabled, and per-message compression disabled. They are intended for local development; configure a
+production Uvicorn process explicitly for deployment.
+
+## WebSockets, lifespan, and background tasks
+
+WebSocket routes use the same path converters and authorization decorators as HTTP routes. Flasgo checks the
+`Host` and exact `Origin` before acceptance, rejects missing origins by default, limits messages to 64 KiB and 120
+messages per minute per connection, and never writes modified sessions back through a WebSocket handshake.
+
+```python
+from collections.abc import AsyncGenerator
+
+from flasgo import Flasgo, Response, WebSocket
+
+app = Flasgo()
+
+
+@app.lifespan
+async def lifespan(app: Flasgo) -> AsyncGenerator[None, None]:
+    app.state.ready = True  # process-global; never store request data here
+    yield
+    app.state.ready = False
+
+
+@app.websocket("/rooms/<int:room_id>")
+async def room(websocket: WebSocket, room_id: int) -> None:
+    await websocket.accept()
+    async for message in websocket.iter_json():
+        await websocket.send_json({"room": room_id, "echo": message})
+
+
+@app.post("/jobs")
+async def create_job() -> Response:
+    response = Response.json({"accepted": True}, status_code=202)
+    response.add_task(record_audit_event, "job-created")
+    return response
+```
+
+Background tasks run sequentially after the final buffered response is sent successfully. A task failure is logged
+and does not stop later tasks. Tasks are in-process best effort work, so use a durable queue for critical jobs.
+
+For cross-origin WebSockets, add exact origins such as `https://app.example.com` to
+`WEBSOCKET_ALLOWED_ORIGINS`. Set `WEBSOCKET_ALLOW_MISSING_ORIGIN=True` only for non-browser clients whose
+authentication model does not rely on ambient cookies.
 
 ## Production deployment
 
@@ -150,6 +194,8 @@ Put a reverse proxy/load balancer in front (Caddy, Cloudflare, etc.) for TLS ter
 - Optional per-client throttling for repeated security failures (`429`).
 - Per-route rate limiting with `@app.ratelimit(...)` / `@rate_limit(...)`, using the ASGI client IP by default.
 - Security event logging for host/CSRF/authz denials.
+- Same-origin WebSocket handshakes, pre-accept auth, bounded messages, and connection-level message throttling.
+- Locally generated request IDs by default; incoming IDs are ignored unless strict opt-in validation is enabled.
 - Hardened headers (`CSP`, `HSTS`, `X-Frame-Options`, `Referrer-Policy`, etc.).
 
 These defaults are intended to help teams avoid common OWASP Top 10 2025 failure modes around broken access control, cryptographic failures, security misconfiguration, software and data integrity issues, and SSRF.
@@ -196,6 +242,51 @@ The built-in limiter intentionally does not trust `X-Forwarded-For` by default b
 uv run ruff check .
 uv run ty check
 uv run pytest
+uv audit --frozen
+```
+
+## Operations and CLI
+
+Set `LOG_FORMAT="json"` for bounded structured Flasgo logs. Every HTTP request and WebSocket connection gets a
+locally generated request ID; opt into a trusted upstream ID only with `TRUST_INCOMING_REQUEST_ID=True`.
+
+Prometheus metrics are an optional extra and are disabled by default:
+
+```bash
+uv add 'flasgo[metrics]'
+```
+
+```python
+import os
+
+from flasgo import Flasgo
+
+app = Flasgo(
+    settings={
+        "METRICS_ENABLED": True,
+        "METRICS_BEARER_TOKEN": os.environ["FLASGO_METRICS_TOKEN"],  # at least 32 characters
+    }
+)
+```
+
+The `/metrics` endpoint requires that bearer token, does not instrument itself, and labels HTTP metrics with route
+templates rather than user-controlled paths.
+
+Inspect an app without starting a server:
+
+```bash
+uv run flasgo routes app.py
+uv run flasgo openapi app.py --output openapi.json
+uv run flasgo check app.py
+```
+
+Optional database migrations delegate to Alembic without adding an ORM to Flasgo:
+
+```bash
+uv add 'flasgo[db]'
+uv run flasgo db init
+uv run flasgo db migrate -m "create users"
+uv run flasgo db upgrade
 ```
 
 ## Codebase guide
@@ -206,6 +297,9 @@ Flasgo keeps each framework concern in a small module so new contributors can ch
 - `flasgo/routing.py`: Flask-style path parsing and route matching.
 - `flasgo/request.py`: request headers, cookies, query strings, body parsing, JSON, and forms.
 - `flasgo/response.py`: response objects, response coercion, redirects, JSON, templates, and header validation.
+- `flasgo/websockets.py`: WebSocket state, messages, close handling, and protocol limits.
+- `flasgo/background.py`: post-response best-effort task execution.
+- `flasgo/logging.py` and `flasgo/metrics.py`: request correlation and optional observability.
 - `flasgo/security.py`: security configuration, CSRF, allowed hosts, secure cookies, and default security headers.
 - `flasgo/ratelimit.py`: route decorator metadata and the in-process sliding-window limiter.
 - `flasgo/auth.py`: users, auth backends, permissions, and bearer-token helpers.
@@ -218,8 +312,9 @@ When adding a feature, prefer the existing pattern: keep public decorators on `F
 
 ## API surface (initial)
 
-- CLI: `flasgo run app.py --reload`, `flasgo run package.module:app --reload`
+- CLI: `run`, `routes`, `openapi`, `check`, and optional `db` migration commands
 - `Flasgo.route`, `Flasgo.get`, `Flasgo.post`, `Flasgo.put`, `Flasgo.patch`, `Flasgo.delete`
+- `Flasgo.websocket`, `Flasgo.lifespan`, `Flasgo.state`
 - `Flasgo.before_request`, `Flasgo.after_request`, `Flasgo.errorhandler`
 - `Flasgo.register_auth_backend`, `Flasgo.authorize`
 - `Flasgo.ratelimit`, `rate_limit`
@@ -230,6 +325,7 @@ When adding a feature, prefer the existing pattern: keep public decorators on `F
 - Templating helpers: `JinjaTemplates`, `render_template`, `Response.template`
 - Request helpers: `await request.form()`, `UploadedFile`
 - Response helpers: `redirect`, `Response.redirect`
+- Runtime helpers: `WebSocket`, `WebSocketDisconnect`, `BackgroundTasks`
 - Flask-style path params: `<name>`, `<int:name>`, `<float:name>`, `<path:name>`
 - Optional OpenAPI spec + Swagger UI docs (disabled by default)
 - Response coercion:
@@ -337,7 +433,15 @@ response = client.post("/api/login", json={"username": "alice"})
 assert response.status_code == 200
 ```
 
-The client supports cookies, `json=`, `data=`, multipart `files=`, `follow_redirects=True`, and async requests via `await client.arequest(...)`.
+The client supports cookies, `json=`, `data=`, multipart `files=`, `follow_redirects=True`, and async requests via
+`await client.arequest(...)`. Use it as a context manager for lifespan and WebSocket tests:
+
+```python
+with app.test_client() as client:
+    with client.websocket_connect("/rooms/1") as websocket:
+        websocket.send_json({"message": "hello"})
+        assert websocket.receive_json()["echo"]["message"] == "hello"
+```
 
 ## Flask migration guide
 

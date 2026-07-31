@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,6 +12,7 @@ from .types import Send
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from .background import BackgroundTasks
     from .templating import JinjaTemplates
 
 Headers = Mapping[str, str]
@@ -28,22 +29,24 @@ class Response:
     cookies: list[str] = field(default_factory=list)
     content_type: str = "text/plain; charset=utf-8"
     allow_public_cache: bool = False
+    background: BackgroundTasks | None = None
 
     def __post_init__(self) -> None:
         self.headers = {key.lower(): value for key, value in self.headers.items()}
         self.headers.setdefault("content-type", self.content_type)
-        self.headers.setdefault("content-length", str(len(self.body)))
+        self.prepare()
+
+    def prepare(self) -> None:
+        if not 100 <= self.status_code <= 599:
+            raise ValueError("HTTP response status codes must be between 100 and 599.")
+        self.headers["content-length"] = str(len(self.body))
         for key, value in self.headers.items():
             _validate_header(key, value)
         for cookie in self.cookies:
             _validate_set_cookie(cookie)
 
     async def send(self, send: Send, *, head_only: bool = False) -> None:
-        self.headers["content-length"] = str(len(self.body))
-        for key, value in self.headers.items():
-            _validate_header(key, value)
-        for cookie in self.cookies:
-            _validate_set_cookie(cookie)
+        self.prepare()
         raw_headers = [(key.encode("latin-1"), value.encode("latin-1")) for key, value in self.headers.items()]
         raw_headers.extend((b"set-cookie", cookie.encode("latin-1")) for cookie in self.cookies)
         await send(
@@ -63,12 +66,14 @@ class Response:
         *,
         status_code: int = 200,
         headers: Headers | None = None,
+        background: BackgroundTasks | None = None,
     ) -> Response:
         return cls(
             body=value.encode("utf-8"),
             status_code=status_code,
             headers=dict(headers or {}),
             content_type="text/plain; charset=utf-8",
+            background=background,
         )
 
     @classmethod
@@ -78,12 +83,14 @@ class Response:
         *,
         status_code: int = 200,
         headers: Headers | None = None,
+        background: BackgroundTasks | None = None,
     ) -> Response:
         return cls(
             body=value.encode("utf-8"),
             status_code=status_code,
             headers=dict(headers or {}),
             content_type="text/html; charset=utf-8",
+            background=background,
         )
 
     @classmethod
@@ -96,6 +103,7 @@ class Response:
         context: Mapping[str, Any] | None = None,
         status_code: int = 200,
         headers: Headers | None = None,
+        background: BackgroundTasks | None = None,
     ) -> Response:
         from .templating import JinjaTemplates
 
@@ -107,6 +115,7 @@ class Response:
             templates.render(template_name, context),
             status_code=status_code,
             headers=headers,
+            background=background,
         )
 
     @classmethod
@@ -116,6 +125,7 @@ class Response:
         *,
         status_code: int = 200,
         headers: Headers | None = None,
+        background: BackgroundTasks | None = None,
     ) -> Response:
         payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         return cls(
@@ -123,6 +133,7 @@ class Response:
             status_code=status_code,
             headers=dict(headers or {}),
             content_type="application/json",
+            background=background,
         )
 
     @classmethod
@@ -132,6 +143,7 @@ class Response:
         *,
         status_code: int = 302,
         headers: Headers | None = None,
+        background: BackgroundTasks | None = None,
     ) -> Response:
         response_headers = {"location": location}
         if headers:
@@ -141,7 +153,15 @@ class Response:
             status_code=status_code,
             headers=response_headers,
             content_type="text/plain; charset=utf-8",
+            background=background,
         )
+
+    def add_task(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
+        if self.background is None:
+            from .background import BackgroundTasks
+
+            self.background = BackgroundTasks()
+        self.background.add_task(func, *args, **kwargs)
 
 
 ResponseValue = Response | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
@@ -206,9 +226,18 @@ def _validate_header(name: str, value: str) -> None:
     if any(char in value for char in ("\r", "\n", "\x00")):
         msg = f"Invalid header value for {name!r}"
         raise ValueError(msg)
+    try:
+        name.encode("ascii")
+        value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"HTTP header {name!r} is not Latin-1 encodable.") from exc
 
 
 def _validate_set_cookie(value: str) -> None:
     if any(char in value for char in ("\r", "\n", "\x00")):
         msg = "Invalid Set-Cookie value."
         raise ValueError(msg)
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Set-Cookie values must be Latin-1 encodable.") from exc
