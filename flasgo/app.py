@@ -24,13 +24,17 @@ from .auth import (
     Permission,
     PermissionLike,
     User,
+    auth_backend_openapi_scheme,
     extract_bearer_token,
+    validate_openapi_security_scheme,
 )
 from .debug import Debug
+from .di import resolve_endpoint_arguments
 from .exceptions import HTTPException
 from .logging import configure_logging, log_event
 from .metrics import Metrics
 from .openapi import build_openapi_spec
+from .params import compile_endpoint_plan
 from .ratelimit import (
     RateLimiter,
     build_rate_limit_response,
@@ -62,8 +66,10 @@ from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
+from .telemetry import Telemetry
 from .templating import JinjaTemplates
 from .types import Receive, Scope, Send
+from .validation import RequestValidationError
 from .websockets import WebSocket, WebSocketDisconnect
 
 if TYPE_CHECKING:
@@ -78,8 +84,18 @@ _request_ctx: ContextVar[Request | None] = ContextVar("flasgo_request", default=
 _session_ctx: ContextVar[Session | None] = ContextVar("flasgo_session", default=None)
 _user_ctx: ContextVar[User | None] = ContextVar("flasgo_user", default=None)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_HTTP_METHOD_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 _METRIC_HTTP_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
+# Stable HTTP server span known methods (RFC 9110 + PATCH + QUERY).
+# Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
+_OTEL_HTTP_METHODS = frozenset(
+    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"}
+)
 _INSECURE_SENTINEL = "dev-insecure-secret-change-this"
+_SWAGGER_UI_VERSION = "5.32.12"
+_SWAGGER_UI_CSS_INTEGRITY = "sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT"
+_SWAGGER_UI_JS_INTEGRITY = "sha384-aPw2h1Un96ObRq1fD7AOgyf0r9jgkhMD51uBltHKtT0++4LsgMUkQD52RFNWcAil"
 
 
 class _DefaultAuthBackend:
@@ -137,6 +153,7 @@ class Flasgo:
         static_folder: str | Path | None = None,
         static_url_path: str = "/static",
         static_cache_max_age: int = 3600,
+        tracer_provider: Any | None = None,
     ) -> None:
         self.settings = load_settings(settings)
         self.security = security or self.settings.to_security_config()
@@ -149,6 +166,7 @@ class Flasgo:
         self._error_handlers: dict[type[Exception], ErrorHandler] = {}
         self._session_signer = SessionSigner(self.security.secret_key)
         self._auth_backends: dict[str, AuthBackend] = {"default": _default_auth_backend}
+        self._auth_backend_schemes: dict[str, dict[str, Any]] = {}
         self._route_auth: dict[object, RouteAuth] = {}
         self._rate_limiter = RateLimiter()
         self._openapi_cache: dict[str, Any] | None = None
@@ -163,6 +181,17 @@ class Flasgo:
         self._lifespan_active = False
         self.state = SimpleNamespace()
         self._metrics = Metrics() if self.settings.METRICS_ENABLED else None
+        self._telemetry = (
+            Telemetry(
+                self._dispatch_asgi,
+                settings=self.settings,
+                span_details=self._otel_span_details,
+                scope_headers=self._otel_scope_headers,
+                tracer_provider=tracer_provider,
+            )
+            if self.settings.OTEL_ENABLED or tracer_provider is not None
+            else None
+        )
         self.templates = templates
         self.ssrf = SSRFGuard(
             SSRFConfig(
@@ -182,6 +211,14 @@ class Flasgo:
             )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") in {"http", "websocket"}:
+            scope["request_id"] = self._request_id_for_scope(scope)
+            if self._telemetry is not None:
+                await self._telemetry(scope, receive, send)
+                return
+        await self._dispatch_asgi(scope, receive, send)
+
+    async def _dispatch_asgi(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope.get("type")
         if scope_type == "http":
             await self._handle_http(scope, receive, send)
@@ -197,9 +234,24 @@ class Flasgo:
 
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         started = time.perf_counter()
-        scope["request_id"] = self._request_id_for_scope(scope)
+        if _request_head_size(scope) > self.security.max_request_head_bytes:
+            response = Response.text(
+                "Request headers exceed MAX_REQUEST_HEAD_BYTES.",
+                status_code=431,
+                headers={
+                    "connection": "close",
+                    "x-request-id": str(scope.get("request_id", "")),
+                },
+            )
+            apply_security_headers(response, self.security)
+            await response.send(send)
+            return
         req = Request(scope, receive)
         req.scope["max_request_body_bytes"] = self.security.max_request_body_bytes
+        req.scope["request_read_timeout_seconds"] = self.security.request_read_timeout_seconds
+        req.scope["max_validation_depth"] = self.security.max_validation_depth
+        req.scope["max_validation_work"] = self.security.max_validation_work
+        req.scope["max_validation_issues"] = self.security.max_validation_issues
         instrument = self._metrics is not None and req.path != self.settings.METRICS_PATH
         if instrument:
             self._metrics.http_active.inc()
@@ -321,6 +373,12 @@ class Flasgo:
                             raise RuntimeError("A Flasgo lifespan handler must yield exactly once.")
                     self._lifespan_iterator = None
                     self._lifespan_active = False
+                    if self._telemetry is not None:
+                        try:
+                            await asyncio.to_thread(self._telemetry.shutdown)
+                        except Exception:
+                            log_event(self._lifespan_logger, logging.WARNING, "otel-shutdown-failed")
+                            self._lifespan_logger.debug("OpenTelemetry shutdown exception", exc_info=True)
                     if self._metrics is not None:
                         self._metrics.observe_lifespan("shutdown", "success")
                     await send({"type": "lifespan.shutdown.complete"})
@@ -344,7 +402,6 @@ class Flasgo:
 
     async def _handle_websocket(self, scope: Scope, receive: Receive, send: Send) -> None:
         started = time.perf_counter()
-        scope["request_id"] = self._request_id_for_scope(scope)
         websocket = WebSocket(
             scope,
             receive,
@@ -385,6 +442,18 @@ class Flasgo:
                 await websocket.deny(403, "Forbidden")
                 return
 
+            websocket_auth = self._route_auth.get(match.endpoint)
+            rate_phase = "pre_auth" if websocket_auth is not None else "all"
+            rate_limit_result = await self._check_rate_limits(upgrade_req, match.endpoint, phase=rate_phase)
+            if isinstance(rate_limit_result, Response):
+                outcome = "rate_limited"
+                await websocket.deny(
+                    429,
+                    _status_text(429),
+                    headers=_websocket_rate_limit_headers(rate_limit_result),
+                )
+                return
+
             denial = await self._authorize_websocket(upgrade_req, match.endpoint)
             scope["user"] = upgrade_req.scope["user"]
             if denial is not None:
@@ -392,6 +461,21 @@ class Flasgo:
                 outcome = f"denied_{status}"
                 await websocket.deny(status, _status_text(status), headers=headers)
                 return
+
+            if websocket_auth is not None:
+                authenticated_rate_limit = await self._check_rate_limits(
+                    upgrade_req,
+                    match.endpoint,
+                    phase="post_auth",
+                )
+                if isinstance(authenticated_rate_limit, Response):
+                    outcome = "rate_limited"
+                    await websocket.deny(
+                        429,
+                        _status_text(429),
+                        headers=_websocket_rate_limit_headers(authenticated_rate_limit),
+                    )
+                    return
 
             if self._metrics is not None:
                 self._metrics.websocket_active.labels(route=route).inc()
@@ -508,10 +592,15 @@ class Flasgo:
         if backend is None:
             self._log_security_event(logging.ERROR, "auth-backend-missing", req=req)
             return 500, {}
+        if self._security_failure_is_limited(req):
+            self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
+            return 429, {}
         try:
             authenticated = await _maybe_await(backend(req))
         except Exception:
             self._log_security_event(logging.ERROR, "auth-backend-error", req=req)
+            if self._register_security_failure(req):
+                return 429, {}
             return 500, {}
         auth_result = _normalize_auth_identity(authenticated)
         resolved_user = auth_result.user or User.anonymous()
@@ -519,6 +608,8 @@ class Flasgo:
         for permission in auth.permissions:
             if not await self._evaluate_permission(permission, req, resolved_user):
                 self._log_security_event(logging.WARNING, "permission-denied", req=req)
+                if self._register_security_failure(req):
+                    return 429, {}
                 status = 403 if resolved_user.is_authenticated else 401
                 headers = {"www-authenticate": auth_result.challenge} if auth_result.challenge else {}
                 return status, headers
@@ -543,6 +634,47 @@ class Flasgo:
             if result is not None:
                 return result
         return None
+
+    def _otel_span_details(self, scope: Scope) -> tuple[str, dict[str, str]]:
+        scope_type = str(scope.get("type", ""))
+        path = str(scope.get("path", "/"))
+        route = "<unmatched>"
+        if scope_type == "http":
+            method = str(scope.get("method", "GET")).upper()
+            # Span name uses the known method token, or "HTTP" when method is unknown
+            # (http.request.method may still be _OTHER on the span attributes from ASGI).
+            span_method = method if method in _OTEL_HTTP_METHODS else "HTTP"
+            match, _ = self._match_route(path, method)
+            if match is not None:
+                route = match.route_path
+            else:
+                path_route = self._otel_route_template(path)
+                if path_route is not None:
+                    route = path_route
+            if (
+                route == "<unmatched>"
+                and path in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}
+                and self.settings.ENABLE_DOCS
+            ):
+                route = path
+            elif route == "<unmatched>" and path == self.settings.METRICS_PATH and self.settings.METRICS_ENABLED:
+                route = path
+            return f"{span_method} {route}", {"http.route": route, "flasgo.request_id": str(scope["request_id"])}
+        if scope_type == "websocket":
+            match = self._match_websocket_route(path)
+            if match is not None:
+                route = match.route_path
+            return f"WEBSOCKET {route}", {"http.route": route, "flasgo.request_id": str(scope["request_id"])}
+        return scope_type or "ASGI", {}
+
+    def _otel_scope_headers(self, scope: Scope) -> list[tuple[bytes, bytes]]:
+        headers = list(scope.get("headers", []))
+        if not self.security.enforce_allowed_hosts:
+            return headers
+        host_values = _scope_header_values(scope, b"host")
+        if len(host_values) == 1 and host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts):
+            return headers
+        return [(name, value) for name, value in headers if name.lower() != b"host"]
 
     def route(
         self,
@@ -616,11 +748,24 @@ class Flasgo:
 
         return decorator
 
-    def register_auth_backend(self, name: str, backend: AuthBackend) -> None:
+    def register_auth_backend(
+        self,
+        name: str,
+        backend: AuthBackend,
+        *,
+        openapi_scheme: Mapping[str, object] | None = None,
+    ) -> None:
         normalized = name.strip()
         if not normalized:
             raise ValueError("Auth backend name must not be empty. Pass a stable name such as 'default' or 'bearer'.")
+        scheme = auth_backend_openapi_scheme(backend) if openapi_scheme is None else openapi_scheme
+        validated_scheme = None if scheme is None else validate_openapi_security_scheme(normalized, scheme)
         self._auth_backends[normalized] = backend
+        if validated_scheme is None:
+            self._auth_backend_schemes.pop(normalized, None)
+        else:
+            self._auth_backend_schemes[normalized] = validated_scheme
+        self._openapi_dirty = True
 
     def authorize[T: Callable[..., Any]](
         self,
@@ -637,18 +782,19 @@ class Flasgo:
                 backend=backend_name,
                 permissions=route_permissions,
             )
+            self._openapi_dirty = True
             return endpoint
 
         return decorator
 
-    def ratelimit(
+    def ratelimit[T: Callable[..., Any]](
         self,
         requests: int,
         *,
         per: float,
         scope: str | None = None,
         key_func: Callable[[Request], str | None] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
+    ) -> Callable[[T], T]:
         return rate_limit(requests, per=per, scope=scope, key_func=key_func)
 
     def add_route(
@@ -666,10 +812,18 @@ class Flasgo:
             reserved_paths.update((self.settings.DOCS_PATH, self.settings.OPENAPI_PATH))
         if path in reserved_paths:
             raise ValueError(f"Route {path!r} conflicts with an enabled internal endpoint.")
-        normalized = frozenset(method.upper() for method in methods)
+        normalized_methods: set[str] = set()
+        for method in methods:
+            if not isinstance(method, str) or not _HTTP_METHOD_RE.fullmatch(method):
+                raise ValueError("HTTP route methods must be non-empty RFC 9110 method tokens such as GET or QUERY.")
+            normalized_methods.add(method.upper())
+        if not normalized_methods:
+            raise ValueError("HTTP routes require at least one method.")
+        normalized = frozenset(normalized_methods)
         if "GET" in normalized:
             normalized = frozenset((*normalized, "HEAD"))
-        self._routes.append(Route(path, normalized, endpoint, name=name))
+        plan = compile_endpoint_plan(endpoint, path)
+        self._routes.append(Route(path, normalized, endpoint, plan, name=name))
         self._openapi_dirty = True
 
     def run(
@@ -690,6 +844,7 @@ class Flasgo:
                 reload_dirs=reload_dirs,
                 websocket_max_message_bytes=self.settings.WEBSOCKET_MAX_MESSAGE_BYTES,
                 limit_concurrency=self.settings.SERVER_LIMIT_CONCURRENCY,
+                max_request_head_bytes=self.security.max_request_head_bytes,
             )
         )
 
@@ -767,9 +922,10 @@ class Flasgo:
     def _prepare_response(self, req: Request, response: Response) -> None:
         response.headers.setdefault("x-request-id", req.request_id)
         apply_security_headers(response, self.security)
-        if self.security.csrf_enabled:
-            ensure_csrf_cookie(req, response, self.security)
-        self._persist_session(req, response)
+        if not response.allow_public_cache:
+            session_token = self._persist_session(req, response)
+            if self.security.csrf_enabled:
+                ensure_csrf_cookie(req, response, self.security, session_token=session_token)
         response.prepare()
 
     def _handle_metrics_request(self, req: Request) -> Response | None:
@@ -783,7 +939,13 @@ class Flasgo:
             )
         token = extract_bearer_token(req.headers.get("authorization"))
         expected = self.settings.METRICS_BEARER_TOKEN or ""
-        if token is None or not secrets.compare_digest(token, expected):
+        try:
+            token_bytes = token.encode("ascii") if token is not None else None
+            expected_bytes = expected.encode("ascii")
+        except UnicodeEncodeError:
+            token_bytes = None
+            expected_bytes = b""
+        if token_bytes is None or not secrets.compare_digest(token_bytes, expected_bytes):
             self._log_security_event(logging.WARNING, "metrics-auth-failed", req=req)
             return Response.text(
                 "Unauthorized",
@@ -793,7 +955,7 @@ class Flasgo:
         body, content_type = self._metrics.render()
         return Response(body=body, content_type=content_type)
 
-    def _handle_docs_request(self, req: Request) -> Response | None:
+    async def _handle_docs_request(self, req: Request) -> Response | None:
         if not self.settings.ENABLE_DOCS:
             return None
 
@@ -808,26 +970,64 @@ class Flasgo:
                 headers={"allow": "GET, HEAD"},
             )
 
+        auth_response = await self._authorize_docs_request(req)
+        if auth_response is not None:
+            return auth_response
+
         if req.path == openapi_path:
             return Response.json(self.openapi_spec())
 
+        nonce = secrets.token_urlsafe(16)
         return Response.html(
             _swagger_ui_html(
                 openapi_path=openapi_path,
                 title=self.settings.API_TITLE,
+                nonce=nonce,
             ),
             headers={
                 "content-security-policy": (
                     "default-src 'self'; "
-                    "script-src 'self' https://unpkg.com; "
-                    "style-src 'self' 'unsafe-inline' https://unpkg.com; "
-                    "img-src 'self' data: https:; "
+                    f"script-src 'self' https://unpkg.com 'nonce-{nonce}'; "
+                    f"style-src 'self' https://unpkg.com 'nonce-{nonce}'; "
+                    "img-src 'self' data:; "
                     "connect-src 'self'; "
                     "font-src https://unpkg.com; "
-                    "frame-ancestors 'none'"
+                    "object-src 'none'; "
+                    "base-uri 'none'; "
+                    "frame-ancestors 'none'; "
+                    "form-action 'self'"
                 )
             },
         )
+
+    async def _authorize_docs_request(self, req: Request) -> Response | None:
+        backend_name = self.settings.DOCS_AUTH_BACKEND
+        if backend_name is None:
+            return None
+        backend = self._auth_backends.get(backend_name.strip())
+        if backend is None:
+            self._log_security_event(logging.ERROR, "docs-auth-backend-missing", req=req)
+            return Response.text("Internal Server Error", status_code=500)
+        if self._security_failure_is_limited(req):
+            self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
+            return _security_rate_limit_response()
+        try:
+            identity = await _maybe_await(backend(req))
+        except Exception:
+            self._log_security_event(logging.ERROR, "docs-auth-backend-error", req=req)
+            if self._register_security_failure(req):
+                return _security_rate_limit_response()
+            return Response.text("Internal Server Error", status_code=500)
+        auth_result = _normalize_auth_identity(identity)
+        resolved_user = auth_result.user or User.anonymous()
+        req.scope["user"] = resolved_user
+        _user_ctx.set(resolved_user)
+        if not resolved_user.is_authenticated:
+            self._log_security_event(logging.WARNING, "docs-auth-failed", req=req)
+            if self._register_security_failure(req):
+                return _security_rate_limit_response()
+            return _permission_denied_response(resolved_user, challenge=auth_result.challenge)
+        return None
 
     def openapi_spec(self) -> dict[str, Any]:
         """Return the cached OpenAPI document for the registered routes."""
@@ -836,9 +1036,14 @@ class Flasgo:
             return self._openapi_cache
         spec = build_openapi_spec(
             routes=self._routes,
+            route_auth=self._route_auth,
+            auth_schemes=self._auth_backend_schemes,
             title=self.settings.API_TITLE,
             version=self.settings.API_VERSION,
             description=self.settings.API_DESCRIPTION,
+            servers=self.settings.API_SERVERS,
+            csrf_enabled=self.security.csrf_enabled,
+            csrf_safe_methods=self.security.csrf_safe_methods,
         )
         self._openapi_cache = spec
         self._openapi_dirty = False
@@ -857,16 +1062,40 @@ class Flasgo:
             raise ValueError("MAX_REQUEST_HEAD_BYTES must be greater than 0.")
         if self.security.request_read_timeout_seconds <= 0:
             raise ValueError("REQUEST_READ_TIMEOUT_SECONDS must be greater than 0.")
+        if self.security.max_validation_depth <= 0:
+            raise ValueError("MAX_VALIDATION_DEPTH must be greater than 0.")
+        if self.security.max_validation_work <= 0:
+            raise ValueError("MAX_VALIDATION_WORK must be greater than 0.")
+        if self.security.max_validation_issues < 2:
+            raise ValueError("MAX_VALIDATION_ISSUES must be at least 2.")
         if self.security.security_failure_window_seconds <= 0:
             raise ValueError("SECURITY_FAILURE_WINDOW_SECONDS must be greater than 0.")
         if not self.settings.SSRF_ALLOWED_SCHEMES:
             raise ValueError("SSRF_ALLOWED_SCHEMES must not be empty. Include at least one scheme such as 'https'.")
+        if not isinstance(self.settings.OTEL_SERVICE_NAME, str) or not self.settings.OTEL_SERVICE_NAME.strip():
+            raise ValueError("OTEL_SERVICE_NAME must not be empty.")
+        if self.settings.OTEL_SERVICE_VERSION is not None and not isinstance(self.settings.OTEL_SERVICE_VERSION, str):
+            raise ValueError("OTEL_SERVICE_VERSION must be a string or None.")
+        if (
+            isinstance(self.settings.OTEL_TRACE_SAMPLE_RATIO, bool)
+            or not isinstance(self.settings.OTEL_TRACE_SAMPLE_RATIO, int | float)
+            or not 0 <= self.settings.OTEL_TRACE_SAMPLE_RATIO <= 1
+        ):
+            raise ValueError("OTEL_TRACE_SAMPLE_RATIO must be between 0 and 1 inclusive.")
+        if any(not isinstance(path, str) or not path.startswith("/") for path in self.settings.OTEL_EXCLUDED_PATHS):
+            raise ValueError("Every OTEL_EXCLUDED_PATHS entry must start with '/'.")
         if not self.settings.DOCS_PATH.startswith("/"):
             raise ValueError("DOCS_PATH must start with '/'. Example: '/docs'.")
         if not self.settings.OPENAPI_PATH.startswith("/"):
             raise ValueError("OPENAPI_PATH must start with '/'. Example: '/openapi.json'.")
         if self.settings.DOCS_PATH == self.settings.OPENAPI_PATH:
             raise ValueError("DOCS_PATH and OPENAPI_PATH must be different so each endpoint has its own URL.")
+        if self.settings.DOCS_AUTH_BACKEND is not None and (
+            not isinstance(self.settings.DOCS_AUTH_BACKEND, str) or not self.settings.DOCS_AUTH_BACKEND.strip()
+        ):
+            raise ValueError("DOCS_AUTH_BACKEND must be a non-empty registered backend name or None.")
+        if any(not isinstance(url, str) or not url.strip() for url in self.settings.API_SERVERS):
+            raise ValueError("API_SERVERS entries must be non-empty URL strings.")
         if self.settings.LOG_FORMAT.strip().lower() not in {"text", "json"}:
             raise ValueError("LOG_FORMAT must be 'text' or 'json'.")
         if self.settings.LOG_LEVEL.upper() not in logging.getLevelNamesMapping():
@@ -886,8 +1115,11 @@ class Flasgo:
             raise ValueError("METRICS_PATH must start with '/'.")
         if self.settings.METRICS_ENABLED:
             token = self.settings.METRICS_BEARER_TOKEN
-            if not isinstance(token, str) or len(token) < 32:
-                raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 characters when metrics are enabled.")
+            if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
+                raise ValueError(
+                    "METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters "
+                    "when metrics are enabled."
+                )
             if self.settings.METRICS_PATH in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}:
                 raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
 
@@ -918,7 +1150,7 @@ class Flasgo:
             req.scope["route_template"] = self.settings.METRICS_PATH
             return metrics_response
 
-        docs_response = self._handle_docs_request(req)
+        docs_response = await self._handle_docs_request(req)
         if docs_response is not None:
             req.scope["route_template"] = req.path
             return docs_response
@@ -947,27 +1179,47 @@ class Flasgo:
             )
 
         req.scope["route_template"] = match.route_path
+        route_auth = self._route_auth.get(match.endpoint)
+        rate_phase = "pre_auth" if route_auth is not None else "all"
+        rate_limit_result = await self._check_rate_limits(req, match.endpoint, phase=rate_phase)
+        if isinstance(rate_limit_result, Response):
+            return await self._run_after_middleware(req, rate_limit_result)
+
         auth_response = await self._authorize_request(req, match.endpoint)
         if auth_response is not None:
             return auth_response
 
-        rate_limit_result = await self._check_rate_limits(req, match.endpoint)
-        if isinstance(rate_limit_result, Response):
-            return await self._run_after_middleware(req, rate_limit_result)
+        if route_auth is not None:
+            authenticated_rate_limit = await self._check_rate_limits(req, match.endpoint, phase="post_auth")
+            if isinstance(authenticated_rate_limit, Response):
+                return await self._run_after_middleware(req, authenticated_rate_limit)
+            rate_limit_result.update(authenticated_rate_limit)
 
         raw_response = await self._call_endpoint(req, match)
         response = to_response(raw_response)
         response.headers.update(rate_limit_result)
         return await self._run_after_middleware(req, response)
 
-    async def _check_rate_limits(self, req: Request, endpoint: Endpoint) -> dict[str, str] | Response:
+    async def _check_rate_limits(
+        self,
+        req: Request,
+        endpoint: Endpoint | WebSocketEndpoint,
+        *,
+        phase: str = "all",
+    ) -> dict[str, str] | Response:
         headers: dict[str, str] = {}
-        rules_list = list(endpoint_rate_limits(endpoint))
-        if not rules_list:
+        indexed_rules = [
+            (index, rule)
+            for index, rule in enumerate(endpoint_rate_limits(endpoint))
+            if phase == "all"
+            or (phase == "pre_auth" and rule.key_func is None)
+            or (phase == "post_auth" and rule.key_func is not None)
+        ]
+        if not indexed_rules:
             return headers
 
         # Check all rules atomically using batch method
-        rules_with_ids = [(rule, f"{id(endpoint)}:{index}") for index, rule in enumerate(rules_list)]
+        rules_with_ids = [(rule, f"{id(endpoint)}:{index}") for index, rule in indexed_rules]
         decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
 
         # Process decisions
@@ -992,11 +1244,8 @@ class Flasgo:
         return current
 
     async def _call_endpoint(self, req: Request, match: MatchResult) -> ResponseValue:
-        signature = inspect.signature(match.endpoint)
-        if "request" in signature.parameters:
-            value = match.endpoint(request=req, **match.params)
-        else:
-            value = match.endpoint(**match.params)
+        arguments = await resolve_endpoint_arguments(match.endpoint_plan, req, match.params)
+        value = match.endpoint(**arguments)
         return await _maybe_await(value)
 
     def _build_static_endpoint(self, directory: StaticDirectory) -> Endpoint:
@@ -1015,7 +1264,29 @@ class Flasgo:
                 allowed_methods.update(route.methods)
         return None, allowed_methods
 
+    def _otel_route_template(self, path: str) -> str | None:
+        fallback: str | None = None
+        for route in self._routes:
+            if route.path_matches(path):
+                if route.raw_path in self.settings.OTEL_EXCLUDED_PATHS:
+                    return route.raw_path
+                fallback = fallback or route.raw_path
+        return fallback
+
     async def _handle_error(self, req: Request, exc: Exception) -> Response:
+        if isinstance(exc, RequestValidationError):
+            for klass in type(exc).__mro__:
+                handler = self._error_handlers.get(klass)
+                if handler is not None:
+                    return to_response(await _maybe_await(handler(req, exc)))
+            return Response.json(
+                {
+                    "error": "validation_error",
+                    "detail": "Request validation failed.",
+                    "errors": [issue.as_dict() for issue in exc.issues],
+                },
+                status_code=422,
+            )
         if isinstance(exc, HTTPException):
             response = Response.text(
                 exc.detail or _status_text(exc.status_code),
@@ -1048,10 +1319,10 @@ class Flasgo:
         data = self._session_signer.loads(token, max_age=self.security.session_cookie_max_age)
         return Session(data or {})
 
-    def _persist_session(self, req: Request, response: Response) -> None:
+    def _persist_session(self, req: Request, response: Response) -> str | None:
         current = req.scope.get("session")
         if not isinstance(current, Session) or not current.modified:
-            return
+            return req.cookies.get(self.security.session_cookie_name)
         if not current.data:
             response.cookies.append(
                 build_set_cookie(
@@ -1063,7 +1334,7 @@ class Flasgo:
                     same_site=self.security.session_cookie_same_site,
                 )
             )
-            return
+            return ""
         token = self._session_signer.dumps(current.data)
         response.cookies.append(
             build_set_cookie(
@@ -1075,6 +1346,7 @@ class Flasgo:
                 same_site=self.security.session_cookie_same_site,
             )
         )
+        return token
 
     async def _authorize_request(self, req: Request, endpoint: Endpoint) -> Response | None:
         auth = self._route_auth.get(endpoint)
@@ -1089,6 +1361,9 @@ class Flasgo:
                 "Register it with app.register_auth_backend(...).",
                 status_code=500,
             )
+        if self._security_failure_is_limited(req):
+            self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
+            return _security_rate_limit_response()
 
         challenge: str | None = None
         try:
@@ -1137,6 +1412,20 @@ class Flasgo:
         self._security_failures[client] = (start, count)
         return count > limit
 
+    def _security_failure_is_limited(self, req: Request) -> bool:
+        limit = self.security.security_failure_rate_limit
+        if limit <= 0:
+            return False
+        client = req.client_ip or "unknown"
+        state = self._security_failures.get(client)
+        if state is None:
+            return False
+        start, count = state
+        if time.monotonic() - start >= self.security.security_failure_window_seconds:
+            self._security_failures.pop(client, None)
+            return False
+        return count >= limit
+
     def _log_security_event(self, level: int, event: str, *, req: Request) -> None:
         if not self.security.log_security_events:
             return
@@ -1175,8 +1464,9 @@ class Flasgo:
             return False
 
 
-def _swagger_ui_html(*, openapi_path: str, title: str) -> str:
+def _swagger_ui_html(*, openapi_path: str, title: str, nonce: str) -> str:
     safe_title = html.escape(title, quote=True)
+    safe_nonce = html.escape(nonce, quote=True)
     openapi_path_json = json.dumps(openapi_path)
     return f"""<!doctype html>
 <html>
@@ -1184,8 +1474,9 @@ def _swagger_ui_html(*, openapi_path: str, title: str) -> str:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{safe_title} Docs</title>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
-    <style>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@{_SWAGGER_UI_VERSION}/swagger-ui.css"
+      integrity="{_SWAGGER_UI_CSS_INTEGRITY}" crossorigin="anonymous" />
+    <style nonce="{safe_nonce}">
       html, body {{
         margin: 0;
         padding: 0;
@@ -1197,12 +1488,15 @@ def _swagger_ui_html(*, openapi_path: str, title: str) -> str:
   </head>
   <body>
     <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-    <script>
+    <script src="https://unpkg.com/swagger-ui-dist@{_SWAGGER_UI_VERSION}/swagger-ui-bundle.js"
+      integrity="{_SWAGGER_UI_JS_INTEGRITY}" crossorigin="anonymous"></script>
+    <script nonce="{safe_nonce}">
       window.ui = SwaggerUIBundle({{
         url: {openapi_path_json},
         dom_id: "#swagger-ui",
         deepLinking: true,
+        queryConfigEnabled: false,
+        validatorUrl: null,
       }});
     </script>
   </body>
@@ -1239,6 +1533,24 @@ def _scope_header_values(scope: Scope, name: bytes) -> list[str]:
     return [value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == name]
 
 
+def _request_head_size(scope: Scope) -> int:
+    """Return a conservative byte count for an ASGI HTTP request head."""
+
+    method = str(scope.get("method", "GET")).encode("ascii", "replace")
+    raw_path = scope.get("raw_path")
+    path = raw_path if isinstance(raw_path, bytes) else str(scope.get("path", "/")).encode("utf-8")
+    query = scope.get("query_string", b"")
+    query_bytes = query if isinstance(query, bytes) else b""
+    target_size = len(path) + (1 + len(query_bytes) if query_bytes else 0)
+    version = str(scope.get("http_version", "1.1")).encode("ascii", "replace")
+    size = len(method) + 1 + target_size + len(b" HTTP/") + len(version) + len(b"\r\n")
+    for name, value in scope.get("headers", []):
+        if not isinstance(name, bytes) or not isinstance(value, bytes):
+            continue
+        size += len(name) + len(b": ") + len(value) + len(b"\r\n")
+    return size + len(b"\r\n")
+
+
 def _status_text(status_code: int) -> str:
     return {
         400: "Bad Request",
@@ -1248,6 +1560,7 @@ def _status_text(status_code: int) -> str:
         405: "Method Not Allowed",
         408: "Request Timeout",
         413: "Payload Too Large",
+        431: "Request Header Fields Too Large",
         429: "Too Many Requests",
         500: "Internal Server Error",
     }.get(status_code, str(status_code))
@@ -1263,6 +1576,14 @@ def _security_rate_limit_response() -> Response:
         "Too many failed security checks from this client. Wait a moment before retrying.",
         status_code=429,
     )
+
+
+def _websocket_rate_limit_headers(response: Response) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in response.headers.items()
+        if name == "retry-after" or name.startswith("ratelimit-") or name.startswith("x-ratelimit-")
+    }
 
 
 def _permission_denied_response(user: User, *, challenge: str | None) -> Response:

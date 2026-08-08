@@ -13,7 +13,9 @@ from .auth import (
 from .background import BackgroundTasks
 from .exceptions import HTTPException, abort
 from .globals import current_user, jsonify, redirect, request, session
+from .jwt import encode_jwt, jwt_backend
 from .logging import FlasgoJSONFormatter, configure_logging
+from .params import Body, Cookie, Depends, Form, Header, Query
 from .ratelimit import RateLimitRule, rate_limit
 from .request import FormData, Request, UploadedFile
 from .response import Response
@@ -36,6 +38,7 @@ from .testing import (
     TestResponse,
     WebSocketHandshakeError,
 )
+from .validation import FormValidationError, RequestValidationError, ValidationIssue
 from .websockets import WebSocket, WebSocketDisconnect, WebSocketException
 
 __all__ = [
@@ -44,15 +47,23 @@ __all__ = [
     "AuthResult",
     "BackgroundTasks",
     "BaseLoader",
+    "Body",
+    "Cookie",
+    "Depends",
     "Flasgo",
     "FlasgoJSONFormatter",
+    "Form",
     "FormData",
+    "FormValidationError",
     "HTTPException",
     "HasScope",
+    "Header",
     "IsAuthenticated",
     "JinjaTemplates",
+    "Query",
     "RateLimitRule",
     "Request",
+    "RequestValidationError",
     "Response",
     "SSRFConfig",
     "SSRFGuard",
@@ -68,6 +79,7 @@ __all__ = [
     "TestResponse",
     "UploadedFile",
     "User",
+    "ValidationIssue",
     "WebSocket",
     "WebSocketDisconnect",
     "WebSocketException",
@@ -77,8 +89,10 @@ __all__ = [
     "configure_logging",
     "create_template_environment",
     "current_user",
+    "encode_jwt",
     "extract_bearer_token",
     "jsonify",
+    "jwt_backend",
     "rate_limit",
     "redirect",
     "render_template",

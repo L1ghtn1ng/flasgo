@@ -95,11 +95,14 @@ def test_dev_server_uses_hardened_uvicorn_configuration(monkeypatch: pytest.Monk
             8000,
             websocket_max_message_bytes=4096,
             limit_concurrency=100,
+            max_request_head_bytes=8192,
         )
     )
 
     assert seen["lifespan"] == "on"
     assert seen["proxy_headers"] is False
+    assert seen["http"] == "h11"
+    assert seen["h11_max_incomplete_event_size"] == 8192
     assert seen["ws_max_size"] == 4096
     assert seen["ws_per_message_deflate"] is False
     assert seen["limit_concurrency"] == 100

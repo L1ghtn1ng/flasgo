@@ -1,17 +1,90 @@
 from __future__ import annotations
 
+import asyncio
 import mimetypes
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO, cast
 
 from .exceptions import HTTPException
 from .request import Request
 from .response import Response
+from .types import Send
+
+_STREAM_CHUNK_SIZE = 64 * 1024
+
+
+def _open_static_file(path: Path) -> BinaryIO:
+    return cast(BinaryIO, path.open("rb"))
+
+
+def _read_static_chunk(handle: BinaryIO) -> bytes:
+    return handle.read(_STREAM_CHUNK_SIZE)
+
+
+class StaticFileResponse(Response):
+    """Stream a contained static file without buffering it on the event loop."""
+
+    __slots__ = ("_path", "_size")
+
+    def __init__(
+        self,
+        path: Path,
+        size: int,
+        *,
+        headers: dict[str, str],
+        content_type: str,
+    ) -> None:
+        self._path = path
+        self._size = size
+        super().__init__(
+            body=b"",
+            headers=headers,
+            content_type=content_type,
+            allow_public_cache=True,
+        )
+
+    def prepare(self) -> None:
+        super().prepare()
+        if not self.body:
+            self.headers["content-length"] = str(self._size)
+
+    async def send(self, send: Send, *, head_only: bool = False) -> None:
+        if self.body:
+            await super().send(send, head_only=head_only)
+            return
+
+        handle = None if head_only else await asyncio.to_thread(_open_static_file, self._path)
+        try:
+            if handle is not None:
+                stat = os.fstat(handle.fileno())
+                self._size = stat.st_size
+                self.headers["etag"] = _etag(stat)
+                self.headers["last-modified"] = _http_date(stat.st_mtime)
+            self.prepare()
+            raw_headers = [(key.encode("latin-1"), value.encode("latin-1")) for key, value in self.headers.items()]
+            raw_headers.extend((b"set-cookie", cookie.encode("latin-1")) for cookie in self.cookies)
+            await send({"type": "http.response.start", "status": self.status_code, "headers": raw_headers})
+            if handle is None:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+
+            while chunk := await asyncio.to_thread(_read_static_chunk, handle):
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            if handle is not None:
+                await asyncio.to_thread(handle.close)
 
 
 def _http_date(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=UTC).strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+
+def _etag(stat: os.stat_result) -> str:
+    return f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
 
 
 def _normalize_static_path(value: str) -> PurePosixPath:
@@ -73,7 +146,7 @@ def build_static_response(
         raise HTTPException(404, "Not Found")
 
     stat = resolved.stat()
-    etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+    etag = _etag(stat)
     if request.headers.get("if-none-match") == etag:
         return Response(
             body=b"",
@@ -86,11 +159,6 @@ def build_static_response(
             allow_public_cache=True,
         )
 
-    try:
-        payload = resolved.read_bytes()
-    except OSError as exc:
-        raise HTTPException(404, "Not Found") from exc
-
     content_type, encoding = mimetypes.guess_type(str(resolved))
     headers = {
         "cache-control": f"public, max-age={directory.cache_max_age}",
@@ -99,9 +167,9 @@ def build_static_response(
     }
     if encoding:
         headers["content-encoding"] = encoding
-    return Response(
-        body=payload,
+    return StaticFileResponse(
+        resolved,
+        stat.st_size,
         headers=headers,
         content_type=content_type or "application/octet-stream",
-        allow_public_cache=True,
     )

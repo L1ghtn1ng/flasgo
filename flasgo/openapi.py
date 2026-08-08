@@ -1,82 +1,243 @@
 from __future__ import annotations
 
-import inspect
 import re
-import types
-from collections.abc import Mapping
-from typing import Any, Literal, Union, get_args, get_origin
+from collections.abc import Collection, Iterable, Mapping
+from typing import Any, get_args, get_origin
 
+from .auth import HasScope
+from .params import EndpointPlan, ParameterBinding, binding_wire_name, walk_bindings
+from .ratelimit import endpoint_rate_limits
 from .response import Response
 from .routing import Route
+from .validation import SchemaRegistry, contains_uploaded_file
 
 _PARAM_PATTERN = re.compile(r"<(?:(?P<converter>[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
+_FIXED_PATH_ITEM_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 
 
 def build_openapi_spec(
     *,
     routes: list[Route],
+    route_auth: Mapping[object, object],
+    auth_schemes: Mapping[str, dict[str, Any]],
     title: str,
     version: str,
     description: str = "",
+    servers: Iterable[str] = (),
+    csrf_enabled: bool = False,
+    csrf_safe_methods: Collection[str] = ("GET", "HEAD", "OPTIONS", "TRACE"),
 ) -> dict[str, Any]:
     paths: dict[str, dict[str, Any]] = {}
     operation_ids: set[str] = set()
+    registry = SchemaRegistry()
+    used_security_schemes: set[str] = set()
+    safe_methods = {method.upper() for method in csrf_safe_methods}
 
     for route in routes:
         openapi_path = _to_openapi_path(route.raw_path)
         route_item = paths.setdefault(openapi_path, {})
+        plan = route.endpoint_plan
         for method in sorted(route.methods):
-            method_lower = method.lower()
             if method == "HEAD" and "GET" in route.methods:
                 continue
-            operation = _build_operation(route, method=method, known_operation_ids=operation_ids)
-            route_item[method_lower] = operation
+            operation, security_name = _build_operation(
+                route,
+                plan=plan,
+                method=method,
+                known_operation_ids=operation_ids,
+                registry=registry,
+                route_auth=route_auth,
+                auth_schemes=auth_schemes,
+                csrf_enabled=csrf_enabled,
+                csrf_safe_methods=safe_methods,
+            )
+            if method in _FIXED_PATH_ITEM_METHODS:
+                route_item[method.lower()] = operation
+            else:
+                route_item.setdefault("additionalOperations", {})[method] = operation
+            if security_name is not None:
+                used_security_schemes.add(security_name)
 
-    return {
-        "openapi": "3.1.0",
-        "info": {
-            "title": title,
-            "version": version,
-            "description": description,
-        },
+    document: dict[str, Any] = {
+        "openapi": "3.2.0",
+        "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+        "info": {"title": title, "version": version, "description": description},
         "paths": paths,
     }
+    server_entries = [{"url": url} for url in servers]
+    if server_entries:
+        document["servers"] = server_entries
+    components: dict[str, Any] = {}
+    if registry.schemas:
+        components["schemas"] = registry.schemas
+    if used_security_schemes:
+        components["securitySchemes"] = {name: auth_schemes[name] for name in sorted(used_security_schemes)}
+    if components:
+        document["components"] = components
+    return document
 
 
 def _build_operation(
     route: Route,
     *,
+    plan: EndpointPlan,
     method: str,
     known_operation_ids: set[str],
-) -> dict[str, Any]:
-    try:
-        signature = inspect.signature(route.endpoint, eval_str=True)
-    except NameError, TypeError, ValueError:
-        signature = inspect.signature(route.endpoint)
-    path_params, path_param_names = _path_parameters(route.raw_path)
-    query_params = _query_parameters(signature, path_param_names=path_param_names)
-    parameters = [*path_params, *query_params]
+    registry: SchemaRegistry,
+    route_auth: Mapping[object, object],
+    auth_schemes: Mapping[str, dict[str, Any]],
+    csrf_enabled: bool,
+    csrf_safe_methods: Collection[str],
+) -> tuple[dict[str, Any], str | None]:
+    parameters = _path_parameters(route.raw_path)
+    bindings = walk_bindings(plan)
+    parameters.extend(_bound_parameters(bindings, registry=registry))
 
     operation_id = _operation_id(route, method=method, known_operation_ids=known_operation_ids)
     summary, description = _summary_and_description(route.endpoint.__doc__)
-    response_schema = _response_schema(signature.return_annotation)
-
     operation: dict[str, Any] = {
         "operationId": operation_id,
         "responses": {
             "200": {
                 "description": "Successful Response",
-                "content": response_schema,
+                "content": _response_content(plan.return_annotation, registry=registry),
             }
         },
     }
+    body_binding = next((item for item in bindings if item.source in {"body", "form"}), None)
+    if body_binding is not None:
+        operation["requestBody"] = _request_body(body_binding, registry=registry)
+        operation["responses"]["413"] = {"description": "Payload Too Large"}
+        operation["responses"]["415"] = {"description": "Unsupported Media Type"}
     if parameters:
         operation["parameters"] = parameters
+    if any(item.source in {"query", "header", "cookie", "body", "form"} for item in bindings):
+        operation["responses"]["422"] = {
+            "description": "Request Validation Error",
+            "content": {
+                "application/json": {
+                    "schema": _validation_error_schema(registry),
+                }
+            },
+        }
     if summary:
         operation["summary"] = summary
     if description:
         operation["description"] = description
-    return operation
+
+    if csrf_enabled and method.upper() not in csrf_safe_methods:
+        operation["responses"].setdefault("403", {"description": "Forbidden"})
+    if endpoint_rate_limits(route.endpoint):
+        operation["responses"]["429"] = {"description": "Too Many Requests"}
+
+    security_name: str | None = None
+    auth = route_auth.get(route.endpoint)
+    backend_name = getattr(auth, "backend", None)
+    if isinstance(backend_name, str):
+        operation["responses"].setdefault("401", {"description": "Unauthorized"})
+        operation["responses"].setdefault("403", {"description": "Forbidden"})
+        if backend_name in auth_schemes:
+            permissions = getattr(auth, "permissions", ())
+            required_scopes = sorted(
+                {permission.scope for permission in permissions if isinstance(permission, HasScope)}
+            )
+            operation["security"] = [{backend_name: required_scopes}]
+            security_name = backend_name
+    return operation, security_name
+
+
+def _bound_parameters(
+    bindings: tuple[ParameterBinding, ...],
+    *,
+    registry: SchemaRegistry,
+) -> list[dict[str, Any]]:
+    parameters: list[dict[str, Any]] = []
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    for binding in bindings:
+        if binding.source not in {"query", "header", "cookie"}:
+            continue
+        name = binding_wire_name(binding)
+        identity = (binding.source, name.lower() if binding.source == "header" else name)
+        schema = registry.schema_for(binding.annotation)
+        existing = seen.get(identity)
+        if existing is not None:
+            if existing["schema"] != schema:
+                raise ValueError(
+                    f"OpenAPI has conflicting schemas for duplicate {binding.source} parameter {name!r} "
+                    "across the endpoint dependency graph."
+                )
+            existing["required"] = bool(existing["required"] or binding.required)
+            continue
+        parameter = {
+            "name": name,
+            "in": binding.source,
+            "required": binding.required,
+            "schema": schema,
+        }
+        seen[identity] = parameter
+        parameters.append(parameter)
+    return parameters
+
+
+def _request_body(binding: ParameterBinding, *, registry: SchemaRegistry) -> dict[str, Any]:
+    schema = registry.schema_for(binding.annotation, input_model=True)
+    if binding.source == "body":
+        content = {"application/json": {"schema": schema}}
+    else:
+        content = {"multipart/form-data": {"schema": schema}}
+        if not contains_uploaded_file(binding.annotation):
+            content["application/x-www-form-urlencoded"] = {"schema": schema}
+    return {"required": binding.required, "content": content}
+
+
+def _response_content(annotation: object, *, registry: SchemaRegistry) -> dict[str, Any]:
+    annotation = _strip_response_tuple(annotation)
+    if annotation is Response or annotation is str:
+        return {"text/plain": {"schema": {"type": "string"}}}
+    if annotation is bytes:
+        return {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}
+    return {"application/json": {"schema": registry.schema_for(annotation)}}
+
+
+def _validation_error_schema(registry: SchemaRegistry) -> dict[str, Any]:
+    name = registry.validation_error_name
+    if name is None:
+        base = "RequestValidationError"
+        name = base
+        index = 2
+        while name in registry.schemas:
+            name = f"{base}{index}"
+            index += 1
+        registry.validation_error_name = name
+    registry.schemas.setdefault(
+        name,
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["error", "detail", "errors"],
+            "properties": {
+                "error": {"type": "string", "const": "validation_error"},
+                "detail": {"type": "string"},
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["location", "code", "message"],
+                        "properties": {
+                            "location": {
+                                "type": "array",
+                                "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+                            },
+                            "code": {"type": "string"},
+                            "message": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    )
+    return {"$ref": f"#/components/schemas/{name}"}
 
 
 def _operation_id(route: Route, *, method: str, known_operation_ids: set[str]) -> str:
@@ -97,126 +258,31 @@ def _summary_and_description(doc: str | None) -> tuple[str | None, str | None]:
     lines = [line.strip() for line in doc.strip().splitlines() if line.strip()]
     if not lines:
         return None, None
-    summary = lines[0]
-    description = "\n".join(lines[1:]) if len(lines) > 1 else None
-    return summary, description
+    return lines[0], "\n".join(lines[1:]) if len(lines) > 1 else None
 
 
 def _to_openapi_path(path: str) -> str:
     return _PARAM_PATTERN.sub(lambda match: "{" + match.group("name") + "}", path)
 
 
-def _path_parameters(path: str) -> tuple[list[dict[str, Any]], set[str]]:
-    params: list[dict[str, Any]] = []
-    names: set[str] = set()
+def _path_parameters(path: str) -> list[dict[str, Any]]:
+    parameters: list[dict[str, Any]] = []
     for match in _PARAM_PATTERN.finditer(path):
         converter = match.group("converter") or "str"
-        name = match.group("name")
-        names.add(name)
-        params.append(
-            {
-                "name": name,
-                "in": "path",
-                "required": True,
-                "schema": _converter_schema(converter),
-            }
+        schema = (
+            {"type": "integer"}
+            if converter == "int"
+            else {"type": "number"}
+            if converter == "float"
+            else {"type": "string"}
         )
-    return params, names
-
-
-def _converter_schema(converter: str) -> dict[str, Any]:
-    if converter == "int":
-        return {"type": "integer"}
-    if converter == "float":
-        return {"type": "number"}
-    return {"type": "string"}
-
-
-def _query_parameters(
-    signature: inspect.Signature,
-    *,
-    path_param_names: set[str],
-) -> list[dict[str, Any]]:
-    params: list[dict[str, Any]] = []
-    for param in signature.parameters.values():
-        if param.name in path_param_names or param.name == "request":
-            continue
-        if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
-            continue
-        params.append(
-            {
-                "name": param.name,
-                "in": "query",
-                "required": param.default is inspect.Parameter.empty,
-                "schema": _annotation_schema(param.annotation),
-            }
-        )
-    return params
-
-
-def _response_schema(annotation: object) -> dict[str, Any]:
-    ann = _strip_response_tuple(annotation)
-    if ann is Response:
-        return {"text/plain": {"schema": {"type": "string"}}}
-    if ann is str:
-        return {"text/plain": {"schema": {"type": "string"}}}
-    if ann is bytes:
-        return {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}
-    return {"application/json": {"schema": _annotation_schema(ann)}}
+        parameters.append({"name": match.group("name"), "in": "path", "required": True, "schema": schema})
+    return parameters
 
 
 def _strip_response_tuple(annotation: object) -> object:
-    origin = get_origin(annotation)
-    if origin is tuple:
+    if get_origin(annotation) is tuple:
         args = get_args(annotation)
         if args:
             return args[0]
     return annotation
-
-
-def _annotation_schema(annotation: object) -> dict[str, Any]:
-    if annotation in (inspect.Signature.empty, Any, object):
-        return {"type": "string"}
-    if annotation is str:
-        return {"type": "string"}
-    if annotation is int:
-        return {"type": "integer"}
-    if annotation is float:
-        return {"type": "number"}
-    if annotation is bool:
-        return {"type": "boolean"}
-    if annotation is bytes:
-        return {"type": "string", "format": "binary"}
-    if annotation is None:
-        return {"type": "null"}
-
-    origin = get_origin(annotation)
-    args = get_args(annotation)
-
-    if origin in (list, set, tuple):
-        item_schema = _annotation_schema(args[0]) if args else {"type": "string"}
-        return {"type": "array", "items": item_schema}
-    if origin in (dict, Mapping):
-        return {"type": "object"}
-    if origin is Literal:
-        if not args:
-            return {"type": "string"}
-        enum_values = list(args)
-        schema: dict[str, Any] = {"enum": enum_values}
-        if isinstance(enum_values[0], bool):
-            schema["type"] = "boolean"
-        elif isinstance(enum_values[0], int):
-            schema["type"] = "integer"
-        elif isinstance(enum_values[0], float):
-            schema["type"] = "number"
-        else:
-            schema["type"] = "string"
-        return schema
-    if origin in (Union, types.UnionType):
-        member_schemas = [_annotation_schema(arg) for arg in args if arg is not type(None)]
-        if type(None) in args:
-            member_schemas.append({"type": "null"})
-        if len(member_schemas) == 1:
-            return member_schemas[0]
-        return {"anyOf": member_schemas}
-    return {"type": "string"}

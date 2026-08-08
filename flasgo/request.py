@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -32,6 +33,20 @@ def _parse_cookies(cookie_header: str | None) -> dict[str, str]:
             continue
         key, value = item.split("=", 1)
         cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def _parse_cookie_values(cookie_headers: list[str]) -> dict[str, list[str]]:
+    cookies: dict[str, list[str]] = {}
+    for cookie_header in cookie_headers:
+        for chunk in cookie_header.split(";"):
+            item = chunk.strip()
+            if not item or "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            name = key.strip()
+            if name:
+                cookies.setdefault(name, []).append(value.strip())
     return cookies
 
 
@@ -223,6 +238,20 @@ class Request:
     def cookies(self) -> dict[str, str]:
         return _parse_cookies(self.headers.get("cookie"))
 
+    def header_values(self, name: str) -> tuple[str, ...]:
+        """Return every wire-level value for a case-insensitive header name."""
+
+        normalized = name.lower().encode("latin-1")
+        return tuple(
+            value.decode("latin-1") for key, value in self.scope.get("headers", []) if key.lower() == normalized
+        )
+
+    def cookie_values(self, name: str) -> tuple[str, ...]:
+        """Return every value for an exact, case-sensitive cookie name."""
+
+        parsed = _parse_cookie_values(list(self.header_values("cookie")))
+        return tuple(parsed.get(name, ()))
+
     @property
     def client_ip(self) -> str | None:
         client = self.scope.get("client")
@@ -250,22 +279,31 @@ class Request:
 
         max_body = self.scope.get("max_request_body_bytes")
         body_limit = int(max_body) if isinstance(max_body, int) else None
+        configured_timeout = self.scope.get("request_read_timeout_seconds")
+        read_timeout = float(configured_timeout) if isinstance(configured_timeout, int | float) else None
         chunks: list[bytes] = []
         seen = 0
-        while True:
-            message = await self.receive()
-            message_type = message.get("type")
-            if message_type == "http.disconnect":
-                raise HTTPException(400, "Request body was interrupted because the client disconnected early.")
-            if message_type != "http.request":
-                continue
-            piece = bytes(message.get("body", b""))
-            seen += len(piece)
-            if body_limit is not None and seen > body_limit:
-                raise HTTPException(413, f"Request body exceeds MAX_REQUEST_BODY_BYTES ({body_limit} bytes).")
-            chunks.append(piece)
-            if not message.get("more_body", False):
-                break
+        try:
+            async with asyncio.timeout(read_timeout):
+                while True:
+                    message = await self.receive()
+                    message_type = message.get("type")
+                    if message_type == "http.disconnect":
+                        raise HTTPException(400, "Request body was interrupted because the client disconnected early.")
+                    if message_type != "http.request":
+                        continue
+                    piece = bytes(message.get("body", b""))
+                    seen += len(piece)
+                    if body_limit is not None and seen > body_limit:
+                        raise HTTPException(413, f"Request body exceeds MAX_REQUEST_BODY_BYTES ({body_limit} bytes).")
+                    chunks.append(piece)
+                    if not message.get("more_body", False):
+                        break
+        except TimeoutError as exc:
+            raise HTTPException(
+                408,
+                "Request body was not received before REQUEST_READ_TIMEOUT_SECONDS elapsed.",
+            ) from exc
         self._body = b"".join(chunks)
         return self._body
 

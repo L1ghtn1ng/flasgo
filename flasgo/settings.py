@@ -46,6 +46,9 @@ class Settings:
     MAX_REQUEST_BODY_BYTES: int = 1_048_576
     MAX_REQUEST_HEAD_BYTES: int = 16_384
     REQUEST_READ_TIMEOUT_SECONDS: float = 10.0
+    MAX_VALIDATION_DEPTH: int = 64
+    MAX_VALIDATION_WORK: int = 10_000
+    MAX_VALIDATION_ISSUES: int = 100
     SECURITY_FAILURE_RATE_LIMIT: int = 50
     SECURITY_FAILURE_WINDOW_SECONDS: int = 60
     LOG_SECURITY_EVENTS: bool = True
@@ -61,12 +64,20 @@ class Settings:
     METRICS_ENABLED: bool = False
     METRICS_PATH: str = "/metrics"
     METRICS_BEARER_TOKEN: str | None = None
+    OTEL_ENABLED: bool = False
+    OTEL_SERVICE_NAME: str = "flasgo"
+    OTEL_SERVICE_VERSION: str | None = None
+    OTEL_TRACE_SAMPLE_RATIO: float = 1.0
+    OTEL_EXCLUDED_PATHS: set[str] = field(default_factory=set)
+    OTEL_SET_GLOBAL_PROVIDER: bool = True
     ENABLE_DOCS: bool = False
+    DOCS_AUTH_BACKEND: str | None = None
     DOCS_PATH: str = "/docs"
     OPENAPI_PATH: str = "/openapi.json"
     API_TITLE: str = "Flasgo API"
-    API_VERSION: str = "0.6.0"
+    API_VERSION: str = "0.7.0"
     API_DESCRIPTION: str = ""
+    API_SERVERS: list[str] = field(default_factory=list)
     SSRF_ENABLED: bool = True
     SSRF_ALLOWED_SCHEMES: set[str] = field(default_factory=lambda: {"http", "https"})
     SSRF_ALLOWED_HOSTS: set[str] = field(default_factory=set)
@@ -97,6 +108,9 @@ class Settings:
             max_request_body_bytes=self.MAX_REQUEST_BODY_BYTES,
             max_request_head_bytes=self.MAX_REQUEST_HEAD_BYTES,
             request_read_timeout_seconds=self.REQUEST_READ_TIMEOUT_SECONDS,
+            max_validation_depth=self.MAX_VALIDATION_DEPTH,
+            max_validation_work=self.MAX_VALIDATION_WORK,
+            max_validation_issues=self.MAX_VALIDATION_ISSUES,
             security_failure_rate_limit=self.SECURITY_FAILURE_RATE_LIMIT,
             security_failure_window_seconds=self.SECURITY_FAILURE_WINDOW_SECONDS,
             log_security_events=self.LOG_SECURITY_EVENTS,

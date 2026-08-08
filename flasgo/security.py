@@ -8,6 +8,10 @@ from urllib.parse import urlsplit
 
 from .request import Request
 from .response import Response
+from .session import hmac_digest
+
+_CSRF_TOKEN_VERSION = "v1"
+_CSRF_SIGNING_SALT = "flasgo.csrf"
 
 
 def _format_http_date(value: datetime) -> str:
@@ -78,6 +82,9 @@ class SecurityConfig:
     max_request_body_bytes: int = 1_048_576
     max_request_head_bytes: int = 16_384
     request_read_timeout_seconds: float = 10.0
+    max_validation_depth: int = 64
+    max_validation_work: int = 10_000
+    max_validation_issues: int = 100
     security_failure_rate_limit: int = 50
     security_failure_window_seconds: int = 60
     log_security_events: bool = True
@@ -155,11 +162,19 @@ def _allowed_host_pattern(pattern: str) -> str | None:
     return None
 
 
-def ensure_csrf_cookie(request: Request, response: Response, config: SecurityConfig) -> None:
+def ensure_csrf_cookie(
+    request: Request,
+    response: Response,
+    config: SecurityConfig,
+    *,
+    session_token: str | None = None,
+) -> None:
+    if session_token is None:
+        session_token = request.cookies.get(config.session_cookie_name)
     existing = request.cookies.get(config.csrf_cookie_name)
-    if existing:
+    if existing and _csrf_token_is_valid(existing, config, session_token=session_token):
         return
-    token = secrets.token_urlsafe(32)
+    token = _build_csrf_token(config, session_token=session_token)
     response.cookies.append(
         build_set_cookie(
             config.csrf_cookie_name,
@@ -180,7 +195,43 @@ def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
     header_token = request.headers.get(config.csrf_header_name.lower())
     if not cookie_token or not header_token:
         return False
-    return secrets.compare_digest(cookie_token, header_token)
+    if not _constant_time_equal(cookie_token, header_token):
+        return False
+    return _csrf_token_is_valid(
+        cookie_token,
+        config,
+        session_token=request.cookies.get(config.session_cookie_name),
+    )
+
+
+def _build_csrf_token(config: SecurityConfig, *, session_token: str | None) -> str:
+    nonce = secrets.token_urlsafe(32)
+    signature = _csrf_signature(nonce, config, session_token=session_token)
+    return f"{_CSRF_TOKEN_VERSION}.{nonce}.{signature}"
+
+
+def _csrf_token_is_valid(token: str, config: SecurityConfig, *, session_token: str | None) -> bool:
+    try:
+        version, nonce, signature = token.split(".")
+    except ValueError:
+        return False
+    if version != _CSRF_TOKEN_VERSION or not nonce or not signature:
+        return False
+    expected = _csrf_signature(nonce, config, session_token=session_token)
+    return _constant_time_equal(signature, expected)
+
+
+def _csrf_signature(nonce: str, config: SecurityConfig, *, session_token: str | None) -> str:
+    binding = session_token or "anonymous"
+    payload = f"{_CSRF_TOKEN_VERSION}\x00{nonce}\x00{binding}".encode()
+    return hmac_digest(f"{_CSRF_SIGNING_SALT}:{config.secret_key}", payload)
+
+
+def _constant_time_equal(left: str, right: str) -> bool:
+    try:
+        return secrets.compare_digest(left.encode("ascii"), right.encode("ascii"))
+    except UnicodeEncodeError:
+        return False
 
 
 def apply_security_headers(response: Response, config: SecurityConfig) -> None:

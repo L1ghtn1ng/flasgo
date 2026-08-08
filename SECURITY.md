@@ -3,7 +3,7 @@
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| Latest `0.6.x` release | ✅ |
+| Latest `0.7.x` release | ✅ |
 | Older `0.x` releases | ❌ |
 
 Security fixes are made against `main` first and may be backported to the latest release line when practical. If you are running an older release, upgrade to the newest available version before requesting support.
@@ -49,6 +49,8 @@ Flasgo is an async-first Python web framework with secure defaults. Reports are 
 - API docs exposure, especially cases where docs become reachable when `ENABLE_DOCS=False`.
 - WebSocket origin, host, authentication, message-size, rate, or close-state enforcement.
 - Metrics authentication, request-ID trust, and structured log injection.
+- Typed body, query, header, cookie, and form validation; JWT claim or algorithm enforcement; and OpenTelemetry data
+  leakage or cardinality.
 
 Reports involving bypasses of these defaults, privilege escalation, request smuggling, header injection, path traversal, template escape, session integrity, or SSRF are high priority.
 
@@ -81,16 +83,38 @@ Flasgo ships with security features enabled by default, but deployment still mat
 - Restrict `ALLOWED_HOSTS` to your real application hosts.
 - Keep CSRF protections enabled for browser-facing apps.
 - Keep signed cookies and secure cookie flags enabled behind HTTPS.
-- Leave docs disabled unless you explicitly need them, and keep `DOCS_PATH` and `OPENAPI_PATH` distinct.
+- Leave docs disabled unless you explicitly need them. When they are reachable outside a trusted development
+  environment, set `DOCS_AUTH_BACKEND` to a registered authentication backend and keep `DOCS_PATH` and
+  `OPENAPI_PATH` distinct.
 - Keep WebSocket origin enforcement enabled. Allow only exact trusted origins and do not allow missing origins for
   browser sessions that use cookie authentication.
 - Keep WebSocket message and concurrency limits enabled, and apply tighter edge limits for public deployments.
-- Keep metrics disabled unless needed; when enabled, use a dedicated 32-character-or-longer bearer secret and
-  restrict the endpoint at the network edge too.
+- Keep metrics disabled unless needed; when enabled, use a dedicated 32-character-or-longer bearer-safe ASCII secret
+  and restrict the endpoint at the network edge too.
+- Keep `MAX_REQUEST_BODY_BYTES`, `MAX_REQUEST_HEAD_BYTES`, `REQUEST_READ_TIMEOUT_SECONDS`, and the validation depth,
+  work, and issue budgets enabled. Mirror appropriate limits at the production server and network edge.
 - Trust incoming request IDs only when a trusted proxy replaces client-supplied values.
+- For `flasgo[jwt]`, use a dedicated random secret of at least 32 bytes, rotate it through a controlled deployment,
+  validate a service-specific issuer and audience, keep tokens short-lived, and transmit them only in the
+  `Authorization` header. The built-in helper intentionally supports HS256 only; use an audited application-owned
+  backend when asymmetric signing or key discovery is required.
+- Treat custom `openapi_scheme` values as trusted configuration. Flasgo accepts only local concrete Security Scheme
+  Objects, requires HTTPS for OAuth/OpenID endpoints, and does not follow external Security Scheme references. The
+  metadata documents a backend but does not implement or verify the advertised OAuth flow.
+- Keep OpenTelemetry disabled unless traces are needed. Send OTLP only to a trusted TLS collector, treat exporter
+  headers as secrets, exclude sensitive endpoints by exact path or route template, and avoid adding request bodies,
+  credentials, or user identifiers as span attributes. Template exclusions apply even when a request receives
+  `405 Method Not Allowed`. HTTP URL attributes contain the real request path as required by stable semantic
+  conventions, so exclude routes whose path segments carry secrets or sensitive identifiers.
+  Flasgo retains query keys but replaces every non-empty query value with `REDACTED` before instrumentation;
+  WebSocket URL attributes remain route-template-only. Rejected or ambiguous Host headers are removed before the
+  request reaches instrumentation.
 - Treat migration files as trusted executable code: review generated revisions before applying them and restrict who
   can modify the migration directory.
-- Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them. Prefer pinned targets from `resolve_outbound_url()` when your HTTP client supports connecting by IP with the original `Host` header.
+- Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them. Prefer pinned targets from
+  `resolve_outbound_url()` when your HTTP client supports connecting by IP with the original `Host` header. The
+  private-network opt-in permits RFC 1918 and unique-local addresses only; it never permits loopback or link-local
+  destinations.
 - Put a reverse proxy or edge service in front of the app for TLS termination and network controls.
 
 Thank you for helping keep Flasgo secure.

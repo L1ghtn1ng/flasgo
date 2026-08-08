@@ -61,6 +61,14 @@ def test_flask_style_route_params() -> None:
     assert response.json() == {"user_id": 42}
 
 
+@pytest.mark.parametrize("methods", [(), ("",), ("BAD METHOD",), ("GET\r\nFORGED",)])
+def test_route_rejects_empty_or_invalid_http_methods(methods: tuple[str, ...]) -> None:
+    app = Flasgo()
+
+    with pytest.raises(ValueError, match="method"):
+        app.route("/invalid", methods=methods)(lambda: "no")
+
+
 def test_ratelimit_decorator_blocks_client_ip_and_adds_retry_headers() -> None:
     app = Flasgo()
     calls = 0
@@ -157,6 +165,61 @@ def test_ratelimit_batch_prunes_expired_bucket_entries(monkeypatch: pytest.Monke
     asyncio.run(run_checks())
 
     assert list(limiter._buckets[("shared-api", "127.0.0.1")]) == [4.0]
+
+
+def test_ratelimit_rejects_new_keys_without_evicting_active_quotas(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = RateLimiter(max_keys=2)
+    now = 0.0
+    rule = RateLimitRule(1, window_seconds=60, scope="shared-api", key_func=lambda req: req.headers.get("x-key"))
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    def request(key: str) -> Request:
+        return Request({"headers": [(b"x-key", key.encode("ascii"))], "client": ("127.0.0.1", 5000)}, receive)
+
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def run_checks() -> None:
+        nonlocal now
+        assert (await limiter.check(rule, request("victim"), endpoint_id="endpoint")).allowed
+        assert (await limiter.check(rule, request("attacker"), endpoint_id="endpoint")).allowed
+
+        overflow = await limiter.check(rule, request("overflow"), endpoint_id="endpoint")
+        victim = await limiter.check(rule, request("victim"), endpoint_id="endpoint")
+        assert not overflow.allowed
+        assert not victim.allowed
+        assert len(limiter._buckets) == limiter.max_keys
+
+        now = 61.0
+        assert (await limiter.check(rule, request("new-client"), endpoint_id="endpoint")).allowed
+
+    asyncio.run(run_checks())
+
+
+def test_ratelimit_batch_capacity_denial_is_atomic(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = RateLimiter(max_keys=1)
+    existing_rule = RateLimitRule(3, window_seconds=60, scope="shared-api", key_func=lambda _req: "existing")
+    new_rule = RateLimitRule(3, window_seconds=60, scope="shared-api", key_func=lambda _req: "new")
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    req = Request({"headers": [], "client": ("127.0.0.1", 5000)}, receive)
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: 0.0)
+
+    async def run_checks() -> None:
+        assert (await limiter.check(existing_rule, req, endpoint_id="endpoint")).allowed
+        decisions = await limiter.check_batch(
+            [(existing_rule, "existing-endpoint"), (new_rule, "new-endpoint")],
+            req,
+        )
+        assert all(not decision.allowed for decision in decisions)
+
+    asyncio.run(run_checks())
+
+    assert list(limiter._buckets[("shared-api", "existing")]) == [0.0]
+    assert ("shared-api", "new") not in limiter._buckets
 
 
 def test_ratelimit_key_func_separates_clients() -> None:
@@ -311,6 +374,196 @@ def test_csrf_accepts_double_submit_token() -> None:
         },
     )
     assert response.status_code == 200
+
+
+def test_csrf_rejects_unsigned_fixed_token_when_origin_checks_are_disabled() -> None:
+    app = Flasgo(settings={"CSRF_CHECK_ORIGIN": False, "CSRF_REQUIRE_ORIGIN": False})
+
+    @app.post("/submit")
+    def submit() -> str:
+        return "ok"
+
+    response = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": "flasgo-csrf=attacker-fixed",
+            "x-csrf-token": "attacker-fixed",
+        },
+    )
+
+    replacement = _extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf")
+    assert response.status_code == 403
+    assert replacement is not None
+    assert replacement.startswith("v1.")
+
+
+def test_csrf_rejects_non_ascii_tokens_without_raising() -> None:
+    app = Flasgo(settings={"CSRF_CHECK_ORIGIN": False, "CSRF_REQUIRE_ORIGIN": False})
+
+    @app.post("/submit")
+    def submit() -> str:
+        return "ok"
+
+    response = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": "flasgo-csrf=é; flasgo-session=é",
+            "x-csrf-token": "é",
+        },
+    )
+    assert response.status_code == 403
+    assert _extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf") is not None
+
+
+@pytest.mark.parametrize("part", ["nonce", "signature"])
+def test_csrf_rejects_tampered_signed_tokens(part: str) -> None:
+    app = Flasgo()
+
+    @app.get("/seed")
+    def seed() -> str:
+        return "seed"
+
+    @app.post("/submit")
+    def submit() -> str:
+        return "ok"
+
+    token = _extract_cookie(app.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    assert token is not None
+    version, nonce, signature = token.split(".")
+    if part == "nonce":
+        nonce = f"{nonce[:-1]}{'A' if nonce[-1] != 'A' else 'B'}"
+    else:
+        signature = f"{signature[:-1]}{'A' if signature[-1] != 'A' else 'B'}"
+    tampered = f"{version}.{nonce}.{signature}"
+
+    response = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-csrf={tampered}",
+            "x-csrf-token": tampered,
+            "origin": "http://localhost",
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_csrf_token_is_invalid_under_a_different_secret() -> None:
+    source = Flasgo(settings={"SECRET_KEY": "a" * 32})
+
+    @source.get("/seed")
+    def seed() -> str:
+        return "seed"
+
+    token = _extract_cookie(source.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    assert token is not None
+
+    target = Flasgo(settings={"SECRET_KEY": "b" * 32})
+
+    @target.post("/submit")
+    def submit() -> str:
+        return "ok"
+
+    response = target.test_client().post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-csrf={token}",
+            "x-csrf-token": token,
+            "origin": "http://localhost",
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> None:
+    app = Flasgo()
+
+    @app.get("/seed")
+    def seed() -> str:
+        return "seed"
+
+    @app.post("/login")
+    def login() -> str:
+        session()["user_id"] = "alice"
+        return "logged in"
+
+    @app.post("/submit")
+    def submit() -> str:
+        return "ok"
+
+    @app.post("/logout")
+    def logout() -> str:
+        session().clear()
+        return "logged out"
+
+    seed_response = app.test_client().get("/seed")
+    old_csrf = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    assert old_csrf is not None
+
+    login_response = app.test_client().post(
+        "/login",
+        headers={
+            "cookie": f"flasgo-csrf={old_csrf}",
+            "x-csrf-token": old_csrf,
+            "origin": "http://localhost",
+        },
+    )
+    session_cookie = _extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-session")
+    new_csrf = _extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    assert login_response.status_code == 200
+    assert session_cookie is not None
+    assert new_csrf is not None
+    assert new_csrf != old_csrf
+
+    old_token_response = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-session={session_cookie}; flasgo-csrf={old_csrf}",
+            "x-csrf-token": old_csrf,
+            "origin": "http://localhost",
+        },
+    )
+    current_token_response = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-session={session_cookie}; flasgo-csrf={new_csrf}",
+            "x-csrf-token": new_csrf,
+            "origin": "http://localhost",
+        },
+    )
+    assert old_token_response.status_code == 403
+    assert current_token_response.status_code == 200
+
+    logout_response = app.test_client().post(
+        "/logout",
+        headers={
+            "cookie": f"flasgo-session={session_cookie}; flasgo-csrf={new_csrf}",
+            "x-csrf-token": new_csrf,
+            "origin": "http://localhost",
+        },
+    )
+    logged_out_csrf = _extract_cookie(logout_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    assert logout_response.status_code == 200
+    assert logged_out_csrf is not None
+    assert logged_out_csrf != new_csrf
+
+    cleared_session_replay = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-csrf={new_csrf}",
+            "x-csrf-token": new_csrf,
+            "origin": "http://localhost",
+        },
+    )
+    logged_out_response = app.test_client().post(
+        "/submit",
+        headers={
+            "cookie": f"flasgo-csrf={logged_out_csrf}",
+            "x-csrf-token": logged_out_csrf,
+            "origin": "http://localhost",
+        },
+    )
+    assert cleared_session_replay.status_code == 403
+    assert logged_out_response.status_code == 200
 
 
 def test_signed_session_cookie_round_trip() -> None:
@@ -573,6 +826,86 @@ def test_security_failures_are_rate_limited() -> None:
     assert first.status_code == 401
     assert second.status_code == 401
     assert third.status_code == 429
+
+
+def test_security_failure_limit_blocks_before_repeating_authentication() -> None:
+    calls = 0
+
+    def backend(req: Request) -> User | None:
+        nonlocal calls
+        calls += 1
+        if req.headers.get("authorization") == "Bearer valid":
+            return User(id="alice", is_authenticated=True)
+        return None
+
+    app = Flasgo(
+        settings={
+            "CSRF_ENABLED": False,
+            "SECURITY_FAILURE_RATE_LIMIT": 2,
+            "SECURITY_FAILURE_WINDOW_SECONDS": 60,
+        }
+    )
+    app.register_auth_backend("test", backend)
+
+    @app.get("/private")
+    @app.authorize(IsAuthenticated(), backend="test")
+    def private() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    assert client.get("/private").status_code == 401
+    assert client.get("/private").status_code == 401
+    assert client.get("/private").status_code == 429
+    assert client.get("/private", headers={"authorization": "Bearer valid"}).status_code == 429
+    assert calls == 2
+
+
+def test_default_route_limit_runs_before_authentication_backend() -> None:
+    calls = 0
+
+    def backend(req: Request) -> User | None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    app = Flasgo(settings={"CSRF_ENABLED": False, "SECURITY_FAILURE_RATE_LIMIT": 0})
+    app.register_auth_backend("test", backend)
+
+    @app.get("/private")
+    @app.ratelimit(1, per=60)
+    @app.authorize(IsAuthenticated(), backend="test")
+    def private() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    assert client.get("/private").status_code == 401
+    assert client.get("/private").status_code == 429
+    assert calls == 1
+
+
+def test_request_body_read_timeout_bounds_receive_wait() -> None:
+    from flasgo.exceptions import HTTPException
+
+    async def exercise() -> None:
+        blocker = asyncio.Event()
+
+        async def receive() -> dict[str, object]:
+            await blocker.wait()
+            return {"type": "http.disconnect"}
+
+        req = Request(
+            {
+                "type": "http",
+                "headers": [],
+                "request_read_timeout_seconds": 0.01,
+            },
+            receive,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await req.body()
+        assert exc_info.value.status_code == 408
+
+    asyncio.run(exercise())
 
 
 def test_security_event_logging_for_bad_host(caplog: pytest.LogCaptureFixture) -> None:

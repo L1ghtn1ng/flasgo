@@ -5,7 +5,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from .types import Send
 
@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 
 Headers = Mapping[str, str]
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+class DataclassResponse(Protocol):
+    """Structural response type implemented by standard-library dataclasses."""
+
+    __dataclass_fields__: ClassVar[dict[str, Any]]
 
 
 @dataclass(slots=True)
@@ -164,7 +170,7 @@ class Response:
         self.background.add_task(func, *args, **kwargs)
 
 
-ResponseValue = Response | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
+ResponseValue = Response | DataclassResponse | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
 
 
 def to_response(value: ResponseValue) -> Response:
@@ -194,6 +200,12 @@ def to_response(value: ResponseValue) -> Response:
         if len(value) == 3:
             body, status_code, headers = value
             return _tuple_to_response(body, status_code, headers)
+    from dataclasses import is_dataclass
+
+    if is_dataclass(value) and not isinstance(value, type):
+        from .validation import to_jsonable
+
+        return Response.json(to_jsonable(value))
     msg = (
         f"Unsupported response type: {type(value)!r}. "
         "Return a Response, str, bytes, mapping, list, or a (body, status[, headers]) tuple."
@@ -203,13 +215,19 @@ def to_response(value: ResponseValue) -> Response:
 
 def _tuple_to_response(
     body: Any,
-    status_code: int,
-    headers: Headers | None,
+    status_code: object,
+    headers: object | None,
 ) -> Response:
     response = to_response(body if body is not None else b"")
+    if not isinstance(status_code, int | str):
+        raise TypeError("Response tuple status must be an integer status code.")
     response.status_code = int(status_code)
+    if headers is not None and not isinstance(headers, Mapping):
+        raise TypeError("Response tuple headers must be a mapping of string names to string values.")
     if headers:
-        response.headers.update({key.lower(): val for key, val in headers.items()})
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
+            raise TypeError("Response tuple headers must be a mapping of string names to string values.")
+        response.headers.update({str(key).lower(): str(value) for key, value in headers.items()})
         for key, value in response.headers.items():
             _validate_header(key, value)
     response.headers["content-length"] = str(len(response.body))

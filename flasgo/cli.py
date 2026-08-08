@@ -171,22 +171,25 @@ def _check_command(args: argparse.Namespace) -> int:
 
 
 def _atomic_write(path: Path, value: str) -> None:
-    resolved = path.expanduser().resolve()
-    resolved.parent.mkdir(parents=True, exist_ok=True)
+    expanded = path.expanduser()
+    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    parent = absolute.parent.resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    destination = parent / absolute.name
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
-            dir=resolved.parent,
-            prefix=f".{resolved.name}.",
+            dir=parent,
+            prefix=f".{destination.name}.",
             delete=False,
         ) as handle:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
             temporary = Path(handle.name)
-        os.replace(temporary, resolved)
+        os.replace(temporary, destination)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

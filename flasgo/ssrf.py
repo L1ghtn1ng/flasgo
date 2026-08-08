@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 type IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
 
 
 class SSRFViolation(ValueError):
@@ -185,13 +191,14 @@ def _ip_is_disallowed(address: IPAddress, *, allow_private_networks: bool) -> bo
     inspected: IPAddress = address
     if isinstance(inspected, ipaddress.IPv6Address) and inspected.ipv4_mapped is not None:
         inspected = inspected.ipv4_mapped
-    if allow_private_networks:
-        return False
-    return bool(
-        inspected.is_private
-        or inspected.is_loopback
+    if (
+        inspected.is_loopback
         or inspected.is_link_local
         or inspected.is_multicast
         or inspected.is_reserved
         or inspected.is_unspecified
-    )
+    ):
+        return True
+    if any(inspected in network for network in _PRIVATE_NETWORKS if inspected.version == network.version):
+        return not allow_private_networks
+    return not inspected.is_global

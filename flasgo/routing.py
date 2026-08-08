@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .response import ResponseValue
+
+if TYPE_CHECKING:
+    from .params import EndpointPlan
 
 Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
 WebSocketEndpoint = Callable[..., Awaitable[None] | None]
@@ -23,6 +26,7 @@ _PARAM_PATTERN = re.compile(r"<(?:(?P<converter>[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z
 @dataclass(slots=True, frozen=True)
 class MatchResult:
     endpoint: Endpoint
+    endpoint_plan: EndpointPlan
     params: dict[str, Any]
     route_path: str
     name: str | None
@@ -41,6 +45,7 @@ class Route:
     raw_path: str
     methods: frozenset[str]
     endpoint: Endpoint
+    endpoint_plan: EndpointPlan
     name: str | None = None
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
@@ -55,7 +60,13 @@ class Route:
         params = _match_path(path, self._regex, self._casts)
         if params is None:
             return None
-        return MatchResult(endpoint=self.endpoint, params=params, route_path=self.raw_path, name=self.name)
+        return MatchResult(
+            endpoint=self.endpoint,
+            endpoint_plan=self.endpoint_plan,
+            params=params,
+            route_path=self.raw_path,
+            name=self.name,
+        )
 
     def path_matches(self, path: str) -> bool:
         return self._regex is not None and self._regex.fullmatch(path) is not None

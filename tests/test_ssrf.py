@@ -38,6 +38,19 @@ def test_ssrf_blocks_private_ip_literal() -> None:
         app.resolve_outbound_url("http://127.0.0.1/internal")
 
 
+@pytest.mark.parametrize("url", ["http://127.0.0.1/", "http://[::1]/", "http://169.254.169.254/"])
+def test_ssrf_private_network_opt_in_keeps_special_addresses_blocked(url: str) -> None:
+    guard = SSRFGuard(SSRFConfig(allow_private_networks=True))
+    with pytest.raises(SSRFViolation):
+        guard.resolve_url(url)
+
+
+@pytest.mark.parametrize("url", ["http://10.0.0.1/", "http://172.16.0.1/", "http://192.168.0.1/", "http://[fd00::1]/"])
+def test_ssrf_private_network_opt_in_allows_only_private_network_ranges(url: str) -> None:
+    guard = SSRFGuard(SSRFConfig(allow_private_networks=True))
+    assert guard.resolve_url(url).address is not None
+
+
 def test_ssrf_blocks_disallowed_scheme() -> None:
     app = Flasgo()
     with pytest.raises(SSRFViolation):

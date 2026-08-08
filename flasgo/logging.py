@@ -43,6 +43,8 @@ class _FlasgoTextFormatter(logging.Formatter):
         for key in (
             "event",
             "request_id",
+            "trace_id",
+            "span_id",
             "method",
             "route",
             "status",
@@ -88,6 +90,15 @@ def log_event(
     **fields: object,
 ) -> None:
     safe_fields: dict[str, object] = {"event": sanitize_log_value(event, limit=64)}
+    try:
+        from opentelemetry import trace
+
+        span_context = trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            safe_fields["trace_id"] = format(span_context.trace_id, "032x")
+            safe_fields["span_id"] = format(span_context.span_id, "016x")
+    except ImportError:
+        pass
     for key, value in fields.items():
         if value is None:
             continue

@@ -138,6 +138,70 @@ def test_websocket_origin_auth_size_and_rate_limits() -> None:
             assert too_fast.value.code == 1008
 
 
+def test_websocket_authentication_failures_are_throttled_before_backend() -> None:
+    calls = 0
+
+    def backend(request: object) -> None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    app = Flasgo(
+        settings={
+            "CSRF_ENABLED": False,
+            "SECURITY_FAILURE_RATE_LIMIT": 2,
+            "SECURITY_FAILURE_WINDOW_SECONDS": 60,
+        }
+    )
+    app.register_auth_backend("test", backend)
+
+    @app.websocket("/private")
+    @app.authorize(IsAuthenticated(), backend="test")
+    async def private(websocket: WebSocket) -> None:
+        await websocket.accept()
+
+    with app.test_client() as client:
+        statuses: list[int] = []
+        for _ in range(3):
+            with pytest.raises(WebSocketHandshakeError) as denied:
+                with client.websocket_connect("/private"):
+                    pass
+            statuses.append(denied.value.status_code)
+
+    assert statuses == [401, 401, 429]
+    assert calls == 2
+
+
+def test_websocket_default_route_limit_runs_before_authentication() -> None:
+    calls = 0
+
+    def backend(request: object) -> None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    app = Flasgo(settings={"CSRF_ENABLED": False, "SECURITY_FAILURE_RATE_LIMIT": 0})
+    app.register_auth_backend("test", backend)
+
+    @app.websocket("/private")
+    @app.ratelimit(1, per=60)
+    @app.authorize(IsAuthenticated(), backend="test")
+    async def private(websocket: WebSocket) -> None:
+        await websocket.accept()
+
+    with app.test_client() as client:
+        with pytest.raises(WebSocketHandshakeError) as first:
+            with client.websocket_connect("/private"):
+                pass
+        with pytest.raises(WebSocketHandshakeError) as second:
+            with client.websocket_connect("/private"):
+                pass
+
+    assert first.value.status_code == 401
+    assert second.value.status_code == 429
+    assert calls == 1
+
+
 def test_websocket_rejects_ambiguous_origin_headers() -> None:
     app = Flasgo(settings={"CSRF_ENABLED": False})
 
@@ -196,6 +260,27 @@ def test_metrics_require_a_strong_bearer_token_and_use_route_templates() -> None
     assert metrics.status_code == 200
     assert 'route="/items/<int:item_id>"' in metrics.text
     assert 'route="/items/42"' not in metrics.text
+    assert client.get("/metrics", headers={"authorization": "Bearer é"}).status_code == 401
+
+
+@pytest.mark.parametrize("token", ["é" * 32, " " + "m" * 32, "m" * 32 + " ", "m" * 31 + "?"])
+def test_metrics_reject_non_bearer_safe_configured_tokens(token: str) -> None:
+    with pytest.raises(ValueError, match="bearer-safe ASCII"):
+        Flasgo(settings={"METRICS_ENABLED": True, "METRICS_BEARER_TOKEN": token})
+
+
+def test_asgi_request_head_limit_rejects_oversized_scopes() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False, "MAX_REQUEST_HEAD_BYTES": 128})
+
+    @app.get("/")
+    async def home() -> str:
+        return "ok"
+
+    client = app.test_client()
+    assert client.get("/").status_code == 200
+    oversized = client.get("/", headers={"x-padding": "x" * 256})
+    assert oversized.status_code == 431
+    assert oversized.headers["connection"] == "close"
 
 
 def test_response_send_failure_never_attempts_a_second_response() -> None:

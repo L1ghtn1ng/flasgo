@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from flasgo import Flasgo
 from flasgo import cli as cli_module
+from openapi_spec_validator import OpenAPIV32SpecValidator, validate
 
 
 def test_load_app_from_python_file(tmp_path: Path) -> None:
@@ -99,10 +101,26 @@ def test_routes_openapi_and_check_commands(tmp_path: Path, capsys: pytest.Captur
 
     output = tmp_path / "api.json"
     assert cli_module.main(["openapi", str(app_file), "--output", str(output)]) == 0
-    assert '"/users/{user_id}"' in output.read_text(encoding="utf-8")
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert "/users/{user_id}" in document["paths"]
+    assert document == cli_module.load_app(str(app_file)).openapi_spec()
+    validate(document, cls=OpenAPIV32SpecValidator)
 
     assert cli_module.main(["check", str(app_file)]) == 0
     assert "Flasgo check passed." in capsys.readouterr().out
+
+
+def test_atomic_write_replaces_symlink_entry_without_following_target(tmp_path: Path) -> None:
+    target = tmp_path / "victim.txt"
+    target.write_text("keep", encoding="utf-8")
+    output = tmp_path / "openapi.json"
+    output.symlink_to(target)
+
+    cli_module._atomic_write(output, "generated")
+
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert not output.is_symlink()
+    assert output.read_text(encoding="utf-8") == "generated"
 
 
 def test_check_reports_duplicate_routes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -1,5 +1,79 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.7.0] - 2026-08-08
+
+### Added
+
+- `Annotated` request binding with `Body()`, `Query()`, `Header()`, `Cookie()`, `Form()`, and async-capable `Depends()` providers, including
+  dataclass validation, per-request dependency caching, structured `422` responses, and a redisplay-friendly
+  `FormValidationError` contract.
+- OpenAPI 3.2 request bodies, reusable dataclass schemas, typed query/header/cookie parameters (including parameters
+  supplied by dependencies), validation responses, authorization security requirements, and an explicit JSON Schema
+  2020-12 dialect validated by the locked `openapi-spec-validator` dependency in CI.
+- OpenAPI 3.2 `QUERY` and `additionalOperations` generation, plus validated local Security Scheme metadata for
+  deprecation, OAuth2 metadata discovery, device authorization, extensions, and required scopes or roles.
+- Optional `flasgo[jwt]` strict HS256 helpers with issuer, audience, lifetime, subject, and scope validation.
+- Optional `flasgo[otel]` HTTP and WebSocket tracing with OTLP/HTTP export, route-template span names, configurable
+  sampling and exclusions, request-ID attributes, and trace/span correlation in structured logs.
+- OpenAPI operations document the framework error responses that apply to them: `413`/`415` on body and form
+  endpoints, `403` on unsafe methods while CSRF protection is enabled, and `429` on rate-limited routes. A root
+  `servers` list can be declared with the `API_SERVERS` setting.
+- `OTEL_SET_GLOBAL_PROVIDER` (default `True`) registers a Flasgo-built tracer provider as the process-global
+  provider so other OpenTelemetry instrumentations share its sampler and exporter.
+- `DOCS_AUTH_BACKEND` optionally protects both Swagger UI and the OpenAPI document with a registered auth backend.
+
+### Security
+
+- CSRF double-submit tokens are HMAC-signed and bound to the signed session, rotate when session state changes, and
+  reject attacker-fixed or legacy unsigned values. Publicly cacheable responses no longer emit framework-managed
+  CSRF or session cookies.
+- The in-process rate limiter preserves active quota buckets under key-cardinality pressure and fails closed for new
+  keys until safely expired accounting state frees capacity.
+- JSON and form model validation rejects unknown dataclass fields, enforces media types, and reports bounded field
+  locations without reflecting request values in the default error response.
+- Request reads enforce the configured timeout across the complete body, request-head limits apply in both Flasgo
+  and its H11 development server, and recursive validation has depth, work, and issue budgets.
+- JWT decoding fixes the accepted algorithm to HS256, rejects weak signing secrets and `alg=none`, and requires
+  issuer, audience, expiry, issued-at, and subject claims.
+- Swagger UI is version-pinned with SRI, disables query-driven configuration and remote validation, and runs its
+  inline script and style under a per-request CSP nonce without `unsafe-inline`.
+- Header and cookie binding rejects unsafe names, ambiguous duplicate scalar values, and reserved OpenAPI headers.
+- The test client accepts ordered header pairs so repeated wire headers can be exercised without collapsing values.
+- Route registration rejects empty method collections and malformed HTTP method tokens before they can reach runtime
+  dispatch or OpenAPI generation. OAuth/OpenID metadata requires HTTPS and external Security Scheme references are
+  rejected.
+- Authentication failures and default per-IP route quotas are throttled before HTTP or WebSocket authentication
+  backends run. Custom identity-based rate-limit keys continue to run after successful authentication.
+- SSRF private-network opt-in is limited to RFC 1918 and unique-local addresses; loopback, link-local, multicast,
+  reserved, and unspecified targets remain blocked. Rejected Host values are removed from telemetry input.
+- Metrics bearer credentials use a bounded ASCII token grammar and fail closed with `401` instead of raising on
+  non-ASCII input. Debug pages expose only an exact environment allowlist.
+- OpenTelemetry span names use known HTTP method tokens (including `QUERY`) or the stable fallback `HTTP` for
+  non-standard methods, preventing attacker-controlled method tokens from creating unbounded trace-name cardinality.
+  OpenAPI HTTP authentication schemes must use RFC 9110 token syntax.
+
+### Fixed
+
+- Endpoint binding plans are stored per route, so one callable can safely serve paths with different parameter names.
+- OpenTelemetry HTTP URL attributes now carry the real request path and a query whose values are redacted, satisfying
+  stable HTTP semantic conventions while preserving route-template span names and grouping. WebSocket URL attributes
+  remain template-only, and dynamic routes can be excluded by route template even when the request method is rejected.
+- OpenTelemetry HTTP span names treat `QUERY` as a known method and use `HTTP` (not `_OTHER`) as the name placeholder
+  for unknown methods, matching stable OpenTelemetry HTTP server span naming rules.
+- JWT scope claim names cannot collide with registered identity/lifetime claims, computed `init=False` dataclass
+  fields are excluded from request validation schemas, and numeric/boolean literals accept their typed text forms.
+- Optional collection unions, numeric/boolean enum text, and comma-separated collection headers now match their
+  generated schemas. Duplicate dependency parameters merge requiredness or reject conflicting schemas.
+- Bearer helpers advertise their configured valid HTTP authentication scheme instead of always claiming `bearer`;
+  non-token prefixes omit automatic metadata rather than producing an inaccurate client contract.
+- Static files stream in bounded chunks without blocking the event loop, and `HEAD` requests do not open or read the
+  file. Atomic CLI output replaces a destination symlink itself instead of following it to another file.
+- Route registration tolerates unresolved postponed annotations that are not needed for request markers. Optional
+  upload collections retain submitted files, fixed-length tuples validate and document each position, and streamed
+  static responses derive length and validators from the opened file descriptor.
+
 ## [0.6.0] - 2026-07-31
 
 ### Added

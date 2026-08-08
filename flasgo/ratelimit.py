@@ -6,10 +6,10 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from .request import Request
 from .response import Response
-from .routing import Endpoint
 
 RateLimitKeyFunc = Callable[[Request], str | None]
 
@@ -66,8 +66,10 @@ class RateLimiter:
         bucket_key = (scope, client_key)
 
         async with self._lock:
-            if len(self._buckets) > self.max_keys:
+            if bucket_key not in self._buckets and len(self._buckets) >= self.max_keys:
                 self._prune(now)
+                if len(self._buckets) >= self.max_keys:
+                    return self._capacity_decision(rule, now=now)
 
             request_times = self._buckets.setdefault(bucket_key, deque())
             # Track the maximum window for this bucket across all rules
@@ -122,26 +124,42 @@ class RateLimiter:
         now = time.monotonic()
 
         async with self._lock:
-            if len(self._buckets) > self.max_keys:
-                self._prune(now)
-
-            entries = []
+            requested_entries = []
             for rule, endpoint_id in rules:
                 client_key = _rate_limit_key(rule, req)
                 scope = rule.scope or endpoint_id
-                bucket_key = (scope, client_key)
+                requested_entries.append(((scope, client_key), rule))
 
-                request_times = self._buckets.setdefault(bucket_key, deque())
+            missing_keys = {bucket_key for bucket_key, _rule in requested_entries if bucket_key not in self._buckets}
+            if len(self._buckets) + len(missing_keys) > self.max_keys:
+                self._prune(now)
+                missing_keys = {
+                    bucket_key for bucket_key, _rule in requested_entries if bucket_key not in self._buckets
+                }
+                if len(self._buckets) + len(missing_keys) > self.max_keys:
+                    return [self._capacity_decision(rule, now=now) for _bucket_key, rule in requested_entries]
+
+            entries = []
+            pending_buckets: dict[tuple[str, str], deque[float]] = {}
+            entry_windows: dict[tuple[str, str], float] = {}
+            for bucket_key, rule in requested_entries:
+                request_times = self._buckets.get(bucket_key)
+                if request_times is None:
+                    request_times = pending_buckets.setdefault(bucket_key, deque())
                 current_window = self._bucket_windows.get(bucket_key, 0.0)
-                self._bucket_windows[bucket_key] = max(current_window, rule.window_seconds)
+                entry_windows[bucket_key] = max(entry_windows.get(bucket_key, current_window), rule.window_seconds)
                 entries.append((bucket_key, rule, request_times))
+
+            for bucket_key, window in entry_windows.items():
+                if bucket_key in self._buckets:
+                    self._bucket_windows[bucket_key] = window
 
             seen_bucket_keys = set()
             for bucket_key, _rule, request_times in entries:
                 if bucket_key in seen_bucket_keys:
                     continue
                 seen_bucket_keys.add(bucket_key)
-                cutoff = now - self._bucket_windows[bucket_key]
+                cutoff = now - entry_windows[bucket_key]
                 while request_times and request_times[0] <= cutoff:
                     request_times.popleft()
 
@@ -187,6 +205,10 @@ class RateLimiter:
             all_allowed = all(decision.allowed for _, _, _, decision in evaluations)
 
             if all_allowed:
+                for bucket_key, request_times in pending_buckets.items():
+                    self._buckets[bucket_key] = request_times
+                for bucket_key, window in entry_windows.items():
+                    self._bucket_windows[bucket_key] = window
                 seen_bucket_keys = set()
                 for bucket_key, _rule, request_times, _ in evaluations:
                     if bucket_key in seen_bucket_keys:
@@ -208,41 +230,47 @@ class RateLimiter:
             request_times.popleft()
 
     def _prune(self, now: float) -> None:
-        """Keep memory bounded when many unique clients hit limited routes.
+        """Remove only buckets whose complete quota state has expired."""
 
-        Uses per-bucket configured window to determine retention. Buckets are
-        evicted only after their last request is older than their window, ensuring
-        buckets with long windows aren't prematurely removed.
-        """
-        # Remove empty buckets and those whose last request is beyond their window
         for key, request_times in list(self._buckets.items()):
             if not request_times:
                 self._buckets.pop(key, None)
                 self._bucket_windows.pop(key, None)
                 continue
-            # Use bucket's configured longest window for retention
             bucket_window = self._bucket_windows.get(key, 86_400)
-            retention_seconds = bucket_window * 2  # Keep for 2x window to be safe
-            if request_times[-1] < now - retention_seconds:
+            if request_times[-1] <= now - bucket_window:
                 self._buckets.pop(key, None)
                 self._bucket_windows.pop(key, None)
 
-        # If still over max_keys, trim oldest buckets by last request time
-        if len(self._buckets) <= self.max_keys:
-            return
-        oldest_keys = sorted(self._buckets, key=lambda key: self._buckets[key][-1])
-        for key in oldest_keys[: len(self._buckets) - self.max_keys]:
-            self._buckets.pop(key, None)
-            self._bucket_windows.pop(key, None)
+    def _capacity_decision(self, rule: RateLimitRule, *, now: float) -> RateLimitDecision:
+        retry_after = min(
+            (
+                _seconds_until_bucket_expires(
+                    request_times[-1],
+                    window_seconds=self._bucket_windows.get(key, 86_400),
+                    now=now,
+                )
+                for key, request_times in self._buckets.items()
+                if request_times
+            ),
+            default=1,
+        )
+        return RateLimitDecision(
+            allowed=False,
+            limit=rule.requests,
+            remaining=0,
+            reset_after=retry_after,
+            retry_after=retry_after,
+        )
 
 
-def rate_limit(
+def rate_limit[T: Callable[..., Any]](
     requests: int,
     *,
     per: float,
     scope: str | None = None,
     key_func: RateLimitKeyFunc | None = None,
-) -> Callable[[Endpoint], Endpoint]:
+) -> Callable[[T], T]:
     """Attach a rate limit rule to a route handler.
 
     By default, requests are keyed by the ASGI client IP. Pass the same
@@ -251,7 +279,7 @@ def rate_limit(
 
     rule = RateLimitRule(requests=requests, window_seconds=per, scope=scope, key_func=key_func)
 
-    def decorator(endpoint: Endpoint) -> Endpoint:
+    def decorator(endpoint: T) -> T:
         rules: list[RateLimitRule] = list(getattr(endpoint, "__flasgo_rate_limits__", ()))
         rules.append(rule)
         endpoint.__dict__["__flasgo_rate_limits__"] = tuple(rules)
@@ -300,7 +328,11 @@ def _seconds_until_reset(oldest_request_time: float, *, rule: RateLimitRule, now
     return max(1, math.ceil(oldest_request_time + rule.window_seconds - now))
 
 
-def endpoint_rate_limits(endpoint: Endpoint) -> tuple[RateLimitRule, ...]:
+def _seconds_until_bucket_expires(last_request_time: float, *, window_seconds: float, now: float) -> int:
+    return max(1, math.ceil(last_request_time + window_seconds - now))
+
+
+def endpoint_rate_limits(endpoint: Callable[..., Any]) -> tuple[RateLimitRule, ...]:
     raw = getattr(endpoint, "__flasgo_rate_limits__", ())
     if not isinstance(raw, tuple):
         return ()

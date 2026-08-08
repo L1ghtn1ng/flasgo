@@ -18,6 +18,7 @@ from .websockets import WebSocketDisconnect
 type FormValue = str | int | float | bool
 type FileValue = tuple[str, str | bytes] | tuple[str, str | bytes, str]
 type RequestData = Mapping[str, FormValue | Sequence[FormValue]] | Sequence[tuple[str, FormValue]]
+type RequestHeaders = Mapping[str, str] | Sequence[tuple[str, str]]
 
 
 def _flatten_data(data: RequestData) -> list[tuple[str, str]]:
@@ -39,15 +40,17 @@ def _flatten_data(data: RequestData) -> list[tuple[str, str]]:
 
 
 def _merge_cookie_headers(cookie_header: str | None, jar: dict[str, str]) -> str | None:
-    cookies = dict(jar)
+    supplied_names: set[str] = set()
     if cookie_header:
-        parsed = SimpleCookie()
-        parsed.load(cookie_header)
-        for key, morsel in parsed.items():
-            cookies[key] = morsel.value
-    if not cookies:
+        for chunk in cookie_header.split(";"):
+            name, separator, _ = chunk.strip().partition("=")
+            if separator and name:
+                supplied_names.add(name)
+    chunks = [cookie_header] if cookie_header else []
+    chunks.extend(f"{key}={value}" for key, value in jar.items() if key not in supplied_names)
+    if not chunks:
         return None
-    return "; ".join(f"{key}={value}" for key, value in cookies.items())
+    return "; ".join(chunks)
 
 
 def _encode_multipart(
@@ -249,7 +252,7 @@ class TestClient:
         method: str,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         body: bytes | None = None,
         json: object | None = None,
         data: RequestData | None = None,
@@ -291,7 +294,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         scheme: str = "http",
         follow_redirects: bool = False,
     ) -> TestResponse:
@@ -301,7 +304,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         scheme: str = "http",
         follow_redirects: bool = False,
     ) -> TestResponse:
@@ -311,7 +314,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         body: bytes | None = None,
         json: object | None = None,
         data: RequestData | None = None,
@@ -335,7 +338,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         body: bytes | None = None,
         json: object | None = None,
         data: RequestData | None = None,
@@ -359,7 +362,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         body: bytes | None = None,
         json: object | None = None,
         data: RequestData | None = None,
@@ -383,7 +386,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         body: bytes | None = None,
         json: object | None = None,
         data: RequestData | None = None,
@@ -406,7 +409,7 @@ class TestClient:
         method: str,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         body: bytes | None = None,
         json: object | None = None,
         data: RequestData | None = None,
@@ -447,7 +450,7 @@ class TestClient:
         method: str,
         path: str,
         *,
-        headers: dict[str, str] | None,
+        headers: RequestHeaders | None,
         body: bytes | None,
         json: object | None,
         data: RequestData | None,
@@ -510,7 +513,7 @@ class TestClient:
         method: str,
         path: str,
         *,
-        headers: dict[str, str] | None,
+        headers: RequestHeaders | None,
         body: bytes | None,
         json: object | None,
         data: RequestData | None,
@@ -520,21 +523,29 @@ class TestClient:
         payload, content_type = _encode_request_body(body=body, json=json, data=data, files=files)
 
         parsed = urlsplit(path)
-        normalized_headers = {"host": "localhost"}
-        if headers:
-            normalized_headers.update({key.lower(): value for key, value in headers.items()})
-        if content_type and "content-type" not in normalized_headers:
-            normalized_headers["content-type"] = content_type
-        if payload:
-            normalized_headers.setdefault("content-length", str(len(payload)))
+        if headers is None:
+            header_items: list[tuple[str, str]] = []
+        elif isinstance(headers, Mapping):
+            header_items = list(cast(Mapping[str, str], headers).items())
+        else:
+            header_items = list(headers)
+        normalized_names = [key.lower() for key, _ in header_items]
+        if "host" not in normalized_names:
+            header_items.insert(0, ("host", "localhost"))
+            normalized_names.insert(0, "host")
+        if content_type and "content-type" not in normalized_names:
+            header_items.append(("content-type", content_type))
+            normalized_names.append("content-type")
+        if payload and "content-length" not in normalized_names:
+            header_items.append(("content-length", str(len(payload))))
 
-        cookie_header = _merge_cookie_headers(normalized_headers.get("cookie"), self._cookies)
+        supplied_cookies = [value for (key, value) in header_items if key.lower() == "cookie"]
+        header_items = [(key, value) for (key, value) in header_items if key.lower() != "cookie"]
+        cookie_header = _merge_cookie_headers("; ".join(supplied_cookies) or None, self._cookies)
         if cookie_header:
-            normalized_headers["cookie"] = cookie_header
+            header_items.append(("cookie", cookie_header))
 
-        raw_headers = [
-            (key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in normalized_headers.items()
-        ]
+        raw_headers = [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in header_items]
         scope: Scope = {
             "type": "http",
             "asgi": {"version": "3.0", "spec_version": "2.3"},

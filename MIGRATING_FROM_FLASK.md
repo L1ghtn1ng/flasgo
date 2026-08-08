@@ -201,6 +201,46 @@ Notes:
 - With CSRF enabled, browser form posts should include the Flasgo CSRF token flow.
 - Unsupported methods return `405 Method Not Allowed` plus an `Allow` header listing the accepted methods.
 
+For typed forms, replace manual field extraction with a dataclass and `Annotated[..., Form()]`. A validation failure
+returns a safe `422` JSON response by default; register `@app.errorhandler(FormValidationError)` when an HTML route
+should redisplay the parsed fields and field-local errors.
+
+```python
+from dataclasses import dataclass
+from typing import Annotated
+
+from flasgo import Flasgo, Form, FormValidationError, Response
+
+
+@dataclass
+class SignupForm:
+    email: str
+    age: int
+
+
+@app.errorhandler(FormValidationError)
+def invalid_signup(request, exc):
+    return Response.template(
+        "signup.html",
+        templates=app.templates,
+        context={"values": exc.form_data, "errors": exc.issues},
+        status_code=422,
+    )
+
+
+@app.post("/signup")
+def signup(form: Annotated[SignupForm, Form()]):
+    return {"email": form.email, "age": form.age}
+```
+
+JSON APIs use the equivalent `Annotated[Model, Body()]`. Use `Query(alias=...)` for explicit query names,
+`Header()` for typed case-insensitive headers, `Cookie()` for typed cookie values, and `Depends(provider)` for small
+sync or async dependency graphs; providers are cached once per request by default. Header parameter underscores map
+to hyphens unless an alias is supplied; cookie names are exact unless explicitly aliased. Collection-typed headers
+such as `Annotated[list[str], Header(alias="x-version")]` preserve repeated wire fields. Flasgo rejects duplicate
+scalar headers and duplicate cookie names. Use the framework's body/form, authentication, and cookie APIs instead of
+declaring the reserved `Content-Type`, `Authorization`, and `Cookie` names through `Header()`.
+
 ## static files
 
 Flask:
@@ -227,12 +267,14 @@ app = Flasgo(
         "CSRF_ENABLED": True,
         "SESSION_COOKIE_SECURE": True,
         "CSRF_COOKIE_SECURE": True,
-    }
+    },
 )
 app.configure_static("assets", url_path="/assets", cache_max_age=86400)
 ```
 
-Flasgo static serving includes path normalization, blocks directory traversal and dotfiles, prevents symlink escape outside the configured root, and emits `ETag` and `Last-Modified` headers.
+Flasgo static serving includes path normalization, blocks directory traversal and dotfiles, prevents symlink escape
+outside the configured root, and emits `ETag` and `Last-Modified` headers. File bodies stream in bounded chunks;
+`HEAD` returns metadata without opening or reading the file.
 
 ## testing
 
@@ -277,6 +319,7 @@ The official client supports:
 - `json=...`
 - `data=...`
 - Multipart `files=...`
+- Ordered `headers=[(name, value), ...]` pairs when repeated wire headers matter
 - `follow_redirects=True`
 - `await client.arequest(...)`
 
@@ -332,3 +375,5 @@ For production, run behind a real ASGI server and keep Flasgo security settings 
 - Set explicit `ALLOWED_HOSTS`
 - Keep `CSRF_ENABLED=True` for browser-facing apps
 - Enable secure cookies over HTTPS
+- Keep the request body, request head, read timeout, and validation budgets enabled; also configure equivalent edge
+  limits for the production server or reverse proxy

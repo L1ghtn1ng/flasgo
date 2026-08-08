@@ -22,6 +22,7 @@ jobs:
           allowed-endpoints: >
             releases.astral.sh:443
             api.github.com:443
+            api.osv.dev:443
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
@@ -43,14 +44,29 @@ jobs:
         with:
           version: "latest"
 
+      - name: Verify lockfile
+        run: uv lock --check
+
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --frozen --group dev
+
+      - name: Verify environment
+        run: uv pip check
 
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --frozen ruff check .
 
       - name: Type check
-        run: uv run ty check
+        run: uv run --frozen ty check
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run --frozen pytest
+
+      - name: Audit dependencies
+        run: uv audit --frozen
+
+      - name: Build package
+        run: uv build
+
+      - name: Check patch hygiene
+        run: git diff --check

@@ -10,6 +10,26 @@ from jinja2 import Environment, TemplateError
 from .request import Request
 from .response import Response
 
+_DEBUG_ENVIRONMENT_KEYS = frozenset(
+    {
+        "HOME",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LOGNAME",
+        "PATH",
+        "PYTHONHOME",
+        "PYTHONIOENCODING",
+        "PYTHONPATH",
+        "PYTHONUTF8",
+        "SHELL",
+        "TERM",
+        "USER",
+    }
+)
+
 
 class Debug:
     """
@@ -35,11 +55,7 @@ class Debug:
         debug_template_path = Path(__file__).parent / "debug_templates" / "debug_error.html"
         template_content = debug_template_path.read_text()
 
-        safe_environ: dict[str, str] = {
-            k: v
-            for k, v in os.environ.items()
-            if k.startswith(("PATH", "PYTHON", "LANG", "LC_", "HOME", "USER", "SHELL", "TERM"))
-        }
+        safe_environ: dict[str, str] = {k: v for k, v in os.environ.items() if k in _DEBUG_ENVIRONMENT_KEYS}
 
         html = (
             Environment(autoescape=True)

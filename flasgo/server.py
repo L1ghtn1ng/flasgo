@@ -28,6 +28,7 @@ async def run_dev_server(
     reload_dirs: Sequence[str | Path] | None = None,
     websocket_max_message_bytes: int = 65_536,
     limit_concurrency: int = 1_000,
+    max_request_head_bytes: int = 16_384,
 ) -> None:
     """Run Flasgo on Uvicorn while retaining the existing file reloader."""
 
@@ -42,6 +43,8 @@ async def run_dev_server(
         access_log=False,
         lifespan="on",
         proxy_headers=False,
+        http="h11",
+        h11_max_incomplete_event_size=max_request_head_bytes,
         ws="websockets",
         ws_max_size=websocket_max_message_bytes,
         ws_max_queue=32,
