@@ -28,13 +28,14 @@ jobs:
             releases.astral.sh:443
             api.github.com:443
             files.pythonhosted.org:443
-            fulcio.sigstore.dev:443
             github.com:443
             ghcr.io:443
+            fulcio.sigstore.dev:443
+            timestamp.sigstore.dev:443
             oauth2.sigstore.dev:443
+            rekor.sigstore.dev:443
             pypi.org:443
             raw.githubusercontent.com:443
-            rekor.sigstore.dev:443
             pkg-containers.githubusercontent.com:443
             release-assets.githubusercontent.com:443
             token.actions.githubusercontent.com:443
