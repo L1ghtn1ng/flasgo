@@ -28,6 +28,8 @@ def test_readme_mentions_new_runtime_features() -> None:
     assert "bearer-safe ASCII" in readme
     assert "64 KiB chunks" in readme
     assert "unique-local IPv6" in readme
+    assert "CORSConfig" in readme
+    assert "CORS controls whether browser JavaScript may read a response" in readme
     assert "uv audit --frozen" in readme
     assert "git diff --check" in readme
 

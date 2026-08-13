@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mappi
 from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -27,6 +27,13 @@ from .auth import (
     auth_backend_openapi_scheme,
     extract_bearer_token,
     validate_openapi_security_scheme,
+)
+from .cors import (
+    CORSConfig,
+    _apply_cors_response_headers,
+    _build_cors_preflight_response,
+    _cors_preflight_denied_response,
+    _parse_cors_preflight,
 )
 from .debug import Debug
 from .di import resolve_endpoint_arguments
@@ -86,7 +93,6 @@ _user_ctx: ContextVar[User | None] = ContextVar("flasgo_user", default=None)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _HTTP_METHOD_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
-_METRIC_HTTP_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
 # Stable HTTP server span known methods (RFC 9110 + PATCH + QUERY).
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
 _OTEL_HTTP_METHODS = frozenset(
@@ -154,11 +160,16 @@ class Flasgo:
         static_url_path: str = "/static",
         static_cache_max_age: int = 3600,
         tracer_provider: Any | None = None,
+        cors: CORSConfig | None = None,
     ) -> None:
         self.settings = load_settings(settings)
         self.security = security or self.settings.to_security_config()
         self._validate_security_config()
+        if cors is not None and not isinstance(cors, CORSConfig):
+            raise TypeError("cors must be a CORSConfig instance or None.")
+        self.cors = cors
         self._routes: list[Route] = []
+        self._has_cors_routes = False
         self._websocket_routes: list[WebSocketRoute] = []
         self._static_directories: list[StaticDirectory] = []
         self._before: list[BeforeMiddleware] = []
@@ -235,6 +246,17 @@ class Flasgo:
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         started = time.perf_counter()
         if _request_head_size(scope) > self.security.max_request_head_bytes:
+            instrument = self._metrics is not None and scope.get("path") != self.settings.METRICS_PATH
+            response_body_size = 0
+
+            async def observed_send(message: dict[str, Any]) -> None:
+                nonlocal response_body_size
+                await send(message)
+                if message.get("type") == "http.response.body":
+                    response_body_size += len(bytes(message.get("body", b"")))
+
+            if instrument:
+                self._metrics.http_active.inc()
             response = Response.text(
                 "Request headers exceed MAX_REQUEST_HEAD_BYTES.",
                 status_code=431,
@@ -244,7 +266,23 @@ class Flasgo:
                 },
             )
             apply_security_headers(response, self.security)
-            await response.send(send)
+            sent = False
+            try:
+                await response.send(observed_send)
+                sent = True
+            finally:
+                if instrument:
+                    try:
+                        self._metrics.observe_http(
+                            method=str(scope.get("method", "GET")),
+                            route="<unmatched>",
+                            status=response.status_code,
+                            duration=time.perf_counter() - started,
+                            response_body_size=response_body_size,
+                            response_sent=sent,
+                        )
+                    finally:
+                        self._metrics.http_active.dec()
             return
         req = Request(scope, receive)
         req.scope["max_request_body_bytes"] = self.security.max_request_body_bytes
@@ -284,8 +322,16 @@ class Flasgo:
                 response.prepare()
 
             sent = False
+            response_body_size = 0
+
+            async def observed_send(message: dict[str, Any]) -> None:
+                nonlocal response_body_size
+                await send(message)
+                if message.get("type") == "http.response.body":
+                    response_body_size += len(bytes(message.get("body", b"")))
+
             try:
-                await response.send(send, head_only=req.method == "HEAD")
+                await response.send(observed_send, head_only=req.method == "HEAD")
                 sent = True
             except Exception:
                 self._log_security_event(logging.ERROR, "response-send-failed", req=req)
@@ -304,13 +350,14 @@ class Flasgo:
                 duration_ms=round(duration * 1000, 3),
             )
             if instrument:
-                metric_method = req.method if req.method in _METRIC_HTTP_METHODS else "OTHER"
-                self._metrics.http_requests.labels(
-                    method=metric_method,
+                self._metrics.observe_http(
+                    method=req.method,
                     route=route,
-                    status=str(response.status_code),
-                ).inc()
-                self._metrics.http_duration.labels(method=metric_method, route=route).observe(duration)
+                    status=response.status_code,
+                    duration=duration,
+                    response_body_size=response_body_size,
+                    response_sent=sent,
+                )
 
             if sent and response.background is not None:
                 response.background.bind_request_id(req.request_id)
@@ -530,8 +577,7 @@ class Flasgo:
             if self._metrics is not None:
                 if active:
                     self._metrics.websocket_active.labels(route=route).dec()
-                self._metrics.websocket_connections.labels(route=route, outcome=outcome).inc()
-                self._metrics.websocket_duration.labels(route=route).observe(duration)
+                self._metrics.observe_websocket(route=route, outcome=outcome, duration=duration)
             log_event(
                 self._websocket_logger,
                 logging.INFO,
@@ -682,27 +728,58 @@ class Flasgo:
         *,
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
     ) -> Callable[[Endpoint], Endpoint]:
         def decorator(func: Endpoint) -> Endpoint:
-            self.add_route(path, func, methods=methods, name=name)
+            self.add_route(path, func, methods=methods, name=name, cors=cors)
             return func
 
         return decorator
 
-    def get(self, path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("GET",), name=name)
+    def get(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
+    ) -> Callable[[Endpoint], Endpoint]:
+        return self.route(path, methods=("GET",), name=name, cors=cors)
 
-    def post(self, path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("POST",), name=name)
+    def post(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
+    ) -> Callable[[Endpoint], Endpoint]:
+        return self.route(path, methods=("POST",), name=name, cors=cors)
 
-    def put(self, path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("PUT",), name=name)
+    def put(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
+    ) -> Callable[[Endpoint], Endpoint]:
+        return self.route(path, methods=("PUT",), name=name, cors=cors)
 
-    def patch(self, path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("PATCH",), name=name)
+    def patch(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
+    ) -> Callable[[Endpoint], Endpoint]:
+        return self.route(path, methods=("PATCH",), name=name, cors=cors)
 
-    def delete(self, path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("DELETE",), name=name)
+    def delete(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
+    ) -> Callable[[Endpoint], Endpoint]:
+        return self.route(path, methods=("DELETE",), name=name, cors=cors)
 
     def websocket(
         self,
@@ -804,7 +881,10 @@ class Flasgo:
         *,
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
+        cors: CORSConfig | Literal[False] | None = None,
     ) -> None:
+        if cors is not None and cors is not False and not isinstance(cors, CORSConfig):
+            raise TypeError("Route cors must be a CORSConfig instance, False, or None.")
         reserved_paths: set[str] = set()
         if self.settings.METRICS_ENABLED:
             reserved_paths.add(self.settings.METRICS_PATH)
@@ -822,8 +902,11 @@ class Flasgo:
         normalized = frozenset(normalized_methods)
         if "GET" in normalized:
             normalized = frozenset((*normalized, "HEAD"))
+        resolved_cors = self.cors if cors is None else None if cors is False else cors
         plan = compile_endpoint_plan(endpoint, path)
-        self._routes.append(Route(path, normalized, endpoint, plan, name=name))
+        self._routes.append(Route(path, normalized, endpoint, plan, name=name, cors=resolved_cors))
+        if resolved_cors is not None:
+            self._has_cors_routes = True
         self._openapi_dirty = True
 
     def run(
@@ -922,7 +1005,12 @@ class Flasgo:
     def _prepare_response(self, req: Request, response: Response) -> None:
         response.headers.setdefault("x-request-id", req.request_id)
         apply_security_headers(response, self.security)
-        if not response.allow_public_cache:
+        is_cors_preflight = req.scope.get("flasgo.cors_preflight") is True
+        is_metrics_response = self._metrics is not None and req.path == self.settings.METRICS_PATH
+        cors = req.scope.get("flasgo.cors")
+        if isinstance(cors, CORSConfig) and not is_cors_preflight:
+            _apply_cors_response_headers(req, response, cors)
+        if not response.allow_public_cache and not is_cors_preflight and not is_metrics_response:
             session_token = self._persist_session(req, response)
             if self.security.csrf_enabled:
                 ensure_csrf_cookie(req, response, self.security, session_token=session_token)
@@ -937,7 +1025,8 @@ class Flasgo:
                 status_code=405,
                 headers={"allow": "GET, HEAD"},
             )
-        token = extract_bearer_token(req.headers.get("authorization"))
+        authorization_values = req.header_values("authorization")
+        token = extract_bearer_token(authorization_values[0]) if len(authorization_values) == 1 else None
         expected = self.settings.METRICS_BEARER_TOKEN or ""
         try:
             token_bytes = token.encode("ascii") if token is not None else None
@@ -952,8 +1041,12 @@ class Flasgo:
                 status_code=401,
                 headers={"www-authenticate": "Bearer"},
             )
-        body, content_type = self._metrics.render()
-        return Response(body=body, content_type=content_type)
+        body, content_type = self._metrics.render(req.headers.get("accept"))
+        return Response(
+            body=body,
+            headers={"vary": "accept"},
+            content_type=content_type,
+        )
 
     async def _handle_docs_request(self, req: Request) -> Response | None:
         if not self.settings.ENABLE_DOCS:
@@ -1136,15 +1229,6 @@ class Flasgo:
                 status_code=400,
             )
 
-        if self.security.csrf_enabled and not csrf_is_valid(req, self.security):
-            self._log_security_event(logging.WARNING, "csrf-check-failed", req=req)
-            if self._register_security_failure(req):
-                return _security_rate_limit_response()
-            return Response.text(
-                "CSRF validation failed. Send matching CSRF cookie and header values plus a trusted Origin/Referer.",
-                status_code=403,
-            )
-
         metrics_response = self._handle_metrics_request(req)
         if metrics_response is not None:
             req.scope["route_template"] = self.settings.METRICS_PATH
@@ -1159,6 +1243,43 @@ class Flasgo:
         if debug_css_response is not None:
             return debug_css_response
 
+        preflight = _parse_cors_preflight(req)
+        if preflight is not None:
+            if preflight.error is not None or preflight.method is None:
+                if self._path_has_cors(req.path):
+                    self._log_security_event(logging.WARNING, "cors-preflight-invalid", req=req)
+                    req.scope["flasgo.cors_preflight"] = True
+                    return _cors_preflight_denied_response(status_code=400)
+            else:
+                match, _ = self._match_route(req.path, preflight.method)
+                if match is not None and match.cors is not None:
+                    req.scope["route_template"] = match.route_path
+                    req.scope["flasgo.cors"] = match.cors
+                    req.scope["flasgo.cors_preflight"] = True
+                    response = _build_cors_preflight_response(match.cors, preflight)
+                    if response.status_code >= 400:
+                        self._log_security_event(logging.WARNING, "cors-preflight-denied", req=req)
+                    return response
+                if self._path_has_cors(req.path):
+                    self._log_security_event(logging.WARNING, "cors-preflight-denied", req=req)
+                    req.scope["flasgo.cors_preflight"] = True
+                    return _cors_preflight_denied_response()
+
+        if self._has_cors_routes:
+            cors_match, _ = self._match_route(req.path, req.method)
+            if cors_match is not None and cors_match.cors is not None:
+                req.scope["route_template"] = cors_match.route_path
+                req.scope["flasgo.cors"] = cors_match.cors
+
+        if self.security.csrf_enabled and not csrf_is_valid(req, self.security):
+            self._log_security_event(logging.WARNING, "csrf-check-failed", req=req)
+            if self._register_security_failure(req):
+                return _security_rate_limit_response()
+            return Response.text(
+                "CSRF validation failed. Send matching CSRF cookie and header values plus a trusted Origin/Referer.",
+                status_code=403,
+            )
+
         for fn in self._before:
             value = await _maybe_await(fn(req))
             if value is not None:
@@ -1167,6 +1288,9 @@ class Flasgo:
 
         match, allowed_methods = self._match_route(req.path, req.method)
         if match is None and allowed_methods:
+            route_template = self._otel_route_template(req.path)
+            if route_template is not None:
+                req.scope["route_template"] = route_template
             return Response.text(
                 f"Method Not Allowed. Use one of: {', '.join(sorted(allowed_methods))}.",
                 status_code=405,
@@ -1179,6 +1303,10 @@ class Flasgo:
             )
 
         req.scope["route_template"] = match.route_path
+        if match.cors is not None:
+            req.scope["flasgo.cors"] = match.cors
+        else:
+            req.scope.pop("flasgo.cors", None)
         route_auth = self._route_auth.get(match.endpoint)
         rate_phase = "pre_auth" if route_auth is not None else "all"
         rate_limit_result = await self._check_rate_limits(req, match.endpoint, phase=rate_phase)
@@ -1263,6 +1391,9 @@ class Flasgo:
             if route.path_matches(path):
                 allowed_methods.update(route.methods)
         return None, allowed_methods
+
+    def _path_has_cors(self, path: str) -> bool:
+        return any(route.cors is not None and route.path_matches(path) for route in self._routes)
 
     def _otel_route_template(self, path: str) -> str | None:
         fallback: str | None = None

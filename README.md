@@ -189,6 +189,56 @@ uv run uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 
 Put a reverse proxy/load balancer in front (Caddy, Cloudflare, etc.) for TLS termination and network controls.
 
+## Cross-origin browser APIs
+
+Cross-Origin Resource Sharing (CORS) is disabled by default. Use `CORSConfig` when browser JavaScript served from
+another exact origin needs to read responses from registered HTTP routes:
+
+```python
+from flasgo import CORSConfig, Flasgo
+
+browser_api = CORSConfig(
+    allow_origins={"https://app.example.com"},
+    allow_methods={"GET", "POST"},
+    allow_headers={"authorization", "content-type", "x-csrf-token"},
+    expose_headers={"x-request-id"},
+    max_age=600,
+)
+
+app = Flasgo(cors=browser_api)
+
+
+@app.get("/health", cors=False)
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/widgets")
+def create_widget():
+    return {"created": True}, 201
+```
+
+The application policy applies to registered HTTP routes only; framework-owned documentation and metrics endpoints
+do not inherit it. Pass another `CORSConfig` to a route for a narrower partner-specific policy, or `cors=False` to
+opt that route out. Policies are stored per route, so one callable can safely serve routes with different origins.
+
+Flasgo validates origins, methods, header names, credential settings, and preflight cache duration when the policy is
+created. Origins must be exact ASCII `http://` or `https://` origins without paths. The special opaque `null` origin
+is rejected. `"*"` may be used as the only origin for a public non-credentialed API, but it cannot be combined with
+`allow_credentials=True`; methods and header names must always be listed explicitly.
+
+Valid preflight requests receive a route-aware `204` without running application middleware, authentication,
+dependencies, or the endpoint. Normal responses, including validation, authorization, CSRF, and handled server
+errors, receive CORS headers only when the origin and actual method are allowed. Flasgo also maintains the required
+`Vary` fields and does not emit session or CSRF cookies on generated preflight responses.
+
+CORS controls whether browser JavaScript may read a response. It is not authentication, authorization, or CSRF
+protection, and a simple cross-origin request can still reach the server. `allow_origins` therefore does not modify
+`CSRF_TRUSTED_ORIGINS`. Credentialed cookie requests additionally obey the session cookie's `SameSite`/`Secure`
+settings, the framework CSRF cookie's `SameSite=Lax` policy, and browser third-party-cookie restrictions. Do not
+disable CSRF merely to enable cross-site writes. Private Network Access response headers are intentionally
+unsupported; enforce public-to-private network boundaries at a trusted proxy or edge.
+
 ## Security defaults
 
 - Host header allowlist (`localhost`, `127.0.0.1` by default).
@@ -206,6 +256,7 @@ Put a reverse proxy/load balancer in front (Caddy, Cloudflare, etc.) for TLS ter
 - Same-origin WebSocket handshakes, pre-accept auth, bounded messages, and connection-level message throttling.
 - Locally generated request IDs by default; incoming IDs are ignored unless strict opt-in validation is enabled.
 - Hardened headers (`CSP`, `HSTS`, `X-Frame-Options`, `Referrer-Policy`, etc.).
+- Disabled-by-default, route-aware CORS with exact-origin validation and fail-closed preflight handling.
 
 These defaults are intended to help teams avoid common OWASP Top 10 2025 failure modes around broken access control, cryptographic failures, security misconfiguration, software and data integrity issues, and SSRF.
 
@@ -352,7 +403,25 @@ app = Flasgo(
 
 The `/metrics` endpoint requires that bearer token, does not instrument itself, and labels HTTP metrics with route
 templates rather than user-controlled paths. The configured secret must use the standard bearer-token ASCII
-character set; malformed or non-ASCII request credentials receive `401 Unauthorized`.
+character set; malformed or non-ASCII request credentials receive `401 Unauthorized`. Metrics responses are
+explicitly `no-store` and do not create session or CSRF cookies.
+
+Flasgo exposes request count, active requests, status-class-aware request duration, successfully sent response-body size,
+and response-send failures. WebSocket metrics cover active and completed connections with route and outcome labels,
+using duration buckets that remain useful for connections lasting up to 24 hours. Background-task and lifespan
+outcomes are included alongside `flasgo_info` and the standard Python, garbage-collector, and process metrics. HTTP
+methods use the bounded RFC method set and `_OTHER`; exact status codes are retained on counters, while duration and
+response-size distributions use bounded `1xx` through `5xx` classes. Route templates remain bounded dimensions.
+Pre-dispatch `431` rejections are counted under the `<unmatched>` route.
+
+Prometheus requests OpenMetrics during normal content negotiation. When OpenTelemetry tracing is also enabled,
+Flasgo attaches the active `trace_id` and `span_id` to request-duration, response-size, and request-counter exemplars,
+allowing a dashboard to jump from an anomalous metric observation to its trace. Plain Prometheus text remains the
+fallback for clients that do not request OpenMetrics.
+
+The registry is per process. For multi-worker deployments, expose and scrape every worker as a distinct Prometheus
+target or place a supported aggregation layer in front of them; scraping a load-balanced `/metrics` URL can sample a
+different worker on each scrape.
 
 OpenTelemetry tracing is a separate optional extra. It keeps Prometheus as the metrics implementation and exports
 traces over OTLP/HTTP using standard OpenTelemetry environment variables:
@@ -421,6 +490,7 @@ Flasgo keeps each framework concern in a small module so new contributors can ch
 - `flasgo/jwt.py`: optional strict HS256 token encoding and authentication backend.
 - `flasgo/logging.py`, `flasgo/metrics.py`, and `flasgo/telemetry.py`: request correlation and optional observability.
 - `flasgo/security.py`: security configuration, CSRF, allowed hosts, secure cookies, and default security headers.
+- `flasgo/cors.py`: validated route CORS policies, preflight handling, and response-header generation.
 - `flasgo/ratelimit.py`: route decorator metadata and the in-process sliding-window limiter.
 - `flasgo/auth.py`: users, auth backends, permissions, and bearer-token helpers.
 - `flasgo/session.py`: signed session serialization.
@@ -435,7 +505,7 @@ handing off.
 ## Public API surface
 
 - CLI: `run`, `routes`, `openapi`, `check`, and optional `db` migration commands
-- Core types: `Flasgo`, `Settings`, `Request`, `Response`, `Session`, `BackgroundTasks`
+- Core types: `Flasgo`, `Settings`, `Request`, `Response`, `Session`, `BackgroundTasks`, `CORSConfig`
 - Routing and lifecycle: `Flasgo.route`, `Flasgo.get`, `Flasgo.post`, `Flasgo.put`, `Flasgo.patch`,
   `Flasgo.delete`, `Flasgo.websocket`, `Flasgo.lifespan`, `Flasgo.state`, `Flasgo.before_request`,
   `Flasgo.after_request`, `Flasgo.errorhandler`

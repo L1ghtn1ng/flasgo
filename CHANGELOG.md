@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dependency-free, route-aware CORS through `CORSConfig`, with application defaults, per-route policies and opt-out,
+  automatic preflight responses, explicit exposed headers, credentials support, and bounded preflight caching.
+- Prometheus response-body size and response-send failure metrics, `flasgo_info`, standard Python/GC/process
+  collectors, and OpenMetrics trace/span exemplars when OpenTelemetry is active.
+
+### Changed
+
+- HTTP duration and response-size distributions now use bounded status classes, unknown methods use the bounded
+  `_OTHER` label, exact status codes remain on counters, `405` responses retain
+  their route template, and pre-dispatch `431` rejections are instrumented. WebSocket duration metrics include outcome
+  and use connection-appropriate buckets extending to 24 hours.
+
+### Security
+
+- CORS is disabled by default and validates exact origins, HTTP tokens, wildcard/credential combinations, duplicate
+  request origins, and cache duration. Generated preflights use registered route methods, skip application code and
+  cookie persistence, maintain the required `Vary` fields, and keep CORS separate from CSRF and authorization.
+- Metrics responses are explicitly non-cacheable and no longer create framework session or CSRF cookies.
+
 ## [0.7.0] - 2026-08-08
 
 ### Added

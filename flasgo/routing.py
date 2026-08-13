@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from .response import ResponseValue
 
 if TYPE_CHECKING:
+    from .cors import CORSConfig
     from .params import EndpointPlan
 
 Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
@@ -30,6 +31,7 @@ class MatchResult:
     params: dict[str, Any]
     route_path: str
     name: str | None
+    cors: CORSConfig | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,6 +49,7 @@ class Route:
     endpoint: Endpoint
     endpoint_plan: EndpointPlan
     name: str | None = None
+    cors: CORSConfig | None = None
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
 
@@ -66,6 +69,7 @@ class Route:
             params=params,
             route_path=self.raw_path,
             name=self.name,
+            cors=self.cors,
         )
 
     def path_matches(self, path: str) -> bool:

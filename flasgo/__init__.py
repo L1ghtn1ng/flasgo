@@ -11,6 +11,7 @@ from .auth import (
     extract_bearer_token,
 )
 from .background import BackgroundTasks
+from .cors import CORSConfig
 from .exceptions import HTTPException, abort
 from .globals import current_user, jsonify, redirect, request, session
 from .jwt import encode_jwt, jwt_backend
@@ -48,6 +49,7 @@ __all__ = [
     "BackgroundTasks",
     "BaseLoader",
     "Body",
+    "CORSConfig",
     "Cookie",
     "Depends",
     "Flasgo",

@@ -40,6 +40,7 @@ Please avoid public disclosure until a fix or mitigation is available and mainta
 Flasgo is an async-first Python web framework with secure defaults. Reports are especially valuable when they affect the framework's built-in protections, including:
 
 - Host allowlist enforcement.
+- Cross-origin response sharing and preflight validation.
 - CSRF protection, including token and origin validation.
 - Signed session cookies.
 - No-store cache headers for sensitive responses.
@@ -88,6 +89,12 @@ Flasgo ships with security features enabled by default, but deployment still mat
   `OPENAPI_PATH` distinct.
 - Keep WebSocket origin enforcement enabled. Allow only exact trusted origins and do not allow missing origins for
   browser sessions that use cookie authentication.
+- Keep HTTP CORS disabled unless browser code on another origin must read route responses. Prefer exact origins,
+  methods, and request headers; use the wildcard origin only for deliberately public non-credentialed APIs. CORS is
+  not authorization or CSRF protection, and `CORSConfig.allow_origins` does not trust those origins for CSRF.
+  Credentialed cookie requests still obey session `SameSite`/`Secure`, Flasgo's `SameSite=Lax` CSRF cookie, and
+  browser third-party-cookie restrictions; do not disable CSRF merely to enable cross-site writes. Flasgo does not
+  emit Private Network Access allow headers; enforce public-to-private network boundaries at the edge.
 - Keep WebSocket message and concurrency limits enabled, and apply tighter edge limits for public deployments.
 - Keep metrics disabled unless needed; when enabled, use a dedicated 32-character-or-longer bearer-safe ASCII secret
   and restrict the endpoint at the network edge too.
