@@ -62,6 +62,11 @@ def redirect(
     status_code: int = 302,
     headers: dict[str, str] | None = None,
 ) -> Response:
-    """Return a redirect :class:`Response`."""
+    """Return a redirect :class:`Response`.
+
+    The target is not validated beyond header safety. Never redirect to
+    request-controlled input (for example a ``next`` query parameter) without
+    checking it first with :func:`flasgo.is_safe_redirect_target`.
+    """
 
     return Response.redirect(location, status_code=status_code, headers=headers)

@@ -18,6 +18,9 @@ def _format_http_date(value: datetime) -> str:
     return value.strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 
+_SAME_SITE_VALUES = {"lax": "Lax", "strict": "Strict", "none": "None"}
+
+
 def build_set_cookie(
     name: str,
     value: str,
@@ -30,7 +33,13 @@ def build_set_cookie(
 ) -> str:
     _validate_cookie_part(name, part="name")
     _validate_cookie_part(value, part="value")
-    chunks = [f"{name}={value}", f"Path={path}", f"SameSite={same_site}"]
+    _validate_cookie_path(path)
+    normalized_same_site = _SAME_SITE_VALUES.get(same_site.strip().lower())
+    if normalized_same_site is None:
+        raise ValueError("Cookie SameSite must be one of 'Lax', 'Strict', or 'None'.")
+    if normalized_same_site == "None" and not secure:
+        raise ValueError("Cookies with SameSite=None must also set secure=True.")
+    chunks = [f"{name}={value}", f"Path={path}", f"SameSite={normalized_same_site}"]
     if max_age is not None:
         expires_at = datetime.now(UTC) + timedelta(seconds=max_age)
         chunks.append(f"Max-Age={max_age}")
@@ -40,6 +49,18 @@ def build_set_cookie(
     if http_only:
         chunks.append("HttpOnly")
     return "; ".join(chunks)
+
+
+def _validate_cookie_path(path: str) -> None:
+    if not path:
+        raise ValueError("Invalid cookie path: must not be empty.")
+    # RFC 6265 allows printable US-ASCII except ';' in cookie paths.
+    if ";" in path or any(ord(char) < 0x20 or ord(char) == 0x7F for char in path):
+        raise ValueError("Invalid cookie path: contains forbidden characters.")
+    try:
+        path.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Invalid cookie path: must be Latin-1 encodable.") from exc
 
 
 def _default_secret_key() -> str:
@@ -82,6 +103,8 @@ class SecurityConfig:
     max_request_body_bytes: int = 1_048_576
     max_request_head_bytes: int = 16_384
     request_read_timeout_seconds: float = 10.0
+    max_multipart_parts: int = 1_000
+    max_form_fields: int = 1_000
     max_validation_depth: int = 64
     max_validation_work: int = 10_000
     max_validation_issues: int = 100

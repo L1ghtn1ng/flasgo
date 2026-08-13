@@ -5,7 +5,7 @@ Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
 - Django security defaults: CSRF protection, host validation, secure headers, signed sessions.
 
-The current framework release is `0.7.0`.
+The current framework release is `0.8.0`.
 
 ## Project goals
 
@@ -97,11 +97,22 @@ Or explicitly:
 app.run(host="127.0.0.1", port=8000, reload=True)
 ```
 
-The CLI also accepts import strings:
+The CLI accepts Python files, extensionless local file names, package files, and import strings:
 
 ```bash
+uv run flasgo run app
+uv run flasgo run app.py:app
+uv run flasgo run src/package/app.py:app
 uv run flasgo run package.module:app --reload
 ```
+
+File and package targets establish their project import root automatically, so sibling and package-relative imports
+work when Flasgo is installed as a console script. An explicit `:attribute` takes precedence over `--app` and may be
+dotted, such as `package.module:namespace.app`. With the default app name, Flasgo checks `app` and then `application`.
+Each `--reload-dir` adds another watched directory without replacing the target's default directory. If one process
+loads same-named app files from different roots, Flasgo replaces only modules previously loaded by the CLI from the
+old root, including imported siblings; unrelated entries in `sys.modules` remain untouched, and a failed replacement
+restores the previous CLI-owned modules.
 
 You can still use `uvicorn` with reload:
 
@@ -180,6 +191,9 @@ app = Flasgo(
 )
 ```
 
+`SECRET_KEY` must be at least 32 characters in every mode, including development. `SESSION_COOKIE_SAME_SITE` must
+be `Lax`, `Strict`, or `None`; `None` additionally requires `SESSION_COOKIE_SECURE=True`, matching browser rules.
+
 Run with workers:
 
 ```bash
@@ -248,10 +262,15 @@ unsupported; enforce public-to-private network boundaries at a trusted proxy or 
 - Static file path traversal and symlink escape protections.
 - Request body/head limits and read timeouts at the application boundary, with H11 head limits in the built-in
   development server.
+- Bounded multipart part counts (`MAX_MULTIPART_PARTS`) and form field counts (`MAX_FORM_FIELDS`), enforced before
+  the parser can allocate heavily.
+- Sanitized upload filenames: directory components and control characters are removed, then surrounding whitespace
+  and dots are stripped until neither can expose another dot prefix or suffix.
 - Bounded validation depth, work, and returned issue counts.
 - Optional per-client throttling for repeated security failures (`429`).
 - Per-route rate limiting with `@app.ratelimit(...)` / `@rate_limit(...)`, using the ASGI client IP by default.
 - Fail-closed rate-limit key capacity that preserves active quota accounting rather than evicting it under churn.
+- Failed metrics-endpoint authentication is throttled like every other security failure.
 - Security event logging for host/CSRF/authz denials.
 - Same-origin WebSocket handshakes, pre-accept auth, bounded messages, and connection-level message throttling.
 - Locally generated request IDs by default; incoming IDs are ignored unless strict opt-in validation is enabled.
@@ -301,7 +320,7 @@ For protected HTTP and WebSocket routes, default IP-based rules execute before a
 not repeatedly invoke a backend. Rules with a custom `key_func` execute after successful authentication so they can
 use the authenticated identity. Repeated authentication failures are also subject to the security-failure limiter.
 
-The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. In multi-process or multi-host production deployments, use a shared external limiter at the edge or a future shared-storage backend so all workers enforce the same quota.
+The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. If the ASGI server provides no client identity, security-failure events are still logged but never throttle a shared "unknown" bucket, so one client cannot lock out the others; run behind a server that supplies peer addresses. In multi-process or multi-host production deployments, use a shared external limiter at the edge or a future shared-storage backend so all workers enforce the same quota.
 
 ## Typed request data and dependencies
 
@@ -357,7 +376,12 @@ Declare providers at module scope when using postponed annotations so Python can
 
 Validation uses shared per-request budgets controlled by `MAX_VALIDATION_DEPTH`, `MAX_VALIDATION_WORK`, and
 `MAX_VALIDATION_ISSUES`. When a limit is reached, Flasgo stops further recursive or union evaluation and returns one
-bounded `validation_limit` or `too_many_errors` issue without reflecting rejected values.
+bounded `validation_limit` or `too_many_errors` issue without reflecting rejected values. Field locations are
+sanitized (printable ASCII, length-capped) because object keys are attacker-controlled; still treat them as data,
+not markup. Non-finite floats (`NaN`, `Infinity`) are rejected on input and never emitted in JSON responses.
+
+When a handler returns a dataclass instance, Flasgo recursively converts nested dataclasses to JSON and omits every
+underscore-prefixed dataclass field before conversion. Ordinary mapping keys are application data and are not filtered.
 
 The same per-route endpoint plan drives runtime binding and OpenAPI generation, so request models, aliases, validation
 responses, and dependency-provided query fields stay aligned. Duplicate wire parameters merge requiredness when their
@@ -403,8 +427,9 @@ app = Flasgo(
 
 The `/metrics` endpoint requires that bearer token, does not instrument itself, and labels HTTP metrics with route
 templates rather than user-controlled paths. The configured secret must use the standard bearer-token ASCII
-character set; malformed or non-ASCII request credentials receive `401 Unauthorized`. Metrics responses are
-explicitly `no-store` and do not create session or CSRF cookies.
+character set; malformed or non-ASCII request credentials receive `401 Unauthorized`, and repeated failures are
+throttled with `429` like other security failures. Metrics responses are explicitly `no-store` and do not create
+session or CSRF cookies.
 
 Flasgo exposes request count, active requests, status-class-aware request duration, successfully sent response-body size,
 and response-send failures. WebSocket metrics cover active and completed connections with route and outcome labels,
@@ -511,7 +536,7 @@ handing off.
   `Flasgo.after_request`, `Flasgo.errorhandler`
 - App integrations: `Flasgo.register_auth_backend`, `Flasgo.authorize`, `Flasgo.ratelimit`,
   `Flasgo.configure_templates`, `Flasgo.render_template`, `Flasgo.configure_static`, `Flasgo.test_client`,
-  `Flasgo.resolve_outbound_url`, `Flasgo.openapi_spec`
+  `Flasgo.resolve_outbound_url`, `Flasgo.aresolve_outbound_url`, `Flasgo.openapi_spec`
 - Parameter and validation helpers: `Body`, `Query`, `Header`, `Cookie`, `Form`, `Depends`, `ValidationIssue`,
   `RequestValidationError`, `FormValidationError`
 - Request data: `FormData`, `UploadedFile`
@@ -523,7 +548,7 @@ handing off.
 - Testing: `TestClient`, `TestResponse`, `SyncWebSocketSession`, `AsyncWebSocketSession`,
   `WebSocketHandshakeError`
 - Flask-style globals and responses: `request`, `session`, `current_user`, `jsonify`, `redirect`,
-  `Response.redirect`
+  `Response.redirect`, `is_safe_redirect_target`
 - Templating: `BaseLoader`, `SecureTemplateLoader`, `JinjaTemplates`, `Template`, `TemplateNotFound`,
   `create_template_environment`, `render_template`, `Response.template`
 - Logging: `FlasgoJSONFormatter`, `configure_logging`
@@ -535,7 +560,7 @@ handing off.
   - `dict` / `list` (JSON)
   - `(body, status)` / `(body, status, headers)`
   - `Response`
-  - dataclass instances (JSON)
+  - dataclass instances (recursive JSON; underscore-prefixed fields are omitted at every dataclass level)
 
 ## Flask-style globals
 
@@ -604,7 +629,14 @@ async def signup(request: Request) -> dict[str, object]:
     }
 ```
 
-`await request.form()` returns a `FormData` object with `get`, `getlist`, `file`, and `filelist`.
+`await request.form()` returns a `FormData` object with `get`, `getlist`, `file`, and `filelist`. Upload filenames
+are sanitized at parse time: path components and control characters are removed, and surrounding whitespace and dots
+are normalized until no dot prefix or suffix remains. `UploadedFile.filename` is therefore path-component-free, but
+it remains client-supplied metadata; generate an application-owned name when uniqueness or platform portability
+matters. Multipart requests are limited to
+`MAX_MULTIPART_PARTS` parts and `MAX_FORM_FIELDS` text fields (1000 each by default); oversubscribed requests are
+rejected with `413`. The multipart pre-scan counts only boundary delimiter lines, so boundary text embedded within a
+payload line remains valid file data.
 
 When request parsing fails, Flasgo returns actionable `400` responses. For example, invalid JSON from `await request.json()` tells the caller to send valid JSON with `Content-Type: application/json`, and malformed multipart requests explain that the boundary/header is missing.
 
@@ -657,11 +689,13 @@ See [MIGRATING_FROM_FLASK.md](MIGRATING_FROM_FLASK.md) for the canonical Flask t
 ## Django-like settings
 
 ```python
+import os
+
 from flasgo import Flasgo
 
 app = Flasgo(
     settings={
-        "SECRET_KEY": "replace-in-production",
+        "SECRET_KEY": os.environ["FLASGO_SECRET_KEY"],
         "ALLOWED_HOSTS": {"api.example.com"},
         "CSRF_ENABLED": True,
     }
@@ -773,10 +807,39 @@ app = Flasgo(
 target = app.resolve_outbound_url("https://api.example.com/data")
 ```
 
+Inside async handlers, use `await app.aresolve_outbound_url(url)` instead: it resolves DNS on the event loop's
+async resolver bounded by `SSRF_RESOLUTION_TIMEOUT_SECONDS` (5s default, fails closed on timeout) so a slow or
+hostile DNS server cannot stall other connections. The synchronous variant blocks the calling thread during
+resolution.
+
 By default, Flasgo blocks unsafe schemes, embedded credentials, localhost/private network targets, and unresolved
 hosts. `SSRF_ALLOW_PRIVATE_NETWORKS=True` permits only RFC 1918 IPv4 and unique-local IPv6 destinations; loopback,
 link-local, multicast, reserved, and unspecified addresses remain blocked. Connect to `target.url` and send
-`target.host_header` as the HTTP `Host` header when your HTTP client supports it.
+`target.host_header` as the HTTP `Host` header when your HTTP client supports it. `target.original_url` is for
+logging only; fetching it re-resolves DNS and reopens a DNS-rebinding window between validation and connection.
+Disable automatic redirect following in your HTTP client, or re-run the resolver on every redirect `Location`;
+a validated first hop says nothing about where the second hop points.
+
+`SSRF_ALLOW_UNRESOLVABLE_HOSTS=True` is a narrow compatibility opt-in for ordinary resolver failures or empty DNS
+answers. Such a result has no pinned address and returns the original URL, so use it only when a separate trusted
+network control resolves and constrains the destination. The opt-in never applies to async DNS timeouts: timeout
+always raises `SSRFViolation`, even when unresolvable hosts are otherwise allowed.
+
+## Redirect targets
+
+`redirect()` and `Response.redirect()` intentionally do not validate the target beyond header safety (matching
+Flask/Django behavior). Never pass request-controlled input such as a `next` query parameter without checking it;
+use `is_safe_redirect_target()` to accept only relative, same-origin targets. It returns `False` for malformed URLs
+and for forward-slash or backslash authority forms that browsers can normalize to `//host`:
+
+```python
+from flasgo import is_safe_redirect_target, redirect
+
+
+@app.get("/login")
+def login(next: str = "/") -> Response:
+    return redirect(next if is_safe_redirect_target(next) else "/")
+```
 
 ## Automatic API docs
 
@@ -825,7 +888,6 @@ suite. Standard operations, including `QUERY`, use Path Item fields; other valid
 `additionalOperations`. Swagger UI is pinned to an exact distribution with subresource-integrity hashes; its inline
 script and style run under a rotating per-request CSP nonce. Set `DOCS_AUTH_BACKEND` to protect both documentation
 endpoints with an existing authentication backend whenever they are reachable beyond a trusted development environment.
-See [OPENAPI_OTEL_COMPLIANCE_REPORT.md](OPENAPI_OTEL_COMPLIANCE_REPORT.md) for the implemented conformance matrix,
-security boundaries, and deployment checks.
+See [SECURITY.md](SECURITY.md) for the current observability security boundaries and deployment guidance.
 
 The framework core remains intentionally small so its security and runtime behavior stay straightforward to audit.

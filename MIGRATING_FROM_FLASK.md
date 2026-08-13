@@ -142,6 +142,11 @@ def dashboard():
     return "ok"
 ```
 
+Like Flask's `redirect`, the target is not validated. If you redirect to request-controlled input such as a `next`
+query parameter, check it with `flasgo.is_safe_redirect_target()` first so absolute and `//scheme-relative` URLs
+cannot send users to an attacker's site. The helper also returns `False` for malformed URLs and backslash authority
+forms that browsers normalize to an external `//host` target.
+
 ## form POST handling
 
 Flask:
@@ -198,6 +203,10 @@ Notes:
 
 - Flasgo parses `application/x-www-form-urlencoded` and `multipart/form-data`.
 - `FormData.file(...)` returns an `UploadedFile` with `filename`, `content_type`, `body`, `size`, and `text()`.
+- Upload filenames are path-component-free: Flasgo removes directory components and control characters, then strips
+  surrounding whitespace and dots until no dot prefix or suffix remains. The value is still client-supplied metadata.
+- `MAX_MULTIPART_PARTS` and `MAX_FORM_FIELDS` default to 1000 and reject oversubscribed requests with `413`;
+  boundary text within a payload line is file data, not another multipart part.
 - With CSRF enabled, browser form posts should include the Flasgo CSRF token flow.
 - Unsupported methods return `405 Method Not Allowed` plus an `Allow` header listing the accepted methods.
 
@@ -371,9 +380,9 @@ uv run uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 For production, run behind a real ASGI server and keep Flasgo security settings aligned with your deployment boundary:
 
 - Set `DEBUG=False`
-- Use a strong `SECRET_KEY`
+- Use a private `SECRET_KEY` containing at least 32 characters
 - Set explicit `ALLOWED_HOSTS`
 - Keep `CSRF_ENABLED=True` for browser-facing apps
 - Enable secure cookies over HTTPS
-- Keep the request body, request head, read timeout, and validation budgets enabled; also configure equivalent edge
-  limits for the production server or reverse proxy
+- Keep the request body, request head, read timeout, multipart part, form field, and validation budgets enabled; also
+  configure equivalent edge limits for the production server or reverse proxy

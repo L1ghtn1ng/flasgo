@@ -49,7 +49,7 @@ def test_http_metrics_include_runtime_status_latency_and_response_size() -> None
     assert client.request("X-ATTACKER-METHOD", "/known").status_code == 405
 
     metrics = _scrape(app)
-    assert 'flasgo_info{version="0.7.0"} 1.0' in metrics
+    assert 'flasgo_info{version="0.8.0"} 1.0' in metrics
     assert "python_info{" in metrics
     assert "python_gc_collections_total{" in metrics
     if sys.platform.startswith("linux"):

@@ -3,7 +3,7 @@
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| Latest `0.7.x` release | ✅ |
+| Latest `0.8.x` release | ✅ |
 | Older `0.x` releases | ❌ |
 
 Security fixes are made against `main` first and may be backported to the latest release line when practical. If you are running an older release, upgrade to the newest available version before requesting support.
@@ -98,8 +98,10 @@ Flasgo ships with security features enabled by default, but deployment still mat
 - Keep WebSocket message and concurrency limits enabled, and apply tighter edge limits for public deployments.
 - Keep metrics disabled unless needed; when enabled, use a dedicated 32-character-or-longer bearer-safe ASCII secret
   and restrict the endpoint at the network edge too.
-- Keep `MAX_REQUEST_BODY_BYTES`, `MAX_REQUEST_HEAD_BYTES`, `REQUEST_READ_TIMEOUT_SECONDS`, and the validation depth,
-  work, and issue budgets enabled. Mirror appropriate limits at the production server and network edge.
+- Keep `MAX_REQUEST_BODY_BYTES`, `MAX_REQUEST_HEAD_BYTES`, `REQUEST_READ_TIMEOUT_SECONDS`, `MAX_MULTIPART_PARTS`,
+  `MAX_FORM_FIELDS`, and the validation depth, work, and issue budgets enabled. Mirror appropriate limits at the
+  production server and network edge. Treat `UploadedFile.filename` as client metadata even though Flasgo removes
+  path components, control characters, surrounding whitespace, and dot prefixes or suffixes.
 - Trust incoming request IDs only when a trusted proxy replaces client-supplied values.
 - For `flasgo[jwt]`, use a dedicated random secret of at least 32 bytes, rotate it through a controlled deployment,
   validate a service-specific issuer and audience, keep tokens short-lived, and transmit them only in the
@@ -113,15 +115,25 @@ Flasgo ships with security features enabled by default, but deployment still mat
   credentials, or user identifiers as span attributes. Template exclusions apply even when a request receives
   `405 Method Not Allowed`. HTTP URL attributes contain the real request path as required by stable semantic
   conventions, so exclude routes whose path segments carry secrets or sensitive identifiers.
-  Flasgo retains query keys but replaces every non-empty query value with `REDACTED` before instrumentation;
-  WebSocket URL attributes remain route-template-only. Rejected or ambiguous Host headers are removed before the
+  Flasgo retains query keys (bounded to 64 bytes each) but replaces every non-empty query value with `REDACTED`
+  before instrumentation. WebSocket URL attributes remain route-template-only. Rejected or ambiguous Host headers are removed before the
   request reaches instrumentation.
 - Treat migration files as trusted executable code: review generated revisions before applying them and restrict who
   can modify the migration directory.
 - Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them. Prefer pinned targets from
-  `resolve_outbound_url()` when your HTTP client supports connecting by IP with the original `Host` header. The
-  private-network opt-in permits RFC 1918 and unique-local addresses only; it never permits loopback or link-local
-  destinations.
+  `resolve_outbound_url()` (or `aresolve_outbound_url()` in async handlers) when your HTTP client supports
+  connecting by IP with the original `Host` header. Keep a finite `SSRF_RESOLUTION_TIMEOUT_SECONDS`; async timeouts
+  always fail closed, including when `SSRF_ALLOW_UNRESOLVABLE_HOSTS=True`. That compatibility opt-in returns an
+  unpinned original URL for ordinary resolution failures, so use it only behind a separate trusted network control.
+  Never fetch `SSRFResolvedURL.original_url`; re-resolving DNS
+  reopens the rebinding window between validation and connection. Disable automatic redirect following, or
+  re-validate every redirect `Location`; one validated hop says nothing about the next. The private-network opt-in
+  permits RFC 1918 and unique-local addresses only; it never permits loopback or link-local destinations.
+- Vet request-controlled login or post-authentication redirect targets with `is_safe_redirect_target()`. It rejects
+  malformed URLs, absolute and scheme-relative URLs, and browser-normalized backslash authority forms. Continue to
+  treat the accepted value as an HTTP redirect target, not as a filesystem path.
+- Underscore-prefixed fields on response dataclasses are serialization-private at every nested dataclass level.
+  Ordinary mapping keys are not filtered, so exclude secrets explicitly when returning dictionaries.
 - Put a reverse proxy or edge service in front of the app for TLS termination and network controls.
 
 Thank you for helping keep Flasgo secure.

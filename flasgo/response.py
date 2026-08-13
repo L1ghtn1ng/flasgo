@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from urllib.parse import urlsplit
 
 from .types import Send
 
@@ -27,7 +28,12 @@ class DataclassResponse(Protocol):
 
 @dataclass(slots=True)
 class Response:
-    """HTTP response container used by Flasgo handlers and middleware."""
+    """HTTP response container used by Flasgo handlers and middleware.
+
+    Prefer :meth:`set_cookie`/:meth:`delete_cookie` for cookies. The raw ``cookies``
+    list accepts complete ``Set-Cookie`` strings and is intended for trusted,
+    developer-built values only; never interpolate request data into it.
+    """
 
     body: bytes
     status_code: int = 200
@@ -133,7 +139,7 @@ class Response:
         headers: Headers | None = None,
         background: BackgroundTasks | None = None,
     ) -> Response:
-        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         return cls(
             body=payload,
             status_code=status_code,
@@ -151,6 +157,13 @@ class Response:
         headers: Headers | None = None,
         background: BackgroundTasks | None = None,
     ) -> Response:
+        """Return a redirect response for ``location``.
+
+        The target is not validated beyond header safety. Never pass
+        request-controlled input (for example a ``next`` query parameter)
+        without checking it first; see :func:`is_safe_redirect_target`.
+        """
+
         response_headers = {"location": location}
         if headers:
             response_headers.update(headers)
@@ -161,6 +174,46 @@ class Response:
             content_type="text/plain; charset=utf-8",
             background=background,
         )
+
+    def set_cookie(
+        self,
+        name: str,
+        value: str,
+        *,
+        max_age: int | None = None,
+        secure: bool = True,
+        http_only: bool = True,
+        same_site: str = "Lax",
+        path: str = "/",
+    ) -> None:
+        """Append a validated ``Set-Cookie`` header built with :func:`build_set_cookie`."""
+
+        from .security import build_set_cookie
+
+        self.cookies.append(
+            build_set_cookie(
+                name,
+                value,
+                max_age=max_age,
+                secure=secure,
+                http_only=http_only,
+                same_site=same_site,
+                path=path,
+            )
+        )
+
+    def delete_cookie(
+        self,
+        name: str,
+        *,
+        secure: bool = True,
+        http_only: bool = True,
+        same_site: str = "Lax",
+        path: str = "/",
+    ) -> None:
+        """Append an expired cookie so the client removes ``name``."""
+
+        self.set_cookie(name, "", max_age=0, secure=secure, http_only=http_only, same_site=same_site, path=path)
 
     def add_task(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
         if self.background is None:
@@ -259,3 +312,23 @@ def _validate_set_cookie(value: str) -> None:
         value.encode("latin-1")
     except UnicodeEncodeError as exc:
         raise ValueError("Set-Cookie values must be Latin-1 encodable.") from exc
+
+
+def is_safe_redirect_target(location: str) -> bool:
+    """Return whether ``location`` is a relative, same-origin redirect target.
+
+    Accepts paths such as ``/dashboard`` or ``?page=2`` and rejects malformed or
+    absolute URLs, scheme-relative URLs (``//host``), browser-normalized backslash
+    authority forms, non-HTTP schemes (``javascript:``), and control characters.
+    Use it before passing request-controlled input (such as a ``next`` parameter)
+    to :func:`redirect`/:meth:`Response.redirect`.
+    """
+
+    if not location or any(ord(char) < 0x20 or ord(char) == 0x7F for char in location):
+        return False
+    normalized = location.replace("\\", "/")
+    try:
+        parts = urlsplit(normalized)
+    except ValueError:
+        return False
+    return not parts.scheme and not parts.netloc and not normalized.startswith("//")

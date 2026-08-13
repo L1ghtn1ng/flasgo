@@ -9,6 +9,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs
 
+from .request import _reject_json_constant
 from .types import Message, Receive, Scope, Send
 
 _SUBPROTOCOL_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -161,8 +162,8 @@ class WebSocket:
 
     async def receive_json(self) -> Any:
         try:
-            return json.loads(await self.receive_text())
-        except json.JSONDecodeError as exc:
+            return json.loads(await self.receive_text(), parse_constant=_reject_json_constant)
+        except (ValueError, RecursionError) as exc:
             await self.close(1007, "Invalid JSON")
             raise WebSocketDisconnect(1007, "Invalid JSON") from exc
 
@@ -173,7 +174,7 @@ class WebSocket:
         await self._send_message({"type": "websocket.send", "bytes": value})
 
     async def send_json(self, value: Any) -> None:
-        await self.send_text(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
+        await self.send_text(json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False))
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         if self._application_state is _ApplicationState.DISCONNECTED:

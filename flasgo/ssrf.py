@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from dataclasses import dataclass, field
@@ -26,11 +27,17 @@ class SSRFConfig:
     allow_private_networks: bool = False
     allow_userinfo: bool = False
     allow_unresolvable_hosts: bool = False
+    resolution_timeout_seconds: float | None = 5.0
 
 
 @dataclass(slots=True, frozen=True)
 class SSRFResolvedURL:
-    """Validated outbound URL details with a pinned address for safer clients."""
+    """Validated outbound URL details with a pinned address for safer clients.
+
+    Connect to ``url`` (hostname replaced by the validated ``address``) and send
+    ``host_header`` as the HTTP Host header. ``original_url`` is retained for logging
+    only — fetching it re-resolves DNS and defeats the validation.
+    """
 
     original_url: str
     url: str
@@ -45,15 +52,38 @@ class SSRFGuard:
         self.config = config or SSRFConfig()
 
     def resolve_url(self, url: str) -> SSRFResolvedURL:
+        """Validate an outbound URL and return a pinned connection target.
+
+        DNS resolution blocks the calling thread. Inside async handlers, use
+        :meth:`aresolve_url` (or ``Flasgo.aresolve_outbound_url``) so resolution
+        runs on the event loop's resolver with a bounded timeout instead.
+        """
+
+        target = self._prepare(url)
+        if target is None:
+            return _disabled_result(url)
+        parsed, host, port, explicit_port = target
+        addresses = self._resolve_ips(host, port=port)
+        return self._checked_result(url, parsed, host, port, explicit_port, addresses)
+
+    async def aresolve_url(self, url: str) -> SSRFResolvedURL:
+        """Async variant of :meth:`resolve_url` that never blocks the event loop.
+
+        Resolution uses the loop's async resolver bounded by
+        ``SSRFConfig.resolution_timeout_seconds`` and fails closed on timeout,
+        regardless of ``allow_unresolvable_hosts``.
+        """
+
+        target = self._prepare(url)
+        if target is None:
+            return _disabled_result(url)
+        parsed, host, port, explicit_port = target
+        addresses = await self._aresolve_ips(host, port=port)
+        return self._checked_result(url, parsed, host, port, explicit_port, addresses)
+
+    def _prepare(self, url: str) -> tuple[SplitResult, str, int, int | None] | None:
         if not self.config.enabled:
-            return SSRFResolvedURL(
-                original_url=url,
-                url=url,
-                hostname="",
-                port=0,
-                address=None,
-                host_header="",
-            )
+            return None
 
         parsed = urlsplit(url)
         scheme = parsed.scheme.lower()
@@ -74,8 +104,17 @@ class SSRFGuard:
             raise SSRFViolation(f"Host {host!r} is not in SSRF allowlist.")
 
         explicit_port = _explicit_port(parsed)
-        port = _url_port(parsed, explicit_port)
-        addresses = self._resolve_ips(host, port=port)
+        return parsed, host, _url_port(parsed, explicit_port), explicit_port
+
+    def _checked_result(
+        self,
+        url: str,
+        parsed: SplitResult,
+        host: str,
+        port: int,
+        explicit_port: int | None,
+        addresses: set[IPAddress],
+    ) -> SSRFResolvedURL:
         for address in addresses:
             if _ip_is_disallowed(
                 address,
@@ -103,11 +142,31 @@ class SSRFGuard:
         try:
             infos = socket.getaddrinfo(host, port or 0, type=socket.SOCK_STREAM)
         except socket.gaierror as exc:
-            if self.config.allow_unresolvable_hosts:
-                return set()
-            msg = f"Could not resolve outbound host {host!r}."
-            raise SSRFViolation(msg) from exc
+            return self._resolution_failed(host, exc)
+        return self._addresses_from_infos(infos, host)
 
+    async def _aresolve_ips(self, host: str, *, port: int | None) -> set[IPAddress]:
+        literal = _parse_ip_literal(host)
+        if literal is not None:
+            return {literal}
+
+        loop = asyncio.get_running_loop()
+        try:
+            async with asyncio.timeout(self.config.resolution_timeout_seconds):
+                infos = await loop.getaddrinfo(host, port or 0, type=socket.SOCK_STREAM)
+        except TimeoutError as exc:
+            raise SSRFViolation(f"Timed out resolving outbound host {host!r}.") from exc
+        except socket.gaierror as exc:
+            return self._resolution_failed(host, exc)
+        return self._addresses_from_infos(infos, host)
+
+    def _resolution_failed(self, host: str, exc: Exception) -> set[IPAddress]:
+        if self.config.allow_unresolvable_hosts:
+            return set()
+        msg = f"Could not resolve outbound host {host!r}."
+        raise SSRFViolation(msg) from exc
+
+    def _addresses_from_infos(self, infos: list[tuple], host: str) -> set[IPAddress]:
         addresses: set[IPAddress] = set()
         for family, _, _, _, sockaddr in infos:
             if family not in (socket.AF_INET, socket.AF_INET6):
@@ -117,6 +176,17 @@ class SSRFGuard:
         if not addresses and not self.config.allow_unresolvable_hosts:
             raise SSRFViolation(f"Could not resolve outbound host {host!r}.")
         return addresses
+
+
+def _disabled_result(url: str) -> SSRFResolvedURL:
+    return SSRFResolvedURL(
+        original_url=url,
+        url=url,
+        hostname="",
+        port=0,
+        address=None,
+        host_header="",
+    )
 
 
 def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:

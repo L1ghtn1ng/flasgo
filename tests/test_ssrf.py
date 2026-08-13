@@ -90,6 +90,70 @@ def test_ssrf_rejects_invalid_port() -> None:
         app.resolve_outbound_url("https://example.com:bad/path")
 
 
+def test_ssrf_async_resolve_matches_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo(expected_port=443))
+    app = Flasgo()
+
+    async def run() -> None:
+        resolved = await app.aresolve_outbound_url("https://example.com/path")
+        assert resolved.url == "https://1.1.1.1/path"
+        assert resolved.hostname == "example.com"
+        assert str(resolved.address) == PUBLIC_IPV4
+
+    asyncio.run(run())
+
+
+def test_ssrf_async_resolve_still_blocks_restricted_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    def fake_getaddrinfo(host: str, port: int, *args: object, **kwargs: object) -> list[AddrInfo]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    app = Flasgo()
+    with pytest.raises(SSRFViolation):
+        asyncio.run(app.aresolve_outbound_url("https://example.com/internal"))
+
+
+@pytest.mark.parametrize("allow_unresolvable_hosts", [False, True])
+def test_ssrf_async_resolution_timeout_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allow_unresolvable_hosts: bool,
+) -> None:
+    import asyncio
+
+    async def run() -> None:
+        guard = SSRFGuard(
+            SSRFConfig(
+                resolution_timeout_seconds=0.001,
+                allow_unresolvable_hosts=allow_unresolvable_hosts,
+            )
+        )
+
+        async def slow_getaddrinfo(*args: object, **kwargs: object) -> list[AddrInfo]:
+            await asyncio.sleep(5)
+            return []
+
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "getaddrinfo", slow_getaddrinfo)
+        with pytest.raises(SSRFViolation):
+            await guard.aresolve_url("https://example.com/path")
+
+    asyncio.run(run())
+
+
+def test_ssrf_async_disabled_returns_passthrough() -> None:
+    import asyncio
+
+    guard = SSRFGuard(SSRFConfig(enabled=False))
+    resolved = asyncio.run(guard.aresolve_url("https://example.com/path"))
+    assert resolved.url == "https://example.com/path"
+    assert resolved.address is None
+
+
 def test_ssrf_disabled_does_not_inspect_malformed_url() -> None:
     guard = SSRFGuard(SSRFConfig(enabled=False))
 

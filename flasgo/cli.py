@@ -2,16 +2,32 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 from .app import Flasgo
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedTarget:
+    module_name: str
+    import_root: Path
+    source: Path | None
+    watch_dir: Path | None
+    attr_name: str | None
+
+
+_CLI_NAMESPACE_ROOTS: dict[str, Path] = {}
+_CLI_ROOT_MODULES: dict[Path, dict[str, ModuleType]] = {}
+_MISSING = object()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,10 +99,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_command(args: argparse.Namespace) -> int:
-    app = load_app(args.target, app_name=args.app)
-    reload_dirs = args.reload_dirs
-    if Path(args.target).suffix == ".py" and reload_dirs is None:
-        reload_dirs = [str(Path(args.target).expanduser().resolve().parent)]
+    app, resolved = _load_app_target(args.target, app_name=args.app)
+    reload_dirs = _reload_dirs(resolved, args.reload_dirs)
     app.run(
         host=args.host,
         port=args.port,
@@ -222,65 +236,251 @@ def _load_alembic() -> tuple[Any, type[Any]]:
 
 
 def load_app(target: str, *, app_name: str = "app") -> Flasgo:
-    """Load a :class:`Flasgo` app from a file path or import string."""
+    """Load an app while transactionally replacing CLI-owned path modules."""
 
-    if ":" in target:
-        module_path, attr_name = target.split(":", 1)
-        if not module_path.strip():
-            raise SystemExit("Import target must include a module path before ':'. Example: package.module:app")
-        try:
-            module = importlib.import_module(module_path)
-        except Exception as exc:
-            raise SystemExit(
-                f"Could not import module '{module_path}'. Check that it is on PYTHONPATH and imports cleanly. "
-                f"Original error: {exc}"
-            ) from exc
-        resolved_name = attr_name.strip() or app_name
-    elif target.endswith(".py"):
-        module = _load_module_from_path(Path(target))
-        resolved_name = app_name
-    else:
-        try:
-            module = importlib.import_module(target)
-        except Exception as exc:
-            raise SystemExit(
-                f"Could not import module '{target}'. Check that it is on PYTHONPATH and imports cleanly. "
-                f"Original error: {exc}"
-            ) from exc
-        resolved_name = app_name
+    app, _ = _load_app_target(target, app_name=app_name)
+    return app
 
-    candidate = getattr(module, resolved_name, None)
-    if not isinstance(candidate, Flasgo):
-        msg = (
-            f"Target '{target}' did not resolve to a Flasgo app named '{resolved_name}'. "
-            f"Define `Flasgo()` as `{resolved_name}` or pass `--app` with the correct variable name."
+
+def _load_app_target(target: str, *, app_name: str) -> tuple[Flasgo, _ResolvedTarget]:
+    resolved = _resolve_target(target)
+    try:
+        module = _import_target(resolved)
+    except ModuleNotFoundError as exc:
+        if exc.name is not None and (
+            resolved.module_name == exc.name or resolved.module_name.startswith(f"{exc.name}.")
+        ):
+            raise SystemExit(
+                f"Could not import target module '{resolved.module_name}' from import root "
+                f"'{resolved.import_root}'. Check the target name and path."
+            ) from None
+        raise SystemExit(
+            f"Error while importing target module '{resolved.module_name}' from import root "
+            f"'{resolved.import_root}':\n\n{traceback.format_exc()}"
+        ) from None
+    except Exception:
+        raise SystemExit(
+            f"Error while importing target module '{resolved.module_name}' from import root "
+            f"'{resolved.import_root}':\n\n{traceback.format_exc()}"
+        ) from None
+
+    names = [resolved.attr_name or app_name]
+    if resolved.attr_name is None and app_name == "app":
+        names.append("application")
+    for name in names:
+        candidate = _resolve_app_attr(module, name)
+        if isinstance(candidate, Flasgo):
+            return candidate, resolved
+
+    checked = " and ".join(repr(name) for name in names)
+    raise SystemExit(
+        f"Target '{target}' did not resolve to a Flasgo app. Checked {checked}. "
+        "Define a `Flasgo()` instance with that name or pass `--app` with the correct variable name."
+    )
+
+
+def _parse_target(target: str) -> tuple[str, str | None]:
+    parts = re.split(r":(?![\\/])", target.strip(), maxsplit=1)
+    module_token = parts[0].strip()
+    if not module_token:
+        raise SystemExit("Import target must include a module path before ':'. Example: package.module:app")
+    attr_name = parts[1].strip() if len(parts) == 2 else ""
+    return module_token, attr_name or None
+
+
+def _resolve_target(target: str) -> _ResolvedTarget:
+    module_token, attr_name = _parse_target(target)
+    path = Path(module_token).expanduser()
+    if path.is_file():
+        if path.suffix != ".py":
+            raise SystemExit(f"Expected a .py file path, got: {path.resolve()}. Use package.module:app for imports.")
+        return _resolve_path_target(path, attr_name)
+
+    inferred_file = Path(f"{module_token}.py").expanduser()
+    if inferred_file.is_file():
+        return _resolve_path_target(inferred_file, attr_name)
+
+    if path.is_dir():
+        resolved_path = path.resolve()
+        module_name, import_root = _prepare_import(resolved_path)
+        return _ResolvedTarget(module_name, import_root, resolved_path, resolved_path, attr_name)
+
+    if _looks_like_path(module_token):
+        raise SystemExit(
+            f"Python target not found: {path.resolve()}. Pass an existing .py file, package directory, "
+            "or an import string like package.module:app."
         )
-        raise SystemExit(msg)
+
+    import_root = Path.cwd().resolve()
+    _insert_sys_path(import_root)
+    return _ResolvedTarget(module_token, import_root, None, None, attr_name)
+
+
+def _resolve_path_target(path: Path, attr_name: str | None) -> _ResolvedTarget:
+    resolved_path = path.resolve()
+    module_name, import_root = _prepare_import(resolved_path)
+    return _ResolvedTarget(module_name, import_root, resolved_path, resolved_path.parent, attr_name)
+
+
+def _prepare_import(path: Path) -> tuple[str, Path]:
+    module_path = path.with_suffix("") if path.suffix == ".py" else path
+    if module_path.name == "__init__":
+        module_path = module_path.parent
+
+    names: list[str] = []
+    current = module_path
+    while True:
+        names.append(current.name)
+        parent = current.parent
+        if not (parent / "__init__.py").is_file():
+            break
+        current = parent
+
+    _insert_sys_path(parent)
+    return ".".join(reversed(names)), parent
+
+
+def _insert_sys_path(path: Path) -> None:
+    value = str(path)
+    if not sys.path or sys.path[0] != value:
+        sys.path.insert(0, value)
+
+
+def _looks_like_path(target: str) -> bool:
+    return target.endswith(".py") or Path(target).is_absolute() or "/" in target or "\\" in target
+
+
+def _import_target(target: _ResolvedTarget) -> ModuleType:
+    if target.source is None:
+        return importlib.import_module(target.module_name)
+
+    namespace = target.module_name.partition(".")[0]
+    previous_root = _CLI_NAMESPACE_ROOTS.get(namespace)
+    cached_namespace = sys.modules.get(namespace)
+    if cached_namespace is not None and not _namespace_matches_target(cached_namespace, target):
+        if previous_root is None or not _module_belongs_to_root(cached_namespace, previous_root):
+            location = _module_location(cached_namespace)
+            raise SystemExit(
+                f"Cannot load '{target.source}' as '{target.module_name}' because namespace '{namespace}' "
+                f"is already imported from '{location or 'an unknown location'}'. Rename the target or package."
+            )
+
+    snapshot = _namespace_snapshot(namespace)
+    modules_before = dict(sys.modules)
+    if cached_namespace is not None and not _namespace_matches_target(cached_namespace, target):
+        _clear_namespace(namespace)
+    evicted_modules = (
+        _evict_cli_owned_modules(previous_root)
+        if previous_root is not None and previous_root != target.import_root
+        else {}
+    )
+
+    try:
+        module = importlib.import_module(target.module_name)
+        if not _module_matches_source(module, target.source):
+            location = _module_location(module)
+            raise ImportError(
+                f"resolved to '{location or 'an unknown location'}' instead of the requested '{target.source}'"
+            )
+    except BaseException:
+        _restore_namespace(namespace, snapshot)
+        sys.modules.update(evicted_modules)
+        if previous_root is None:
+            _CLI_NAMESPACE_ROOTS.pop(namespace, None)
+        else:
+            _CLI_NAMESPACE_ROOTS[namespace] = previous_root
+        raise
+
+    previously_owned = _CLI_ROOT_MODULES.get(target.import_root, {})
+    newly_owned = {
+        name: module
+        for name, module in sys.modules.items()
+        if modules_before.get(name) is not module and _module_belongs_to_root(module, target.import_root)
+    }
+    _CLI_ROOT_MODULES[target.import_root] = {
+        **{name: module for name, module in previously_owned.items() if sys.modules.get(name) is module},
+        **newly_owned,
+    }
+    if previous_root is not None and previous_root != target.import_root:
+        _CLI_ROOT_MODULES.pop(previous_root, None)
+    _CLI_NAMESPACE_ROOTS[namespace] = target.import_root
+    return module
+
+
+def _namespace_matches_target(module: ModuleType, target: _ResolvedTarget) -> bool:
+    assert target.source is not None
+    if "." not in target.module_name:
+        return _module_matches_source(module, target.source)
+    expected_directory = target.import_root / target.module_name.partition(".")[0]
+    location = _module_location(module)
+    if location is not None:
+        return location == expected_directory or location.parent == expected_directory
+    return any(Path(value).resolve() == expected_directory for value in getattr(module, "__path__", ()))
+
+
+def _module_matches_source(module: ModuleType, source: Path) -> bool:
+    location = _module_location(module)
+    if source.is_file():
+        return location == source
+    if (source / "__init__.py").is_file():
+        return location == source / "__init__.py"
+    return any(Path(value).resolve() == source for value in getattr(module, "__path__", ()))
+
+
+def _module_belongs_to_root(module: ModuleType, root: Path) -> bool:
+    location = _module_location(module)
+    if location is not None:
+        return location.is_relative_to(root)
+    return any(Path(value).resolve().is_relative_to(root) for value in getattr(module, "__path__", ()))
+
+
+def _evict_cli_owned_modules(root: Path) -> dict[str, ModuleType]:
+    evicted: dict[str, ModuleType] = {}
+    for name, module in _CLI_ROOT_MODULES.get(root, {}).items():
+        if sys.modules.get(name) is module:
+            evicted[name] = module
+            sys.modules.pop(name, None)
+    return evicted
+
+
+def _module_location(module: ModuleType) -> Path | None:
+    value = getattr(module, "__file__", None)
+    return Path(value).resolve() if value is not None else None
+
+
+def _namespace_snapshot(namespace: str) -> dict[str, ModuleType]:
+    prefix = f"{namespace}."
+    return {name: module for name, module in sys.modules.items() if name == namespace or name.startswith(prefix)}
+
+
+def _clear_namespace(namespace: str) -> None:
+    prefix = f"{namespace}."
+    for name in tuple(sys.modules):
+        if name == namespace or name.startswith(prefix):
+            sys.modules.pop(name, None)
+
+
+def _restore_namespace(namespace: str, snapshot: dict[str, ModuleType]) -> None:
+    _clear_namespace(namespace)
+    sys.modules.update(snapshot)
+
+
+def _resolve_app_attr(module: ModuleType, name: str) -> object:
+    candidate: object = module
+    for part in name.split("."):
+        if not part:
+            return _MISSING
+        candidate = getattr(candidate, part, _MISSING)
+        if candidate is _MISSING:
+            return _MISSING
     return candidate
 
 
-def _load_module_from_path(path: Path) -> ModuleType:
-    resolved = path.expanduser().resolve()
-    if not resolved.exists():
-        raise SystemExit(
-            f"Python file not found: {resolved}. Pass an existing file or an import string like package.module:app."
-        )
-    if resolved.suffix != ".py":
-        raise SystemExit(f"Expected a .py file path, got: {resolved}. Use package.module:app for module imports.")
-    module_name = f"_flasgo_cli_{resolved.stem}_{abs(hash(resolved))}"
-    spec = importlib.util.spec_from_file_location(module_name, resolved)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"Could not load module from: {resolved}. Check that the file is readable and valid Python.")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        raise SystemExit(
-            f"Could not import Flasgo app from {resolved}. Fix the import error in that file and retry. "
-            f"Original error: {exc}"
-        ) from exc
-    return module
+def _reload_dirs(target: _ResolvedTarget, extra_dirs: list[str] | None) -> list[str] | None:
+    if target.watch_dir is None and extra_dirs is None:
+        return None
+    default = target.watch_dir or Path.cwd().resolve()
+    return [str(default), *(extra_dirs or [])]
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ class FlasgoJSONFormatter(logging.Formatter):
             payload[key] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str)
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str, allow_nan=False)
 
 
 class _FlasgoTextFormatter(logging.Formatter):

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-13
+
 ### Added
 
 - Dependency-free, route-aware CORS through `CORSConfig`, with application defaults, per-route policies and opt-out,
@@ -11,10 +13,21 @@
 
 ### Changed
 
+- CLI app targets now accept extensionless local `.py` files, file paths with `:attribute`, package directories,
+  whitespace around import attributes, nested attributes, and an `application` fallback when the default `app` name
+  is not present. `--reload-dir` now adds to the target's default watch directory instead of replacing it.
 - HTTP duration and response-size distributions now use bounded status classes, unknown methods use the bounded
   `_OTHER` label, exact status codes remain on counters, `405` responses retain
   their route template, and pre-dispatch `431` rejections are instrumented. WebSocket duration metrics include outcome
   and use connection-appropriate buckets extending to 24 hours.
+
+### Fixed
+
+- Installed `flasgo` console scripts establish the app's project import root before loading it, so standalone and
+  package app files can import siblings normally. Import failures now distinguish bad targets from errors raised by
+  application code and preserve the latter's traceback. Repeated same-name loads from different roots evict only
+  CLI-owned app and sibling modules, preserve unrelated cached modules, and restore the previous modules if loading
+  the replacement fails.
 
 ### Security
 
@@ -22,6 +35,36 @@
   request origins, and cache duration. Generated preflights use registered route methods, skip application code and
   cookie persistence, maintain the required `Vary` fields, and keep CORS separate from CSRF and authorization.
 - Metrics responses are explicitly non-cacheable and no longer create framework session or CSRF cookies.
+- Multipart parsing enforces `MAX_MULTIPART_PARTS` with a cheap delimiter-line pre-scan before the `email` parser can
+  allocate heavily without miscounting boundary text embedded in payload lines. Multipart and URL-encoded forms
+  enforce `MAX_FORM_FIELDS` (1000 by default, `413` on overflow), and query strings are field-capped as well.
+- `Request.json()` now rejects deeply nested documents and oversized integers with `400` instead of surfacing
+  `RecursionError`/`ValueError` as `500`, and rejects non-finite constants (`NaN`, `Infinity`). JSON responses,
+  WebSocket `send_json`, and structured logs never emit non-finite floats.
+- `UploadedFile.filename` is sanitized at parse time: path components and control characters are removed, then
+  surrounding whitespace and dots are stripped repeatedly so whitespace cannot expose a hidden dot prefix.
+- `SECRET_KEY` must be at least 32 characters in every mode; `DEBUG=True` no longer waives the floor.
+- Failed `/metrics` bearer authentication is throttled through the security-failure limiter like docs and route
+  auth failures. Clients without an ASGI peer address are logged but never share an "unknown" throttle bucket, so
+  one client cannot lock out the rest.
+- Exceptions raised inside custom error handlers fall back to the framework's header-secured `500` instead of
+  escaping the app, and handlers registered for `HTTPException` are now actually invoked.
+- Route converter cast failures (for example an `<int:>` parameter beyond the interpreter digit limit) produce
+  `404` instead of `500`, and numeric converters match ASCII digits only.
+- Validation issue locations derived from attacker-controlled object keys are sanitized to bounded printable ASCII.
+- Dataclass response coercion no longer serializes underscore-prefixed private fields, including fields on nested
+  dataclasses.
+- `build_set_cookie` validates `path` and `same_site` (allowing only `Lax`/`Strict`/`None`, with `None` requiring
+  `secure=True`), `SESSION_COOKIE_SAME_SITE` is validated at startup, and `Response.set_cookie()`/
+  `Response.delete_cookie()` provide a safe cookie API.
+- `is_safe_redirect_target()` is exported to vet user-controlled redirect destinations; it fails closed for malformed
+  URLs and browser-normalized backslash authority forms, and `redirect()` documentation calls out open-redirect risk.
+- Added `Flasgo.aresolve_outbound_url()` / `SSRFGuard.aresolve_url()`: DNS resolution runs on the event loop's
+  async resolver bounded by `SSRF_RESOLUTION_TIMEOUT_SECONDS` (5s default, fail-closed on timeout) instead of
+  blocking the loop. Timeouts remain fail-closed when `SSRF_ALLOW_UNRESOLVABLE_HOSTS=True`. The SSRF docs cover
+  redirect re-validation and the DNS-rebinding window, and `SSRFResolvedURL.original_url` is logging-only.
+- OpenTelemetry query-string redaction now bounds retained query keys to 64 bytes so secrets placed in the key
+  position cannot flow into span attributes unbounded.
 
 ## [0.7.0] - 2026-08-08
 

@@ -46,6 +46,8 @@ class Settings:
     MAX_REQUEST_BODY_BYTES: int = 1_048_576
     MAX_REQUEST_HEAD_BYTES: int = 16_384
     REQUEST_READ_TIMEOUT_SECONDS: float = 10.0
+    MAX_MULTIPART_PARTS: int = 1_000
+    MAX_FORM_FIELDS: int = 1_000
     MAX_VALIDATION_DEPTH: int = 64
     MAX_VALIDATION_WORK: int = 10_000
     MAX_VALIDATION_ISSUES: int = 100
@@ -75,7 +77,7 @@ class Settings:
     DOCS_PATH: str = "/docs"
     OPENAPI_PATH: str = "/openapi.json"
     API_TITLE: str = "Flasgo API"
-    API_VERSION: str = "0.7.0"
+    API_VERSION: str = "0.8.0"
     API_DESCRIPTION: str = ""
     API_SERVERS: list[str] = field(default_factory=list)
     SSRF_ENABLED: bool = True
@@ -84,6 +86,7 @@ class Settings:
     SSRF_ALLOW_PRIVATE_NETWORKS: bool = False
     SSRF_ALLOW_USERINFO: bool = False
     SSRF_ALLOW_UNRESOLVABLE_HOSTS: bool = False
+    SSRF_RESOLUTION_TIMEOUT_SECONDS: float | None = 5.0
 
     SECURITY_HEADERS: dict[str, str] = field(default_factory=_default_security_headers)
     EXTRA: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -108,6 +111,8 @@ class Settings:
             max_request_body_bytes=self.MAX_REQUEST_BODY_BYTES,
             max_request_head_bytes=self.MAX_REQUEST_HEAD_BYTES,
             request_read_timeout_seconds=self.REQUEST_READ_TIMEOUT_SECONDS,
+            max_multipart_parts=self.MAX_MULTIPART_PARTS,
+            max_form_fields=self.MAX_FORM_FIELDS,
             max_validation_depth=self.MAX_VALIDATION_DEPTH,
             max_validation_work=self.MAX_VALIDATION_WORK,
             max_validation_issues=self.MAX_VALIDATION_ISSUES,

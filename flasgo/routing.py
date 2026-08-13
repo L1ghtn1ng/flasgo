@@ -16,8 +16,8 @@ WebSocketEndpoint = Callable[..., Awaitable[None] | None]
 
 _CONVERTERS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "str": (r"[^/]+", str),
-    "int": (r"\d+", int),
-    "float": (r"\d+(?:\.\d+)?", float),
+    "int": (r"[0-9]+", int),
+    "float": (r"[0-9]+(?:\.[0-9]+)?", float),
     "path": (r".+", str),
 }
 
@@ -73,7 +73,9 @@ class Route:
         )
 
     def path_matches(self, path: str) -> bool:
-        return self._regex is not None and self._regex.fullmatch(path) is not None
+        # Cast-aware: a value the converter cannot cast (for example an integer above
+        # the interpreter digit limit) does not match the route at all.
+        return _match_path(path, self._regex, self._casts) is not None
 
 
 @dataclass(slots=True)
@@ -147,5 +149,10 @@ def _match_path(
 
     params: dict[str, Any] = {}
     for key, raw in regex_match.groupdict().items():
-        params[key] = casts[key](raw)
+        try:
+            params[key] = casts[key](raw)
+        except ValueError, TypeError:
+            # A cast failure (for example an integer above the interpreter digit
+            # limit) means the value is not a valid match, not a server error.
+            return None
     return params

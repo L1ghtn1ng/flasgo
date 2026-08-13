@@ -19,7 +19,7 @@ from .logging import FlasgoJSONFormatter, configure_logging
 from .params import Body, Cookie, Depends, Form, Header, Query
 from .ratelimit import RateLimitRule, rate_limit
 from .request import FormData, Request, UploadedFile
-from .response import Response
+from .response import Response, is_safe_redirect_target
 from .session import Session
 from .settings import Settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL, SSRFViolation
@@ -93,6 +93,7 @@ __all__ = [
     "current_user",
     "encode_jwt",
     "extract_bearer_token",
+    "is_safe_redirect_target",
     "jsonify",
     "jwt_backend",
     "rate_limit",

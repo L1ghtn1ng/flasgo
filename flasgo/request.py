@@ -18,6 +18,52 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
+DEFAULT_MAX_MULTIPART_PARTS = 1_000
+DEFAULT_MAX_FORM_FIELDS = 1_000
+_JSON_BODY_ERROR = "Malformed JSON request body. Send valid JSON and set Content-Type: application/json."
+
+
+def _scope_positive_int(scope: Scope, key: str, default: int) -> int:
+    value = scope.get(key)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return default
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"Invalid JSON constant: {value!r}")
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Return a path-component-free upload filename safe for filesystem use."""
+
+    cleaned = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = "".join(char for char in cleaned if ord(char) >= 32 and ord(char) != 127)
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = cleaned.strip().strip(".")
+    return cleaned
+
+
+def _count_multipart_part_delimiters(body: bytes, boundary: bytes) -> int:
+    """Count opening boundary delimiter lines without counting payload substrings."""
+
+    marker = b"--" + boundary
+    count = 0
+    offset = 0
+    while (index := body.find(marker, offset)) >= 0:
+        suffix = index + len(marker)
+        at_line_start = index == 0 or body[index - 1] in (0x0A, 0x0D)
+        if at_line_start and not body.startswith(b"--", suffix):
+            line_end = suffix
+            while line_end < len(body) and body[line_end] in (0x20, 0x09):
+                line_end += 1
+            if line_end == len(body) or body.startswith((b"\r\n", b"\n", b"\r"), line_end):
+                count += 1
+        offset = suffix
+    return count
+
 
 def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
     return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in raw_headers}
@@ -66,7 +112,7 @@ def _parse_content_type(header_value: str | None) -> tuple[str, dict[str, str]]:
 
 @dataclass(slots=True, frozen=True)
 class UploadedFile:
-    """Uploaded file parsed from a multipart form request."""
+    """Uploaded file with a sanitized, path-component-free client filename."""
 
     name: str
     filename: str
@@ -141,7 +187,24 @@ def _decode_form_value(payload: bytes, *, charset: str, error_detail: str) -> st
         raise HTTPException(400, error_detail) from exc
 
 
-def _parse_multipart_form(body: bytes, content_type: str) -> FormData:
+def _parse_multipart_form(
+    body: bytes,
+    content_type: str,
+    boundary: str,
+    *,
+    max_parts: int,
+    max_fields: int,
+) -> FormData:
+    try:
+        boundary_bytes = boundary.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise HTTPException(400, "Malformed multipart form data. The boundary must be ASCII text.") from exc
+    if not 1 <= len(boundary_bytes) <= 200:
+        raise HTTPException(400, "Malformed multipart form data. The boundary length is invalid.")
+    # The email parser has quadratic memory behavior on many tiny parts, so bound the
+    # actual delimiter lines with a cheap raw scan before parsing.
+    if _count_multipart_part_delimiters(body, boundary_bytes) > max_parts:
+        raise HTTPException(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.")
     message = BytesParser(policy=default).parsebytes(
         f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body
     )
@@ -153,7 +216,12 @@ def _parse_multipart_form(body: bytes, content_type: str) -> FormData:
 
     fields: dict[str, list[str]] = {}
     files: dict[str, list[UploadedFile]] = {}
+    parts_seen = 0
+    fields_seen = 0
     for part in message.iter_parts():
+        parts_seen += 1
+        if parts_seen > max_parts:
+            raise HTTPException(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.")
         if part.is_multipart():
             raise HTTPException(
                 400,
@@ -173,7 +241,7 @@ def _parse_multipart_form(body: bytes, content_type: str) -> FormData:
         if filename:
             uploaded = UploadedFile(
                 name=name,
-                filename=filename,
+                filename=_sanitize_filename(filename) or "upload",
                 body=payload,
                 content_type=part.get_content_type(),
                 headers=headers,
@@ -181,6 +249,9 @@ def _parse_multipart_form(body: bytes, content_type: str) -> FormData:
             files.setdefault(name, []).append(uploaded)
             continue
 
+        fields_seen += 1
+        if fields_seen > max_fields:
+            raise HTTPException(413, "Multipart form data exceeds MAX_FORM_FIELDS.")
         charset = part.get_content_charset("utf-8") or "utf-8"
         value = _decode_form_value(
             payload,
@@ -227,7 +298,11 @@ class Request:
 
     @property
     def query_params(self) -> Mapping[str, list[str]]:
-        return parse_qs(self.query_string, keep_blank_values=True)
+        max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
+        try:
+            return parse_qs(self.query_string, keep_blank_values=True, max_num_fields=max_fields)
+        except ValueError as exc:
+            raise HTTPException(413, "Query string exceeds MAX_FORM_FIELDS.") from exc
 
     @property
     def content_type(self) -> str:
@@ -320,17 +395,15 @@ class Request:
 
     async def json(self) -> Any:
         try:
-            return json.loads(await self.text())
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                400,
-                "Malformed JSON request body. Send valid JSON and set Content-Type: application/json.",
-            ) from exc
+            return json.loads(await self.text(), parse_constant=_reject_json_constant)
+        except (ValueError, RecursionError) as exc:
+            raise HTTPException(400, _JSON_BODY_ERROR) from exc
 
     async def form(self) -> FormData:
         if self._form_loaded:
             return self._form or FormData()
 
+        max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
         content_type, params = _parse_content_type(self.headers.get("content-type"))
         if content_type == "application/x-www-form-urlencoded":
             charset = params.get("charset", "utf-8")
@@ -339,7 +412,11 @@ class Request:
                 charset=charset,
                 error_detail="Invalid form encoding. Use a supported charset such as UTF-8.",
             )
-            form = FormData(fields=parse_qs(decoded, keep_blank_values=True))
+            try:
+                parsed = parse_qs(decoded, keep_blank_values=True, max_num_fields=max_fields)
+            except ValueError as exc:
+                raise HTTPException(413, "Form data exceeds MAX_FORM_FIELDS.") from exc
+            form = FormData(fields=parsed)
         elif content_type == "multipart/form-data":
             boundary = params.get("boundary")
             if not boundary:
@@ -347,7 +424,13 @@ class Request:
                     400,
                     "Malformed multipart form data. Include a boundary in the Content-Type header.",
                 )
-            form = _parse_multipart_form(await self.body(), self.headers.get("content-type", ""))
+            form = _parse_multipart_form(
+                await self.body(),
+                self.headers.get("content-type", ""),
+                boundary,
+                max_parts=_scope_positive_int(self.scope, "max_multipart_parts", DEFAULT_MAX_MULTIPART_PARTS),
+                max_fields=max_fields,
+            )
         else:
             form = FormData()
 

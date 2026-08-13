@@ -212,6 +212,7 @@ class Flasgo:
                 allow_private_networks=bool(self.settings.SSRF_ALLOW_PRIVATE_NETWORKS),
                 allow_userinfo=bool(self.settings.SSRF_ALLOW_USERINFO),
                 allow_unresolvable_hosts=bool(self.settings.SSRF_ALLOW_UNRESOLVABLE_HOSTS),
+                resolution_timeout_seconds=self.settings.SSRF_RESOLUTION_TIMEOUT_SECONDS,
             )
         )
         if static_folder is not None:
@@ -287,6 +288,8 @@ class Flasgo:
         req = Request(scope, receive)
         req.scope["max_request_body_bytes"] = self.security.max_request_body_bytes
         req.scope["request_read_timeout_seconds"] = self.security.request_read_timeout_seconds
+        req.scope["max_multipart_parts"] = self.security.max_multipart_parts
+        req.scope["max_form_fields"] = self.security.max_form_fields
         req.scope["max_validation_depth"] = self.security.max_validation_depth
         req.scope["max_validation_work"] = self.security.max_validation_work
         req.scope["max_validation_issues"] = self.security.max_validation_issues
@@ -984,9 +987,24 @@ class Flasgo:
         return TestClient(self)
 
     def resolve_outbound_url(self, url: str) -> SSRFResolvedURL:
-        """Validate an outbound URL and return a pinned connection target."""
+        """Validate an outbound URL and return a pinned connection target.
+
+        DNS resolution blocks the calling thread. Inside async handlers, use
+        :meth:`aresolve_outbound_url` so resolution stays off the event loop.
+        """
 
         return self.ssrf.resolve_url(url)
+
+    async def aresolve_outbound_url(self, url: str) -> SSRFResolvedURL:
+        """Validate an outbound URL without blocking the event loop.
+
+        Resolution is bounded by ``SSRF_RESOLUTION_TIMEOUT_SECONDS`` and fails
+        closed on timeout even when ``SSRF_ALLOW_UNRESOLVABLE_HOSTS`` is enabled.
+        Connect to ``result.url`` and send
+        ``result.host_header`` as the Host header; re-validate every redirect hop.
+        """
+
+        return await self.ssrf.aresolve_url(url)
 
     def _request_id_for_scope(self, scope: Scope) -> str:
         if self.settings.TRUST_INCOMING_REQUEST_ID:
@@ -1025,6 +1043,9 @@ class Flasgo:
                 status_code=405,
                 headers={"allow": "GET, HEAD"},
             )
+        if self._security_failure_is_limited(req):
+            self._log_security_event(logging.WARNING, "metrics-auth-throttled", req=req)
+            return _security_rate_limit_response()
         authorization_values = req.header_values("authorization")
         token = extract_bearer_token(authorization_values[0]) if len(authorization_values) == 1 else None
         expected = self.settings.METRICS_BEARER_TOKEN or ""
@@ -1036,6 +1057,8 @@ class Flasgo:
             expected_bytes = b""
         if token_bytes is None or not secrets.compare_digest(token_bytes, expected_bytes):
             self._log_security_event(logging.WARNING, "metrics-auth-failed", req=req)
+            if self._register_security_failure(req):
+                return _security_rate_limit_response()
             return Response.text(
                 "Unauthorized",
                 status_code=401,
@@ -1147,14 +1170,26 @@ class Flasgo:
             raise ValueError("SECRET_KEY must be configured. Set it to a long random value before starting Flasgo.")
         if self.security.secret_key == _INSECURE_SENTINEL:
             raise ValueError("SECRET_KEY uses an insecure default value. Replace it with a unique random secret.")
-        if not self.settings.DEBUG and len(self.security.secret_key) < 32:
-            raise ValueError("SECRET_KEY must be at least 32 characters when DEBUG is False.")
+        if len(self.security.secret_key) < 32:
+            raise ValueError("SECRET_KEY must be at least 32 characters.")
+        same_site = self.security.session_cookie_same_site.strip().lower()
+        if same_site not in {"lax", "strict", "none"}:
+            raise ValueError("SESSION_COOKIE_SAME_SITE must be one of 'Lax', 'Strict', or 'None'.")
+        if same_site == "none" and not self.security.session_cookie_secure:
+            raise ValueError("SESSION_COOKIE_SAME_SITE='None' requires SESSION_COOKIE_SECURE=True.")
         if self.security.max_request_body_bytes <= 0:
             raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0.")
         if self.security.max_request_head_bytes <= 0:
             raise ValueError("MAX_REQUEST_HEAD_BYTES must be greater than 0.")
         if self.security.request_read_timeout_seconds <= 0:
             raise ValueError("REQUEST_READ_TIMEOUT_SECONDS must be greater than 0.")
+        if self.security.max_multipart_parts <= 0:
+            raise ValueError("MAX_MULTIPART_PARTS must be greater than 0.")
+        if self.security.max_form_fields <= 0:
+            raise ValueError("MAX_FORM_FIELDS must be greater than 0.")
+        ssrf_timeout = self.settings.SSRF_RESOLUTION_TIMEOUT_SECONDS
+        if ssrf_timeout is not None and ssrf_timeout <= 0:
+            raise ValueError("SSRF_RESOLUTION_TIMEOUT_SECONDS must be greater than 0 or None.")
         if self.security.max_validation_depth <= 0:
             raise ValueError("MAX_VALIDATION_DEPTH must be greater than 0.")
         if self.security.max_validation_work <= 0:
@@ -1405,11 +1440,16 @@ class Flasgo:
         return fallback
 
     async def _handle_error(self, req: Request, exc: Exception) -> Response:
+        handler = self._find_error_handler(exc)
+        if handler is not None:
+            try:
+                return to_response(await _maybe_await(handler(req, exc)))
+            except Exception:
+                # A failing error handler must never escape the app: fall back to the
+                # built-in responses so security headers and safe bodies still apply.
+                self._log_security_event(logging.ERROR, "error-handler-failed", req=req)
+
         if isinstance(exc, RequestValidationError):
-            for klass in type(exc).__mro__:
-                handler = self._error_handlers.get(klass)
-                if handler is not None:
-                    return to_response(await _maybe_await(handler(req, exc)))
             return Response.json(
                 {
                     "error": "validation_error",
@@ -1431,17 +1471,17 @@ class Flasgo:
             return debug_response
 
         self._log_security_event(logging.ERROR, "unhandled-exception", req=req)
-
-        for klass in type(exc).__mro__:
-            handler = self._error_handlers.get(klass)
-            if handler is None:
-                continue
-            response = to_response(await _maybe_await(handler(req, exc)))
-            return response
         return Response.text(
             "Internal Server Error. Check the application logs for the original failure.",
             status_code=500,
         )
+
+    def _find_error_handler(self, exc: Exception) -> ErrorHandler | None:
+        for klass in type(exc).__mro__:
+            handler = self._error_handlers.get(klass)
+            if handler is not None:
+                return handler
+        return None
 
     def _load_session(self, req: Request) -> Session:
         token = req.cookies.get(self.security.session_cookie_name)
@@ -1527,7 +1567,11 @@ class Flasgo:
         limit = self.security.security_failure_rate_limit
         if limit <= 0:
             return False
-        client = req.client_ip or "unknown"
+        client = req.client_ip
+        if client is None:
+            # Without a peer identity there is no per-client bucket to update; throttling
+            # a shared "unknown" bucket would let one client lock out all the others.
+            return False
         window = self.security.security_failure_window_seconds
         now = time.monotonic()
         if len(self._security_failures) > 10_000:
@@ -1547,7 +1591,9 @@ class Flasgo:
         limit = self.security.security_failure_rate_limit
         if limit <= 0:
             return False
-        client = req.client_ip or "unknown"
+        client = req.client_ip
+        if client is None:
+            return False
         state = self._security_failures.get(client)
         if state is None:
             return False

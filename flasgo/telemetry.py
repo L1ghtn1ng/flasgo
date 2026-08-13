@@ -126,13 +126,18 @@ def _build_tracer_provider(settings: Settings) -> Any:
     return provider
 
 
+_QUERY_KEY_MAX_BYTES = 64
+
+
 def _redacted_query_string(value: object) -> bytes:
     if not isinstance(value, bytes) or not value:
         return b""
     fields: list[bytes] = []
     for field in value.split(b"&"):
         key, separator, raw_value = field.partition(b"=")
-        safe_key = quote_from_bytes(key, safe="!$'()*+,-./:;?@_~%").encode("ascii")
+        # Query keys are attacker-controlled and sometimes carry credentials in the
+        # key position, so bound their length before they reach span attributes.
+        safe_key = quote_from_bytes(key[:_QUERY_KEY_MAX_BYTES], safe="!$'()*+,-./:;?@_~%").encode("ascii")
         if not separator:
             fields.append(safe_key)
         elif not raw_value:

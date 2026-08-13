@@ -4,7 +4,7 @@ import inspect
 import math
 import types
 from collections.abc import Mapping, Sequence
-from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal, Union, cast, get_args, get_origin, get_type_hints
@@ -13,6 +13,18 @@ from uuid import UUID
 from .request import FormData, UploadedFile
 
 type LocationPart = str | int
+
+_LOCATION_PART_MAX_LENGTH = 64
+
+
+def _safe_location_part(value: object) -> str:
+    """Return a printable, bounded location component derived from request-controlled keys."""
+
+    text = str(value)
+    cleaned = "".join(char if 32 <= ord(char) < 127 else "?" for char in text)
+    if len(cleaned) > _LOCATION_PART_MAX_LENGTH:
+        cleaned = cleaned[:_LOCATION_PART_MAX_LENGTH] + "..."
+    return cleaned
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +153,7 @@ def validate_form_model(
             continue
         if not extend_validation_issues(
             issues,
-            (ValidationIssue(("form", name), "unknown_field", "Unknown field."),),
+            (ValidationIssue(("form", _safe_location_part(name)), "unknown_field", "Unknown field."),),
             location=("form",),
             budget=active_budget,
         ):
@@ -196,8 +208,15 @@ def validate_form_model(
 
 
 def to_jsonable(value: object) -> object:
+    """Convert supported values to JSON data without dataclass-private fields."""
+
     if is_dataclass(value) and not isinstance(value, type):
-        return {key: to_jsonable(item) for key, item in asdict(value).items()}
+        # Underscore-prefixed fields are private by convention and are never serialized.
+        return {
+            model_field.name: to_jsonable(getattr(value, model_field.name))
+            for model_field in fields(value)
+            if not model_field.name.startswith("_")
+        }
     if isinstance(value, Enum):
         return to_jsonable(value.value)
     if isinstance(value, (UUID, date, datetime)):
@@ -374,7 +393,7 @@ def _validate_value(
                 continue
             if not extend_validation_issues(
                 issues,
-                (ValidationIssue((*location, str(key)), "unknown_field", "Unknown field."),),
+                (ValidationIssue((*location, _safe_location_part(key)), "unknown_field", "Unknown field."),),
                 location=location,
                 budget=budget,
             ):
@@ -487,7 +506,7 @@ def _validate_value(
             str(key): _validate_value(
                 item_type,
                 item,
-                location=(*location, str(key)),
+                location=(*location, _safe_location_part(key)),
                 from_text=from_text,
                 budget=budget,
                 depth=depth + 1,
