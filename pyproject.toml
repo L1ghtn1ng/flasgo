@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-db = ["alembic==1.18.5"]
+db = ["alembic==1.19.0"]
 jwt = ["PyJWT==2.13.0"]
 metrics = ["prometheus-client==0.26.0"]
 otel = [
@@ -53,7 +53,7 @@ flasgo = "flasgo.cli:main"
 
 [dependency-groups]
 dev = [
-  "alembic==1.18.5",
+  "alembic==1.19.0",
   "PyJWT==2.13.0",
   "opentelemetry-api==1.44.0",
   "opentelemetry-exporter-otlp-proto-http==1.44.0",
@@ -63,7 +63,7 @@ dev = [
   "prometheus-client==0.26.0",
   "pytest==9.1.1",
   "ruff==0.16.1",
-  "ty==0.0.65",
+  "ty==0.0.68",
 ]
 
 [tool.ruff]
