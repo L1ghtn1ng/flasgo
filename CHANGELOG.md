@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Dispatch now reuses the route match performed for CORS setup instead of matching the route twice per request;
+  the match is repeated when a `before_request` middleware rewrote the request path or method.
+- HTTP and WebSocket authorization share a single implementation, response body byte counting is unified, and
+  unused internal helpers were removed. Ruff's `SIM`, `PIE`, and `PERF` rules are now enforced.
+
 ## [0.8.0] - 2026-08-13
 
 ### Added
