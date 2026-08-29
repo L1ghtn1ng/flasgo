@@ -1743,11 +1743,6 @@ def _status_text(status_code: int) -> str:
     }.get(status_code, str(status_code))
 
 
-def _sanitize_log_value(value: object | None) -> str:
-    raw = "" if value is None else str(value)
-    return raw.replace("\x00", "\\x00").replace("\r", "\\r").replace("\n", "\\n")
-
-
 def _security_rate_limit_response() -> Response:
     return Response.text(
         "Too many failed security checks from this client. Wait a moment before retrying.",
