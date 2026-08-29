@@ -1293,8 +1293,12 @@ class Flasgo:
                     req.scope["flasgo.cors_preflight"] = True
                     return _cors_preflight_denied_response()
 
+        route_match: tuple[MatchResult | None, set[str]] | None = None
+        route_match_target: tuple[str, str] | None = None
         if self._has_cors_routes:
-            cors_match, _ = self._match_route(req.path, req.method)
+            route_match_target = (req.path, req.method)
+            route_match = self._match_route(*route_match_target)
+            cors_match = route_match[0]
             if cors_match is not None and cors_match.cors is not None:
                 req.scope["route_template"] = cors_match.route_path
                 req.scope["flasgo.cors"] = cors_match.cors
@@ -1314,7 +1318,10 @@ class Flasgo:
                 response = to_response(value)
                 return await self._run_after_middleware(req, response)
 
-        match, allowed_methods = self._match_route(req.path, req.method)
+        # Reuse the CORS-phase match unless before-middleware rewrote the route target.
+        if route_match is None or route_match_target != (req.path, req.method):
+            route_match = self._match_route(req.path, req.method)
+        match, allowed_methods = route_match
         if match is None and allowed_methods:
             route_template = self._otel_route_template(req.path)
             if route_template is not None:
