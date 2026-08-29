@@ -10,6 +10,7 @@ import secrets
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -122,6 +123,16 @@ class _CountingSend:
         await self._send(message)
         if message.get("type") == "http.response.body":
             self.body_bytes += len(bytes(message.get("body", b"")))
+
+
+@dataclass(slots=True)
+class _AuthDenial:
+    """Transport-agnostic outcome of a failed authorization check."""
+
+    reason: Literal["backend-missing", "rate-limited", "backend-error", "permission-denied"]
+    user: User
+    challenge: str | None = None
+    backend_name: str = ""
 
 
 _default_auth_backend = _DefaultAuthBackend()
@@ -635,35 +646,16 @@ class Flasgo:
         req: Request,
         endpoint: WebSocketEndpoint,
     ) -> tuple[int, dict[str, str]] | None:
-        auth = self._route_auth.get(endpoint)
-        if auth is None:
+        denial = await self._authorize(req, endpoint, set_user_ctx=False)
+        if denial is None:
             return None
-        backend = self._auth_backends.get(auth.backend)
-        if backend is None:
-            self._log_security_event(logging.ERROR, "auth-backend-missing", req=req)
-            return 500, {}
-        if self._security_failure_is_limited(req):
-            self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
+        if denial.reason == "rate-limited":
             return 429, {}
-        try:
-            authenticated = await _maybe_await(backend(req))
-        except Exception:
-            self._log_security_event(logging.ERROR, "auth-backend-error", req=req)
-            if self._register_security_failure(req):
-                return 429, {}
+        if denial.reason in {"backend-missing", "backend-error"}:
             return 500, {}
-        auth_result = _normalize_auth_identity(authenticated)
-        resolved_user = auth_result.user or User.anonymous()
-        req.scope["user"] = resolved_user
-        for permission in auth.permissions:
-            if not await self._evaluate_permission(permission, req, resolved_user):
-                self._log_security_event(logging.WARNING, "permission-denied", req=req)
-                if self._register_security_failure(req):
-                    return 429, {}
-                status = 403 if resolved_user.is_authenticated else 401
-                headers = {"www-authenticate": auth_result.challenge} if auth_result.challenge else {}
-                return status, headers
-        return None
+        status = 403 if denial.user.is_authenticated else 401
+        headers = {"www-authenticate": denial.challenge} if denial.challenge else {}
+        return status, headers
 
     async def _call_websocket_endpoint(
         self,
@@ -1520,49 +1512,69 @@ class Flasgo:
         )
         return token
 
-    async def _authorize_request(self, req: Request, endpoint: Endpoint) -> Response | None:
+    async def _authorize(
+        self,
+        req: Request,
+        endpoint: Endpoint | WebSocketEndpoint,
+        *,
+        set_user_ctx: bool,
+    ) -> _AuthDenial | None:
+        """Shared authorization core; returns None on success or a transport-agnostic denial."""
+
         auth = self._route_auth.get(endpoint)
         if auth is None:
             return None
 
+        anonymous = User.anonymous()
         backend = self._auth_backends.get(auth.backend)
         if backend is None:
             self._log_security_event(logging.ERROR, "auth-backend-missing", req=req)
-            return Response.text(
-                f"Authentication backend {auth.backend!r} is not configured. "
-                "Register it with app.register_auth_backend(...).",
-                status_code=500,
-            )
+            return _AuthDenial("backend-missing", anonymous, backend_name=auth.backend)
         if self._security_failure_is_limited(req):
             self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
-            return _security_rate_limit_response()
+            return _AuthDenial("rate-limited", anonymous)
 
-        challenge: str | None = None
         try:
             authenticated = await _maybe_await(backend(req))
         except Exception:
             self._log_security_event(logging.ERROR, "auth-backend-error", req=req)
             if self._register_security_failure(req):
-                return _security_rate_limit_response()
-            return Response.text(
-                "Authentication failed. Provide valid credentials and retry.",
-                status_code=401,
-            )
+                return _AuthDenial("rate-limited", anonymous)
+            return _AuthDenial("backend-error", anonymous)
 
         auth_result = _normalize_auth_identity(authenticated)
         resolved_user = auth_result.user or User.anonymous()
-        challenge = auth_result.challenge
         req.scope["user"] = resolved_user
-        _user_ctx.set(resolved_user)
+        if set_user_ctx:
+            _user_ctx.set(resolved_user)
 
         for permission in auth.permissions:
             allowed = await self._evaluate_permission(permission, req, resolved_user)
             if not allowed:
                 self._log_security_event(logging.WARNING, "permission-denied", req=req)
                 if self._register_security_failure(req):
-                    return _security_rate_limit_response()
-                return _permission_denied_response(resolved_user, challenge=challenge)
+                    return _AuthDenial("rate-limited", resolved_user)
+                return _AuthDenial("permission-denied", resolved_user, challenge=auth_result.challenge)
         return None
+
+    async def _authorize_request(self, req: Request, endpoint: Endpoint) -> Response | None:
+        denial = await self._authorize(req, endpoint, set_user_ctx=True)
+        if denial is None:
+            return None
+        if denial.reason == "backend-missing":
+            return Response.text(
+                f"Authentication backend {denial.backend_name!r} is not configured. "
+                "Register it with app.register_auth_backend(...).",
+                status_code=500,
+            )
+        if denial.reason == "rate-limited":
+            return _security_rate_limit_response()
+        if denial.reason == "backend-error":
+            return Response.text(
+                "Authentication failed. Provide valid credentials and retry.",
+                status_code=401,
+            )
+        return _permission_denied_response(denial.user, challenge=denial.challenge)
 
     def _register_security_failure(self, req: Request) -> bool:
         limit = self.security.security_failure_rate_limit
