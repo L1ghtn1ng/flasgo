@@ -11,11 +11,7 @@ _DEFAULT_MAX_TEMPLATE_BYTES = 262_144
 
 
 def _coerce_search_paths(template_dirs: str | Path | Sequence[str | Path]) -> tuple[Path, ...]:
-    raw_paths: Sequence[str | Path]
-    if isinstance(template_dirs, (str, Path)):
-        raw_paths = (template_dirs,)
-    else:
-        raw_paths = template_dirs
+    raw_paths: Sequence[str | Path] = (template_dirs,) if isinstance(template_dirs, (str, Path)) else template_dirs
 
     if not raw_paths:
         raise ValueError("At least one template directory must be configured.")

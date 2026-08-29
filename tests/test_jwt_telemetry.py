@@ -299,9 +299,8 @@ def test_opentelemetry_scrubs_websocket_paths_and_queries() -> None:
         _ = room_id
         await websocket.accept()
 
-    with app.test_client() as client:
-        with client.websocket_connect("/rooms/7?token=websocket-secret"):
-            pass
+    with app.test_client() as client, client.websocket_connect("/rooms/7?token=websocket-secret"):
+        pass
 
     spans = exporter.get_finished_spans()
     assert len(spans) == 1
@@ -319,9 +318,8 @@ def test_log_events_include_active_trace_identifiers(caplog: pytest.LogCaptureFi
     logger = logging.getLogger("flasgo.test.telemetry")
     logger.propagate = True
 
-    with tracer.start_as_current_span("operation") as span:
-        with caplog.at_level(logging.INFO, logger=logger.name):
-            log_event(logger, logging.INFO, "inside-span")
+    with tracer.start_as_current_span("operation") as span, caplog.at_level(logging.INFO, logger=logger.name):
+        log_event(logger, logging.INFO, "inside-span")
 
     record = caplog.records[-1]
     context = span.get_span_context()

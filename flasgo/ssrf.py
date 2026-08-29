@@ -91,9 +91,8 @@ class SSRFGuard:
             msg = f"Blocked outbound URL scheme: {scheme!r}"
             raise SSRFViolation(msg)
 
-        if parsed.username or parsed.password:
-            if not self.config.allow_userinfo:
-                raise SSRFViolation("Blocked outbound URL with userinfo credentials.")
+        if (parsed.username or parsed.password) and not self.config.allow_userinfo:
+            raise SSRFViolation("Blocked outbound URL with userinfo credentials.")
 
         hostname = parsed.hostname
         if not hostname:

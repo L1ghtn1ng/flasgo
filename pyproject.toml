@@ -78,7 +78,10 @@ select = ["E",
     "B",
     "UP",
     "ASYNC",
-    "RUF"]
+    "RUF",
+    "SIM",
+    "PIE",
+    "PERF"]
 
 ignore = [
     "RUF036",

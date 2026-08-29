@@ -163,18 +163,22 @@ def _check_command(args: argparse.Namespace) -> int:
                 errors.append(f"duplicate route name: {route.name}")
             seen_names.add(route.name)
 
-    for auth in app._route_auth.values():
-        if auth.backend not in app._auth_backends:
-            errors.append(f"missing authentication backend: {auth.backend}")
+    errors.extend(
+        f"missing authentication backend: {auth.backend}"
+        for auth in app._route_auth.values()
+        if auth.backend not in app._auth_backends
+    )
 
     internal_paths: set[str] = set()
     if app.settings.ENABLE_DOCS:
         internal_paths.update((app.settings.DOCS_PATH, app.settings.OPENAPI_PATH))
     if app.settings.METRICS_ENABLED:
         internal_paths.add(app.settings.METRICS_PATH)
-    for route in app._routes:
-        if route.raw_path in internal_paths:
-            errors.append(f"route conflicts with enabled internal endpoint: {route.raw_path}")
+    errors.extend(
+        f"route conflicts with enabled internal endpoint: {route.raw_path}"
+        for route in app._routes
+        if route.raw_path in internal_paths
+    )
 
     if errors:
         for error in sorted(set(errors)):
@@ -357,13 +361,16 @@ def _import_target(target: _ResolvedTarget) -> ModuleType:
     namespace = target.module_name.partition(".")[0]
     previous_root = _CLI_NAMESPACE_ROOTS.get(namespace)
     cached_namespace = sys.modules.get(namespace)
-    if cached_namespace is not None and not _namespace_matches_target(cached_namespace, target):
-        if previous_root is None or not _module_belongs_to_root(cached_namespace, previous_root):
-            location = _module_location(cached_namespace)
-            raise SystemExit(
-                f"Cannot load '{target.source}' as '{target.module_name}' because namespace '{namespace}' "
-                f"is already imported from '{location or 'an unknown location'}'. Rename the target or package."
-            )
+    if (
+        cached_namespace is not None
+        and not _namespace_matches_target(cached_namespace, target)
+        and (previous_root is None or not _module_belongs_to_root(cached_namespace, previous_root))
+    ):
+        location = _module_location(cached_namespace)
+        raise SystemExit(
+            f"Cannot load '{target.source}' as '{target.module_name}' because namespace '{namespace}' "
+            f"is already imported from '{location or 'an unknown location'}'. Rename the target or package."
+        )
 
     snapshot = _namespace_snapshot(namespace)
     modules_before = dict(sys.modules)

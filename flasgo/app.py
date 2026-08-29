@@ -693,13 +693,10 @@ class Flasgo:
                 path_route = self._otel_route_template(path)
                 if path_route is not None:
                     route = path_route
-            if (
-                route == "<unmatched>"
-                and path in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}
-                and self.settings.ENABLE_DOCS
+            if route == "<unmatched>" and (
+                (path in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH} and self.settings.ENABLE_DOCS)
+                or (path == self.settings.METRICS_PATH and self.settings.METRICS_ENABLED)
             ):
-                route = path
-            elif route == "<unmatched>" and path == self.settings.METRICS_PATH and self.settings.METRICS_ENABLED:
                 route = path
             return f"{span_method} {route}", {"http.route": route, "flasgo.request_id": str(scope["request_id"])}
         if scope_type == "websocket":
@@ -1774,7 +1771,7 @@ def _websocket_rate_limit_headers(response: Response) -> dict[str, str]:
     return {
         name: value
         for name, value in response.headers.items()
-        if name == "retry-after" or name.startswith("ratelimit-") or name.startswith("x-ratelimit-")
+        if name == "retry-after" or name.startswith(("ratelimit-", "x-ratelimit-"))
     }
 
 

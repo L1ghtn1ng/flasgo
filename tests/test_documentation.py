@@ -114,7 +114,7 @@ def test_release_version_is_consistent_across_framework_and_docs() -> None:
     version = project["project"]["version"]
 
     assert version == "0.8.0"
-    assert Settings.API_VERSION == version
+    assert version == Settings.API_VERSION
     assert f"current framework release is `{version}`" in Path("README.md").read_text(encoding="utf-8")
     assert f"## [{version}] - 2026-08-13" in Path("CHANGELOG.md").read_text(encoding="utf-8")
     assert "Latest `0.8.x` release" in Path("SECURITY.md").read_text(encoding="utf-8")

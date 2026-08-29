@@ -89,7 +89,7 @@ def test_multipart_field_count_is_capped() -> None:
     boundary = "b"
     parts = []
     for index in range(5):
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="f{index}"\r\n\r\nx\r\n'.encode())
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="f{index}"\r\n\r\nx\r\n'.encode())  # noqa: PERF401
     body = b"".join(parts) + b"--b--\r\n"
     app = Flasgo(settings={"CSRF_ENABLED": False, "MAX_FORM_FIELDS": 3})
 

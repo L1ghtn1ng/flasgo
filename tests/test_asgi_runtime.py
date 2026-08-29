@@ -61,12 +61,11 @@ def test_websocket_echo_subprotocol_and_route_params() -> None:
         await websocket.accept("chat")
         await websocket.send_json({"room": room_id, "message": await websocket.receive_text()})
 
-    with app.test_client() as client:
-        with client.websocket_connect("/rooms/7", subprotocols=("chat",)) as websocket:
-            websocket.send_text("hello")
-            assert websocket.receive_json() == {"room": 7, "message": "hello"}
-            assert websocket.accepted_subprotocol == "chat"
-            assert websocket.response_headers["x-request-id"]
+    with app.test_client() as client, client.websocket_connect("/rooms/7", subprotocols=("chat",)) as websocket:
+        websocket.send_text("hello")
+        assert websocket.receive_json() == {"room": 7, "message": "hello"}
+        assert websocket.accepted_subprotocol == "chat"
+        assert websocket.response_headers["x-request-id"]
 
 
 def test_async_test_client_uses_one_lifecycle_loop() -> None:
@@ -78,10 +77,9 @@ def test_async_test_client_uses_one_lifecycle_loop() -> None:
         await websocket.send_text(await websocket.receive_text())
 
     async def exercise() -> None:
-        async with app.test_client() as client:
-            async with client.awebsocket_connect("/async") as websocket:
-                await websocket.send_text("hello")
-                assert await websocket.receive_text() == "hello"
+        async with app.test_client() as client, client.awebsocket_connect("/async") as websocket:
+            await websocket.send_text("hello")
+            assert await websocket.receive_text() == "hello"
 
     asyncio.run(exercise())
 
@@ -109,18 +107,19 @@ def test_websocket_origin_auth_size_and_rate_limits() -> None:
             await websocket.send_text(message)
 
     with app.test_client() as client:
-        with pytest.raises(WebSocketHandshakeError) as cross_origin:
-            with client.websocket_connect(
+        with (
+            pytest.raises(WebSocketHandshakeError) as cross_origin,
+            client.websocket_connect(
                 "/socket",
                 origin="https://attacker.example",
                 headers={"authorization": "Bearer valid"},
-            ):
-                pass
+            ),
+        ):
+            pass
         assert cross_origin.value.status_code == 403
 
-        with pytest.raises(WebSocketHandshakeError) as anonymous:
-            with client.websocket_connect("/socket"):
-                pass
+        with pytest.raises(WebSocketHandshakeError) as anonymous, client.websocket_connect("/socket"):
+            pass
         assert anonymous.value.status_code == 401
 
         with client.websocket_connect("/socket", headers={"authorization": "Bearer valid"}) as websocket:
@@ -163,9 +162,8 @@ def test_websocket_authentication_failures_are_throttled_before_backend() -> Non
     with app.test_client() as client:
         statuses: list[int] = []
         for _ in range(3):
-            with pytest.raises(WebSocketHandshakeError) as denied:
-                with client.websocket_connect("/private"):
-                    pass
+            with pytest.raises(WebSocketHandshakeError) as denied, client.websocket_connect("/private"):
+                pass
             statuses.append(denied.value.status_code)
 
     assert statuses == [401, 401, 429]
@@ -190,12 +188,10 @@ def test_websocket_default_route_limit_runs_before_authentication() -> None:
         await websocket.accept()
 
     with app.test_client() as client:
-        with pytest.raises(WebSocketHandshakeError) as first:
-            with client.websocket_connect("/private"):
-                pass
-        with pytest.raises(WebSocketHandshakeError) as second:
-            with client.websocket_connect("/private"):
-                pass
+        with pytest.raises(WebSocketHandshakeError) as first, client.websocket_connect("/private"):
+            pass
+        with pytest.raises(WebSocketHandshakeError) as second, client.websocket_connect("/private"):
+            pass
 
     assert first.value.status_code == 401
     assert second.value.status_code == 429
