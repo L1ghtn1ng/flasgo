@@ -109,6 +109,21 @@ class _DefaultAuthBackend:
         return None
 
 
+class _CountingSend:
+    """Wrap an ASGI send callable and count response body bytes sent."""
+
+    __slots__ = ("_send", "body_bytes")
+
+    def __init__(self, send: Send) -> None:
+        self._send = send
+        self.body_bytes = 0
+
+    async def __call__(self, message: dict[str, Any]) -> None:
+        await self._send(message)
+        if message.get("type") == "http.response.body":
+            self.body_bytes += len(bytes(message.get("body", b"")))
+
+
 _default_auth_backend = _DefaultAuthBackend()
 
 
@@ -248,14 +263,7 @@ class Flasgo:
         started = time.perf_counter()
         if _request_head_size(scope) > self.security.max_request_head_bytes:
             instrument = self._metrics is not None and scope.get("path") != self.settings.METRICS_PATH
-            response_body_size = 0
-
-            async def observed_send(message: dict[str, Any]) -> None:
-                nonlocal response_body_size
-                await send(message)
-                if message.get("type") == "http.response.body":
-                    response_body_size += len(bytes(message.get("body", b"")))
-
+            observed_send = _CountingSend(send)
             if instrument:
                 self._metrics.http_active.inc()
             response = Response.text(
@@ -279,7 +287,7 @@ class Flasgo:
                             route="<unmatched>",
                             status=response.status_code,
                             duration=time.perf_counter() - started,
-                            response_body_size=response_body_size,
+                            response_body_size=observed_send.body_bytes,
                             response_sent=sent,
                         )
                     finally:
@@ -325,14 +333,7 @@ class Flasgo:
                 response.prepare()
 
             sent = False
-            response_body_size = 0
-
-            async def observed_send(message: dict[str, Any]) -> None:
-                nonlocal response_body_size
-                await send(message)
-                if message.get("type") == "http.response.body":
-                    response_body_size += len(bytes(message.get("body", b"")))
-
+            observed_send = _CountingSend(send)
             try:
                 await response.send(observed_send, head_only=req.method == "HEAD")
                 sent = True
@@ -358,7 +359,7 @@ class Flasgo:
                     route=route,
                     status=response.status_code,
                     duration=duration,
-                    response_body_size=response_body_size,
+                    response_body_size=observed_send.body_bytes,
                     response_sent=sent,
                 )
 
