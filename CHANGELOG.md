@@ -15,10 +15,10 @@
 
 ### Changed
 
-- HTTP and WebSocket request-head limits now run at shared ASGI ingress before telemetry, routing, and session
+- HTTP and WebSocket request-head limits now run at shared ASGI ingress before OpenTelemetry tracing, routing, and session
   storage. WebSocket Host, Origin, and client-IP route limits also run before session loading.
 - Route registration now rejects ambiguous duplicates and converter overlaps, keeps parameter names consistent across
-  methods, orders specific routes before broad routes, and prefers protected routes for equal-specificity matches.
+  methods, orders specific routes before broad routes, and rejects intersecting routes with equal specificity.
 - Streaming responses now apply a separate cleanup deadline and a hard process-wide limit for cancellation-resistant
   application cleanup.
 
@@ -31,6 +31,7 @@
   snapshot and may deliberately commit changes such as logout or revocation.
 - Response validation completes before session storage writes, preventing malformed responses from committing state.
 - Invalid session and CSRF cookie names fail during application initialization, before session state can be written.
+- Cookie values and raw Set-Cookie headers reject all C0 control characters and DEL before emission.
 - Streaming cleanup timeouts retain their distinct metrics outcome after an otherwise successful response send.
 - Stream finalization at the cleanup-capacity limit is queued and automatically scheduled when capacity becomes
   available. Pending work is bounded, deduplicated, and executed on its owning loop; queue overflow raises explicitly.

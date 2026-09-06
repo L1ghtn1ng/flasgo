@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs
 
 from .request import _reject_json_constant
+from .response import _validate_set_cookie
 from .types import Message, Receive, Scope, Send
 
 _SUBPROTOCOL_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -303,6 +304,7 @@ def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
 
 
 def _encode_accept_headers(headers: Mapping[str, str]) -> list[tuple[bytes, bytes]]:
+    """Encode handshake headers while enforcing cookie controls for accept and denial responses."""
     encoded: list[tuple[bytes, bytes]] = []
     for key, value in headers.items():
         normalized = key.strip().lower()
@@ -310,6 +312,8 @@ def _encode_accept_headers(headers: Mapping[str, str]) -> list[tuple[bytes, byte
             raise ValueError("Pass the selected protocol with subprotocol=, not an acceptance header.")
         if not normalized or any(char in normalized + value for char in ("\r", "\n", "\x00")):
             raise ValueError("Invalid WebSocket acceptance header.")
+        if normalized == "set-cookie":
+            _validate_set_cookie(value)
         try:
             encoded.append((normalized.encode("ascii"), value.encode("latin-1")))
         except UnicodeEncodeError as exc:

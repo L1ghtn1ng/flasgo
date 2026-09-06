@@ -25,7 +25,74 @@ from flasgo import (
 )
 from flasgo.app import _request_head_size
 from flasgo.routing import routes_overlap
-from flasgo.security import SecurityConfig
+from flasgo.security import SecurityConfig, build_set_cookie
+
+
+@pytest.mark.parametrize("codepoint", [*range(0x20), 0x7F], ids=lambda value: f"U+{value:04X}")
+def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
+    """Reject every C0 control and DEL through cookie builders, raw headers, and late mutations."""
+    value = f"before{chr(codepoint)}after"
+    raw_cookie = f"sample={value}; Path=/"
+    with pytest.raises(ValueError, match="control characters"):
+        build_set_cookie("sample", value)
+    response = Response.text("ok")
+    with pytest.raises(ValueError, match="control characters"):
+        response.set_cookie("sample", value)
+    assert response.cookies == []
+    with pytest.raises(ValueError, match="Invalid Set-Cookie"):
+        Response(body=b"", cookies=[raw_cookie])
+    with pytest.raises(ValueError):
+        Response(body=b"", headers={"Set-Cookie": raw_cookie})
+
+    async def run() -> None:
+        """Verify send-time validation rejects post-construction mutations before response start."""
+        messages: list[dict[str, Any]] = []
+
+        async def send(message: dict[str, Any]) -> None:
+            """Record any unintended ASGI emission of an invalid cookie."""
+            messages.append(message)
+
+        for raw_header in (False, True):
+            mutated = Response.text("ok")
+            if raw_header:
+                mutated.headers["Set-Cookie"] = raw_cookie
+            else:
+                mutated.cookies.append(raw_cookie)
+            with pytest.raises(ValueError):
+                await mutated.send(send)
+
+        async def receive() -> dict[str, Any]:
+            """Supply the connection event required before WebSocket acceptance or denial."""
+            return {"type": "websocket.connect"}
+
+        for accept in (False, True):
+            websocket = WebSocket(
+                {"type": "websocket", "extensions": {"websocket.http.response": {}}},
+                receive,
+                send,
+                max_message_bytes=1024,
+                max_messages_per_minute=60,
+            )
+            await websocket.receive_connect()
+            with pytest.raises(ValueError):
+                if accept:
+                    await websocket.accept(headers={"Set-Cookie": raw_cookie})
+                else:
+                    await websocket.deny(403, "Denied", headers={"Set-Cookie": raw_cookie})
+        assert messages == []
+
+    asyncio.run(run())
+
+
+def test_cookie_control_validation_preserves_printable_values_and_attributes() -> None:
+    """Retain printable cookie punctuation, empty values, and spaces between attributes."""
+    response = Response.text("ok")
+    response.set_cookie("sample", "!valid~", path="/cookie")
+    response.delete_cookie("expired")
+    response.headers["Set-Cookie"] = "raw=!valid~; Path=/; SameSite=Lax"
+    response.prepare()
+    assert response.cookies[0].startswith("sample=!valid~; Path=/cookie;")
+    assert response.cookies[1].startswith("expired=;")
 
 
 @pytest.mark.parametrize("converter", ["path", "str"])

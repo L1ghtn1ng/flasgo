@@ -72,9 +72,9 @@ def _default_secret_key() -> str:
 
 def _validate_cookie_value(value: str) -> None:
     """Reject cookie values containing forbidden control characters or separators."""
-    if any(char in value for char in ("\r", "\n", "\x00")):
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
         raise ValueError("Invalid cookie value: contains control characters.")
-    if any(char in value for char in (";", ",", " ", "\t")):
+    if any(char in value for char in (";", ",", " ")):
         raise ValueError("Invalid cookie value: contains forbidden separators.")
 
 

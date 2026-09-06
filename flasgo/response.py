@@ -285,6 +285,7 @@ def _tuple_to_response(
 
 
 def _validate_header(name: str, value: str) -> None:
+    """Validate header syntax and enforce cookie-specific rules for Set-Cookie."""
     if not _HEADER_NAME_RE.fullmatch(name):
         msg = f"Invalid header name: {name!r}"
         raise ValueError(msg)
@@ -299,10 +300,13 @@ def _validate_header(name: str, value: str) -> None:
         value.encode("latin-1")
     except UnicodeEncodeError as exc:
         raise ValueError(f"HTTP header {name!r} is not Latin-1 encodable.") from exc
+    if name.lower() == "set-cookie":
+        _validate_set_cookie(value)
 
 
 def _validate_set_cookie(value: str) -> None:
-    if any(char in value for char in ("\r", "\n", "\x00")):
+    """Reject C0 controls, DEL, and unencodable values before cookie emission."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
         msg = "Invalid Set-Cookie value."
         raise ValueError(msg)
     try:
