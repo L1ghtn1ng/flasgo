@@ -12,6 +12,15 @@ class HTTPException(Exception):
     headers: dict[str, str] = field(default_factory=dict)
 
 
+class _RequestRejection(HTTPException):
+    """Framework rejection with a fixed diagnostic reason, independent of status."""
+
+    def __init__(self, status_code: int, detail: str, reason: str) -> None:
+        super().__init__(status_code, detail)
+        self.args = (status_code, detail)
+        self.reason = reason
+
+
 def abort(status_code: int, detail: str = "", headers: dict[str, str] | None = None) -> None:
     """Raise an :class:`HTTPException` for the current request."""
 

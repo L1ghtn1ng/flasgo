@@ -66,6 +66,8 @@ class Settings:
     METRICS_ENABLED: bool = False
     METRICS_PATH: str = "/metrics"
     METRICS_BEARER_TOKEN: str | None = None
+    METRICS_EVENT_LOOP_ENABLED: bool = True
+    METRICS_EVENT_LOOP_INTERVAL_SECONDS: float = 0.1
     OTEL_ENABLED: bool = False
     OTEL_SERVICE_NAME: str = "flasgo"
     OTEL_SERVICE_VERSION: str | None = None

@@ -10,7 +10,7 @@ import secrets
 import sys
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,9 +41,9 @@ from .cors import (
 )
 from .debug import Debug
 from .di import DependencyContext, resolve_endpoint_arguments
-from .exceptions import HTTPException
+from .exceptions import HTTPException, _RequestRejection
 from .logging import configure_logging, log_event
-from .metrics import Metrics
+from .metrics import Metrics, normalize_http_method
 from .openapi import build_openapi_spec
 from .params import Depends, Provider, compile_endpoint_plan
 from .ratelimit import (
@@ -80,7 +80,7 @@ from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
-from .stores import StoreUnavailable
+from .stores import StoreUnavailable, _StoreCapacityExceeded
 from .streaming import StreamingResponse
 from .telemetry import Telemetry
 from .templating import JinjaTemplates
@@ -89,6 +89,8 @@ from .validation import RequestValidationError
 from .websockets import WebSocket, WebSocketDisconnect
 
 if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
+
     from .blueprints import Blueprint
     from .testing import TestClient
 
@@ -107,6 +109,26 @@ _BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
 _OTEL_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 _INSECURE_SENTINEL = "dev-insecure-secret-change-this"
+_REJECTION_EVENTS = {
+    "host-check-failed": "host",
+    "cors-preflight-invalid": "cors",
+    "cors-preflight-denied": "cors",
+    "csrf-check-failed": "csrf",
+    "docs-auth-failed": "authentication",
+    "rate-limit-exceeded": "rate_limit",
+}
+_INTERNAL_ERROR_EVENTS = {
+    "response-prepare-failed": ("response_prepare", "failure"),
+    "dependency-cleanup-failed": ("dependency_cleanup", "failure"),
+    "error-handler-failed": ("error_handler", "failure"),
+    "unhandled-exception": ("dispatch", "unhandled_exception"),
+    "shared-storage-unavailable": ("backend", "unavailable"),
+    "auth-backend-error": ("authentication", "backend_error"),
+    "docs-auth-backend-error": ("authentication", "backend_error"),
+    "auth-backend-missing": ("authentication", "backend_missing"),
+    "docs-auth-backend-missing": ("authentication", "backend_missing"),
+    "permission-check-error": ("authorization", "permission_error"),
+}
 _SWAGGER_UI_VERSION = "5.32.12"
 _SWAGGER_UI_CSS_INTEGRITY = "sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT"
 _SWAGGER_UI_JS_INTEGRITY = "sha384-aPw2h1Un96ObRq1fD7AOgyf0r9jgkhMD51uBltHKtT0++4LsgMUkQD52RFNWcAil"
@@ -120,16 +142,38 @@ class _DefaultAuthBackend:
 class _CountingSend:
     """Wrap an ASGI send callable and count response body bytes sent."""
 
-    __slots__ = ("_send", "body_bytes")
+    __slots__ = ("_first_body", "_labels", "_metrics", "_send", "_started", "_stream_bytes", "body_bytes")
 
-    def __init__(self, send: Send) -> None:
+    def __init__(
+        self,
+        send: Send,
+        *,
+        metrics: Metrics | None = None,
+        started: float = 0,
+        method: str = "GET",
+        route: str = "<unmatched>",
+        streaming: bool = False,
+    ) -> None:
         self._send = send
         self.body_bytes = 0
+        self._metrics = metrics
+        self._started = started
+        self._labels = {"method": normalize_http_method(method), "route": route}
+        self._first_body = False
+        self._stream_bytes = metrics.stream_bytes.labels(route=route) if metrics is not None and streaming else None
 
     async def __call__(self, message: dict[str, Any]) -> None:
         await self._send(message)
+        if self._metrics is not None and message.get("type") == "http.response.start":
+            self._metrics.http_response_start.labels(**self._labels).observe(time.perf_counter() - self._started)
         if message.get("type") == "http.response.body":
-            self.body_bytes += len(bytes(message.get("body", b"")))
+            size = len(bytes(message.get("body", b"")))
+            self.body_bytes += size
+            if self._metrics is not None and size and not self._first_body:
+                self._first_body = True
+                self._metrics.http_first_body.labels(**self._labels).observe(time.perf_counter() - self._started)
+            if self._stream_bytes is not None:
+                self._stream_bytes.inc(size)
 
 
 @dataclass(slots=True)
@@ -258,6 +302,9 @@ class Flasgo(RouteDecorators):
             default=MappingProxyType({}),
         )
         self._metrics = Metrics() if self.settings.METRICS_ENABLED else None
+        if self._metrics is not None:
+            for phase, reason in sorted(set(_INTERNAL_ERROR_EVENTS.values())):
+                self._metrics.internal_errors.labels(phase=phase, reason=reason)
         self._telemetry = (
             Telemetry(
                 self._dispatch_asgi,
@@ -287,6 +334,21 @@ class Flasgo(RouteDecorators):
                 url_path=static_url_path,
                 cache_max_age=static_cache_max_age,
             )
+
+    @property
+    def metrics_registry(self) -> CollectorRegistry | None:
+        """App-local Prometheus registry for custom metrics, or None when disabled.
+
+        Register metrics during application setup using prometheus_client's public
+        constructors. Duplicate names raise ValueError. Collectors must be fast,
+        synchronous, and free of network calls and sensitive/high-cardinality labels.
+        """
+        return self._metrics.registry if self._metrics is not None else None
+
+    def _backend_operation(self, req: Request, component: str, operation: str) -> AbstractContextManager[None]:
+        if self._metrics is None or req.path == self.settings.METRICS_PATH:
+            return nullcontext()
+        return self._metrics.backend_operation(component, operation)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") in {"http", "websocket"}:
@@ -322,9 +384,16 @@ class Flasgo(RouteDecorators):
         started = time.perf_counter()
         if _request_head_size(scope) > self.security.max_request_head_bytes:
             instrument = self._metrics is not None and scope.get("path") != self.settings.METRICS_PATH
-            observed_send = _CountingSend(send)
+            observed_send = _CountingSend(
+                send,
+                metrics=self._metrics if instrument else None,
+                started=started,
+                method=str(scope.get("method", "GET")),
+            )
             if instrument:
                 self._metrics.http_active.inc()
+                self._metrics.http_in_flight.inc()
+                self._metrics.http_rejections.labels(route="<unmatched>", reason="request_head_limit").inc()
             response = Response.text(
                 "Request headers exceed MAX_REQUEST_HEAD_BYTES.",
                 status_code=431,
@@ -351,6 +420,7 @@ class Flasgo(RouteDecorators):
                         )
                     finally:
                         self._metrics.http_active.dec()
+                        self._metrics.http_in_flight.dec()
             return
         req = Request(scope, receive)
         req.scope["flasgo.app"] = self
@@ -364,6 +434,8 @@ class Flasgo(RouteDecorators):
         instrument = self._metrics is not None and req.path != self.settings.METRICS_PATH
         if instrument:
             self._metrics.http_active.inc()
+            self._metrics.http_in_flight.inc()
+        in_flight = instrument
         req_token = _request_ctx.set(req)
         loaded_session = Session({})
         req.scope["session"] = loaded_session
@@ -381,7 +453,7 @@ class Flasgo(RouteDecorators):
                     _session_ctx.set(loaded_session)
                     response = await self._dispatch(req)
                     if isinstance(response, StreamingResponse):
-                        self._track_stream(req, response)
+                        self._track_response(req, response)
                         await req.body()
                         response.receive = req.receive
             except Exception as exc:
@@ -389,8 +461,10 @@ class Flasgo(RouteDecorators):
                 response = await self._handle_error(req, exc)
 
             try:
+                self._track_response(req, response)
                 await self._prepare_response(req, response)
             except Exception as exc:
+                self._observe_rejection_exception(req, exc)
                 await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-prepare-failed", req=req)
                 if isinstance(exc, StoreUnavailable):
@@ -406,17 +480,41 @@ class Flasgo(RouteDecorators):
                     _apply_cors_response_headers(req, response, cors)
                 response.prepare()
 
+            for background, observation in req.scope.get("flasgo.background_tasks", {}).items():
+                if background is not response.background:
+                    observation.close()
             sent = False
-            observed_send = _CountingSend(send)
+            route = str(req.scope.get("route_template", "<unmatched>"))
+            streaming = isinstance(response, StreamingResponse)
+            observed_send = _CountingSend(
+                send,
+                metrics=self._metrics if instrument else None,
+                started=started,
+                method=req.method,
+                route=route,
+                streaming=streaming,
+            )
+            if instrument and streaming:
+                self._metrics.streams_active.labels(route=route).inc()
             try:
-                await response.send(observed_send, head_only=req.method == "HEAD")
-                sent = True
+                try:
+                    await response.send(observed_send, head_only=req.method == "HEAD")
+                    sent = True
+                finally:
+                    if instrument:
+                        self._metrics.http_in_flight.dec()
+                        in_flight = False
+                        if isinstance(response, StreamingResponse):
+                            self._metrics.streams_active.labels(route=route).dec()
+                            self._metrics.streams.labels(route=route, outcome=response._metrics_outcome).inc()
             except Exception as exc:
                 await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-send-failed", req=req)
             else:
                 await self._close_request_dependencies(req, dependencies)
 
+            # Dependency teardown may attach a background container for the first time.
+            self._track_response(req, response)
             duration = time.perf_counter() - started
             route = str(req.scope.get("route_template", "<unmatched>"))
             log_event(
@@ -446,19 +544,23 @@ class Flasgo(RouteDecorators):
             contexts_reset = True
             if sent and response.background is not None:
                 response.background.bind_request_id(req.request_id)
-                if self._metrics is not None:
-                    response.background.bind_observer(self._metrics.observe_background)
-                await response.background()
+                observation = req.scope.get("flasgo.background_tasks", {}).get(response.background)
+                with observation.activate() if observation is not None else nullcontext():
+                    await response.background()
         finally:
             try:
                 await self._close_request_dependencies(req, dependencies, sys.exception())
             finally:
+                for observation in req.scope.get("flasgo.background_tasks", {}).values():
+                    observation.close()
                 if not contexts_reset:
                     _user_ctx.reset(user_token)
                     _session_ctx.reset(session_token)
                     _request_ctx.reset(req_token)
                 if instrument:
                     self._metrics.http_active.dec()
+                    if in_flight:
+                        self._metrics.http_in_flight.dec()
 
     async def _close_request_dependencies(
         self,
@@ -473,6 +575,10 @@ class Flasgo(RouteDecorators):
             self._log_security_event(logging.ERROR, "dependency-cleanup-failed", req=req)
 
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
+        with ExitStack() as cleanup:
+            await self._run_lifespan(scope, receive, send, cleanup)
+
+    async def _run_lifespan(self, scope: Scope, receive: Receive, send: Send, cleanup: ExitStack) -> None:
         """Handle ASGI lifespan startup and shutdown events for the application.
 
         Initializes the registered lifespan handler during startup, finalizes it during shutdown, and reports lifecycle completion or
@@ -501,6 +607,10 @@ class Flasgo(RouteDecorators):
                         self._lifespan_iterator = iterator
                     self._lifespan_active = True
                     if self._metrics is not None:
+                        if self.settings.METRICS_EVENT_LOOP_ENABLED and self._metrics.start_event_loop_sampler(
+                            self.settings.METRICS_EVENT_LOOP_INTERVAL_SECONDS
+                        ):
+                            cleanup.callback(self._metrics.stop_event_loop_sampler)
                         self._metrics.observe_lifespan("startup", "success")
                     await send({"type": "lifespan.startup.complete"})
                 except Exception:
@@ -1275,13 +1385,17 @@ class Flasgo(RouteDecorators):
                 break
         return uuid4().hex
 
-    def _track_stream(self, req: Request, response: Response) -> None:
-        """Registers a streaming response for cleanup when the request ends.
+    def _track_response(self, req: Request, response: Response) -> None:
+        """Track response streams for cleanup and attached background work for metrics.
 
         Parameters:
                 req (Request): The current request.
                 response (Response): The response to track.
         """
+        if self._metrics is not None and req.path != self.settings.METRICS_PATH and response.background is not None:
+            tracked_background = req.scope.setdefault("flasgo.background_tasks", {})
+            if response.background not in tracked_background:
+                tracked_background[response.background] = response.background._observe(self._metrics)
         if not isinstance(response, StreamingResponse):
             return
         tracked = req.scope.setdefault("flasgo.streams", set())
@@ -1293,7 +1407,7 @@ class Flasgo(RouteDecorators):
     async def _prepare_response(self, req: Request, response: Response) -> None:
         """Prepare an HTTP response with request, security, CORS, session, CSRF, and finalization metadata."""
         if isinstance(response, StreamingResponse) and response.receive is None:
-            self._track_stream(req, response)
+            self._track_response(req, response)
             await req.body()
             response.receive = req.receive
         response.headers.setdefault("x-request-id", req.request_id)
@@ -1314,7 +1428,7 @@ class Flasgo(RouteDecorators):
                 ensure_csrf_cookie(req, response, self.security, session_token=session_token)
         response.prepare()
 
-    def _handle_metrics_request(self, req: Request) -> Response | None:
+    async def _handle_metrics_request(self, req: Request) -> Response | None:
         if self._metrics is None or req.path != self.settings.METRICS_PATH:
             return None
         if req.method not in {"GET", "HEAD"}:
@@ -1344,7 +1458,7 @@ class Flasgo(RouteDecorators):
                 status_code=401,
                 headers={"www-authenticate": "Bearer"},
             )
-        body, content_type = self._metrics.render(req.headers.get("accept"))
+        body, content_type = await asyncio.to_thread(self._metrics.render, req.headers.get("accept"))
         return Response(
             body=body,
             headers={"vary": "accept"},
@@ -1408,7 +1522,8 @@ class Flasgo(RouteDecorators):
             self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
             return _security_rate_limit_response()
         try:
-            identity = await _maybe_await(backend(req))
+            with self._backend_operation(req, "authentication", "authenticate"):
+                identity = await _maybe_await(backend(req))
         except Exception:
             self._log_security_event(logging.ERROR, "docs-auth-backend-error", req=req)
             if self._register_security_failure(req):
@@ -1519,6 +1634,11 @@ class Flasgo(RouteDecorators):
                 raise ValueError("WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths.")
         if not self.settings.METRICS_PATH.startswith("/"):
             raise ValueError("METRICS_PATH must start with '/'.")
+        if not isinstance(self.settings.METRICS_EVENT_LOOP_ENABLED, bool):
+            raise ValueError("METRICS_EVENT_LOOP_ENABLED must be a boolean.")
+        interval = self.settings.METRICS_EVENT_LOOP_INTERVAL_SECONDS
+        if isinstance(interval, bool) or not isinstance(interval, int | float) or not 0.01 <= interval <= 60:
+            raise ValueError("METRICS_EVENT_LOOP_INTERVAL_SECONDS must be between 0.01 and 60.")
         if self.settings.METRICS_ENABLED:
             token = self.settings.METRICS_BEARER_TOKEN
             if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
@@ -1548,7 +1668,7 @@ class Flasgo(RouteDecorators):
                 status_code=400,
             )
 
-        metrics_response = self._handle_metrics_request(req)
+        metrics_response = await self._handle_metrics_request(req)
         if metrics_response is not None:
             req.scope["route_template"] = self.settings.METRICS_PATH
             return metrics_response
@@ -1652,7 +1772,7 @@ class Flasgo(RouteDecorators):
 
         raw_response = await self._call_endpoint(req, match)
         if isinstance(raw_response, Response):
-            self._track_stream(req, raw_response)
+            self._track_response(req, raw_response)
         response = (
             contract_response(raw_response, match.response_model, req) if match.response_model is not None else to_response(raw_response)
         )
@@ -1696,7 +1816,8 @@ class Flasgo(RouteDecorators):
             )
             for index, rule in indexed_rules
         ]
-        decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
+        with self._backend_operation(req, "rate_limit", "check_batch"):
+            decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
 
         # Process decisions
         allowed_decisions = []
@@ -1725,10 +1846,10 @@ class Flasgo(RouteDecorators):
                 Response: The response produced by the after-request middleware chain.
         """
         current = response
-        self._track_stream(req, current)
+        self._track_response(req, current)
         for fn in self._after:
             current = to_response(await _maybe_await(fn(req, current)))
-            self._track_stream(req, current)
+            self._track_response(req, current)
         return current
 
     async def _call_endpoint(self, req: Request, match: MatchResult) -> ResponseValue:
@@ -1794,6 +1915,7 @@ class Flasgo(RouteDecorators):
         Returns:
             Response: The HTTP response representing the exception.
         """
+        self._observe_rejection_exception(req, exc)
         if isinstance(exc, StoreUnavailable):
             req.scope["flasgo.storage_failed"] = True
             self._log_security_event(logging.ERROR, "shared-storage-unavailable", req=req)
@@ -1866,7 +1988,8 @@ class Flasgo(RouteDecorators):
             ):
                 return Session({})
             tokens = req.cookie_values(self.security.session_cookie_name)
-            return await self._session_backend.load(tokens[0] if len(tokens) == 1 else None)
+            with self._backend_operation(req, "session", "load"):
+                return await self._session_backend.load(tokens[0] if len(tokens) == 1 else None)
         token = req.cookies.get(self.security.session_cookie_name)
         if not token:
             return Session({})
@@ -1889,7 +2012,8 @@ class Flasgo(RouteDecorators):
         if not isinstance(current, Session) or not current.modified:
             return req.cookies.get(self.security.session_cookie_name)
         if self._session_backend is not None:
-            token = await self._session_backend.save(current, max_age=self.security.session_cookie_max_age) or ""
+            with self._backend_operation(req, "session", "save"):
+                token = await self._session_backend.save(current, max_age=self.security.session_cookie_max_age) or ""
             response.set_cookie(
                 self.security.session_cookie_name,
                 token,
@@ -1947,7 +2071,8 @@ class Flasgo(RouteDecorators):
             return _AuthDenial("rate-limited", anonymous)
 
         try:
-            authenticated = await _maybe_await(backend(req))
+            with self._backend_operation(req, "authentication", "authenticate"):
+                authenticated = await _maybe_await(backend(req))
         except Exception:
             self._log_security_event(logging.ERROR, "auth-backend-error", req=req)
             if self._register_security_failure(req):
@@ -2007,7 +2132,10 @@ class Flasgo(RouteDecorators):
             count = 0
         count += 1
         self._security_failures[client] = (start, count)
-        return count > limit
+        if count > limit:
+            self._observe_rejection(req, "security_rate_limit")
+            return True
+        return False
 
     def _security_failure_is_limited(self, req: Request) -> bool:
         limit = self.security.security_failure_rate_limit
@@ -2023,9 +2151,28 @@ class Flasgo(RouteDecorators):
         if time.monotonic() - start >= self.security.security_failure_window_seconds:
             self._security_failures.pop(client, None)
             return False
-        return count >= limit
+        if count >= limit:
+            self._observe_rejection(req, "security_rate_limit")
+            return True
+        return False
 
     def _log_security_event(self, level: int, event: str, *, req: Request) -> None:
+        if self._metrics is not None:
+            if event in {"metrics-auth-failed", "metrics-auth-throttled"}:
+                reason = "throttled" if event == "metrics-auth-throttled" else "invalid_credentials"
+                self._metrics.metrics_auth_failures.labels(reason=reason).inc()
+            elif event in _INTERNAL_ERROR_EVENTS:
+                phase, reason = _INTERNAL_ERROR_EVENTS[event]
+                self._metrics.internal_errors.labels(phase=phase, reason=reason).inc()
+            elif event == "permission-denied":
+                current = req.scope.get("user")
+                reason = "permission" if isinstance(current, User) and current.is_authenticated else "authentication"
+                self._observe_rejection(req, reason)
+            elif event in _REJECTION_EVENTS:
+                reason = _REJECTION_EVENTS[event]
+                if event == "rate-limit-exceeded" and req.scope.get("flasgo.rate_limit_capacity"):
+                    reason = "capacity"
+                self._observe_rejection(req, reason)
         if not self.security.log_security_events:
             return
         log_event(
@@ -2037,6 +2184,22 @@ class Flasgo(RouteDecorators):
             route=req.scope.get("route_template", req.path),
             client=req.client_ip,
         )
+
+    def _observe_rejection(self, req: Request, reason: str) -> None:
+        if self._metrics is None or req.path == self.settings.METRICS_PATH or req.scope.get("flasgo.websocket_upgrade"):
+            return
+        observed = req.scope.setdefault("flasgo.metric_rejections", set())
+        if reason not in observed:
+            observed.add(reason)
+            self._metrics.http_rejections.labels(route=str(req.scope.get("route_template", "<unmatched>")), reason=reason).inc()
+
+    def _observe_rejection_exception(self, req: Request, exc: Exception) -> None:
+        if isinstance(exc, _RequestRejection):
+            self._observe_rejection(req, exc.reason)
+        elif isinstance(exc, RequestValidationError):
+            self._observe_rejection(req, "validation")
+        elif isinstance(exc, _StoreCapacityExceeded):
+            self._observe_rejection(req, "capacity")
 
     async def _evaluate_permission(
         self,
