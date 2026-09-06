@@ -28,6 +28,15 @@ from flasgo.routing import routes_overlap
 from flasgo.security import SecurityConfig, build_set_cookie
 
 
+async def _drain_stream_cleanups() -> None:
+    """Let released producers finish and wait for cleanup callbacks before closing their loop."""
+    async with asyncio.timeout(2):
+        await asyncio.sleep(0)
+        # Process-wide cleanup callbacks do not expose a completion event.
+        while streaming_module._active_cleanups or streaming_module._pending_cleanups:  # noqa: ASYNC110
+            await asyncio.sleep(0)
+
+
 @pytest.mark.parametrize("codepoint", [*range(0x20), 0x7F], ids=lambda value: f"U+{value:04X}")
 def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
     """Reject every C0 control and DEL through cookie builders, raw headers, and late mutations."""
@@ -196,10 +205,7 @@ def test_cleanup_queue_overflow_is_explicit_and_pending_work_drains(monkeypatch:
             assert streaming_module._active_cleanups == 1
             assert len(streaming_module._pending_cleanups) == 1
             release.set()
-            for _ in range(20):
-                await asyncio.sleep(0)
-                if streaming_module._active_cleanups == 0:
-                    break
+            await _drain_stream_cleanups()
             assert entered == ["active", "pending", "underlying"]
             assert not streaming_module._pending_cleanups
             assert streaming_module._active_cleanups == 0
@@ -208,7 +214,10 @@ def test_cleanup_queue_overflow_is_explicit_and_pending_work_drains(monkeypatch:
             assert observed == []
         finally:
             release.set()
-            loop.set_exception_handler(old_handler)
+            try:
+                await _drain_stream_cleanups()
+            finally:
+                loop.set_exception_handler(old_handler)
 
     asyncio.run(run())
 
@@ -240,9 +249,6 @@ def test_deferred_cleanup_preserves_owning_loop_and_context(monkeypatch: pytest.
                 except asyncio.CancelledError:
                     await release.wait()
 
-        marker.set("active")
-        await StreamingResponse(ActiveSource(), cleanup_timeout=0.001).aclose()
-
         def worker() -> None:
             """Run the queued response in a separate event-loop thread."""
 
@@ -259,19 +265,30 @@ def test_deferred_cleanup_preserves_owning_loop_and_context(monkeypatch: pytest.
                         closed.set()
 
                 marker.set("pending")
-                await StreamingResponse(PendingSource()).aclose()
-                main_loop.call_soon_threadsafe(queued.set)
-                await asyncio.wait_for(closed.wait(), 2)
-                assert observations == [(True, "pending")]
+                try:
+                    await StreamingResponse(PendingSource()).aclose()
+                    main_loop.call_soon_threadsafe(queued.set)
+                    await asyncio.wait_for(closed.wait(), 2)
+                    assert observations == [(True, "pending")]
+                finally:
+                    main_loop.call_soon_threadsafe(release.set)
+                    await _drain_stream_cleanups()
 
             asyncio.run(other_loop())
 
-        task = asyncio.create_task(asyncio.to_thread(worker))
+        task = None
         try:
+            marker.set("active")
+            await StreamingResponse(ActiveSource(), cleanup_timeout=0.001).aclose()
+            task = asyncio.create_task(asyncio.to_thread(worker))
             await asyncio.wait_for(queued.wait(), 2)
         finally:
             release.set()
-        await asyncio.wait_for(task, 3)
+            try:
+                if task is not None:
+                    await asyncio.wait_for(task, 3)
+            finally:
+                await _drain_stream_cleanups()
         assert not streaming_module._pending_cleanups
         assert streaming_module._active_cleanups == 0
 
@@ -862,10 +879,12 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
         """Exercise direct cleanup, send teardown, and NDJSON timeout forwarding."""
         source = ResistantStream()
         response = StreamingResponse(source, cleanup_timeout=0.01)
-        await asyncio.wait_for(response.aclose(), timeout=0.1)
-        assert response._metrics_outcome == "cleanup_timeout"
-        source.release.set()
-        await asyncio.sleep(0)
+        try:
+            await asyncio.wait_for(response.aclose(), timeout=0.1)
+            assert response._metrics_outcome == "cleanup_timeout"
+        finally:
+            source.release.set()
+            await _drain_stream_cleanups()
 
         streamed_source = ResistantStream()
         streamed_response = StreamingResponse(streamed_source, cleanup_timeout=0.01)
@@ -874,10 +893,12 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
             """Accept ASGI output without adding transport delay."""
             return None
 
-        await asyncio.wait_for(streamed_response.send(send), timeout=0.1)
-        assert streamed_response._metrics_outcome == "cleanup_timeout"
-        streamed_source.release.set()
-        await asyncio.sleep(0)
+        try:
+            await asyncio.wait_for(streamed_response.send(send), timeout=0.1)
+            assert streamed_response._metrics_outcome == "cleanup_timeout"
+        finally:
+            streamed_source.release.set()
+            await _drain_stream_cleanups()
 
         async def items() -> AsyncIterator[object]:
             """Yield one JSON-serializable item for the NDJSON configuration check."""
@@ -927,10 +948,12 @@ def test_stream_teardown_is_bounded_after_duration_or_disconnect(disconnect: boo
 
         response.receive = receive
         expected = ConnectionError if disconnect else TimeoutError
-        with pytest.raises(expected):
-            await asyncio.wait_for(response.send(send), timeout=0.1)
-        source.release.set()
-        await asyncio.sleep(0)
+        try:
+            with pytest.raises(expected):
+                await asyncio.wait_for(response.send(send), timeout=0.1)
+        finally:
+            source.release.set()
+            await _drain_stream_cleanups()
 
     asyncio.run(run())
 
@@ -982,10 +1005,14 @@ def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> 
             with pytest.raises(ConnectionError):
                 await asyncio.wait_for(response.send(send), timeout=0.1)
             source.release.set()
-            await asyncio.sleep(0.01)
+            await _drain_stream_cleanups()
             assert observed == []
         finally:
-            loop.set_exception_handler(previous_handler)
+            source.release.set()
+            try:
+                await _drain_stream_cleanups()
+            finally:
+                loop.set_exception_handler(previous_handler)
 
     asyncio.run(run())
 
@@ -1022,19 +1049,18 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
         responses = [
             StreamingResponse(ResistantCloser(release), cleanup_timeout=0.001) for _ in range(streaming_module._MAX_ACTIVE_CLEANUPS + 2)
         ]
-        for response in responses:
-            await response.aclose()
-        assert ResistantCloser.entered == streaming_module._MAX_ACTIVE_CLEANUPS
-        assert streaming_module._active_cleanups == streaming_module._MAX_ACTIVE_CLEANUPS
-        assert len(streaming_module._pending_cleanups) == 2
-        for response in responses[-2:]:
-            await response.aclose()
-        assert len(streaming_module._pending_cleanups) == 2
-        release.set()
-        for _ in range(10):
-            if streaming_module._active_cleanups == 0:
-                break
-            await asyncio.sleep(0)
+        try:
+            for response in responses:
+                await response.aclose()
+            assert ResistantCloser.entered == streaming_module._MAX_ACTIVE_CLEANUPS
+            assert streaming_module._active_cleanups == streaming_module._MAX_ACTIVE_CLEANUPS
+            assert len(streaming_module._pending_cleanups) == 2
+            for response in responses[-2:]:
+                await response.aclose()
+            assert len(streaming_module._pending_cleanups) == 2
+        finally:
+            release.set()
+            await _drain_stream_cleanups()
         assert streaming_module._active_cleanups == 0
         assert ResistantCloser.entered == streaming_module._MAX_ACTIVE_CLEANUPS + 2
         assert not streaming_module._pending_cleanups

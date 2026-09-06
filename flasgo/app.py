@@ -1023,10 +1023,7 @@ class Flasgo(RouteDecorators):
         ):
             raise ValueError(f"WebSocket route {path!r} conflicts with an existing route pattern.")
         self._websocket_routes.append(route)
-        self._websocket_routes.sort(
-            key=lambda registered: (registered.specificity, registered.endpoint in self._route_auth),
-            reverse=True,
-        )
+        self._websocket_routes.sort(key=self._route_precedence, reverse=True)
 
     def lifespan(self, fn: LifespanHandler) -> LifespanHandler:
         """
@@ -1083,6 +1080,10 @@ class Flasgo(RouteDecorators):
             self._auth_backend_schemes[normalized] = validated_scheme
         self._openapi_dirty = True
 
+    def _route_precedence(self, route: Route | WebSocketRoute) -> tuple[tuple[int, int, int], bool]:
+        """Order both protocols by specificity, then by endpoint authorization."""
+        return route.specificity, route.endpoint in self._route_auth
+
     def authorize[T: Callable[..., Any]](
         self,
         *permissions: PermissionLike,
@@ -1100,14 +1101,8 @@ class Flasgo(RouteDecorators):
                 backend=backend_name,
                 permissions=route_permissions,
             )
-            self._routes.sort(
-                key=lambda registered: (registered.specificity, registered.endpoint in self._route_auth),
-                reverse=True,
-            )
-            self._websocket_routes.sort(
-                key=lambda registered: (registered.specificity, registered.endpoint in self._route_auth),
-                reverse=True,
-            )
+            self._routes.sort(key=self._route_precedence, reverse=True)
+            self._websocket_routes.sort(key=self._route_precedence, reverse=True)
             self._openapi_dirty = True
             return endpoint
 
@@ -1205,10 +1200,7 @@ class Flasgo(RouteDecorators):
                 "Reuse parameter names for disjoint methods and avoid overlapping methods."
             )
         self._routes.append(route)
-        self._routes.sort(
-            key=lambda registered: (registered.specificity, registered.endpoint in self._route_auth),
-            reverse=True,
-        )
+        self._routes.sort(key=self._route_precedence, reverse=True)
         if resolved_cors is not None:
             self._has_cors_routes = True
         self._openapi_dirty = True

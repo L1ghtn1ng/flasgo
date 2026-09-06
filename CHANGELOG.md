@@ -42,6 +42,8 @@
 - Security-failure throttling uses bounded, amortized state and fails closed at capacity without evicting active
   clients.
 - Routes with multiple greedy `path` converters are rejected before they can create expensive backtracking matches.
+- Streaming regression tests release and drain cancellation-resistant cleanup even when assertions fail, preventing
+  test shutdown hangs and leaked cleanup capacity.
 
 ## [0.9.0] - 2026-09-06
 
