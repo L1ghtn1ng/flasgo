@@ -124,9 +124,7 @@ class SSRFGuard:
         pinned_address = sorted(addresses, key=lambda item: item.packed)[0] if addresses else None
         return SSRFResolvedURL(
             original_url=url,
-            url=_replace_hostname(parsed, pinned_address, port=port, explicit_port=explicit_port)
-            if pinned_address is not None
-            else url,
+            url=_replace_hostname(parsed, pinned_address, port=port, explicit_port=explicit_port) if pinned_address is not None else url,
             hostname=host,
             port=port,
             address=pinned_address,

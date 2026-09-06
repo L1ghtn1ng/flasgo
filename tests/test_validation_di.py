@@ -287,9 +287,7 @@ def test_openapi_uses_models_dependencies_forms_and_validation_contract() -> Non
         }
     ]
     assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/CreateWidget"}
-    assert operation["responses"]["422"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/RequestValidationError"
-    }
+    assert operation["responses"]["422"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/RequestValidationError"}
     assert spec["components"]["schemas"]["CreateWidget"]["required"] == ["name", "quantity"]
 
     form_app = Flasgo(settings={"ENABLE_DOCS": True})

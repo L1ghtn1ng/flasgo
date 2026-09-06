@@ -460,9 +460,7 @@ def test_db_commands_delegate_to_alembic(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 @pytest.mark.parametrize("option", ["-o", "--output"])
-def test_routes_output_is_valid_json_despite_app_import_output(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], option: str
-) -> None:
+def test_routes_output_is_valid_json_despite_app_import_output(tmp_path: Path, capsys: pytest.CaptureFixture[str], option: str) -> None:
     app_file = tmp_path / "noisy_app.py"
     app_file.write_text("print('application startup')\nfrom flasgo import Flasgo\napp = Flasgo()\n")
     output = tmp_path / "snapshots" / "policy.json"

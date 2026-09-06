@@ -259,10 +259,7 @@ def to_response(value: ResponseValue) -> Response:
         from .validation import to_jsonable
 
         return Response.json(to_jsonable(value))
-    msg = (
-        f"Unsupported response type: {type(value)!r}. "
-        "Return a Response, str, bytes, mapping, list, or a (body, status[, headers]) tuple."
-    )
+    msg = f"Unsupported response type: {type(value)!r}. Return a Response, str, bytes, mapping, list, or a (body, status[, headers]) tuple."
     raise TypeError(msg)
 
 

@@ -225,9 +225,7 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
         if route.public and auth is not None:
             issues.append(PolicyIssue("FG010", f"Route {route.raw_path} declares public access and authorization.", "error"))
         elif not route.public and auth is None:
-            issues.append(
-                PolicyIssue("FG011", f"Route {route.raw_path} has no declared access policy; use public=True or authorize().")
-            )
+            issues.append(PolicyIssue("FG011", f"Route {route.raw_path} has no declared access policy; use public=True or authorize()."))
     return issues
 
 

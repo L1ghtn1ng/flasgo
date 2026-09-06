@@ -69,7 +69,7 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 135
+line-length = 140
 indent-width = 4
 target-version = "py314"
 src = ["flasgo", "tests"]

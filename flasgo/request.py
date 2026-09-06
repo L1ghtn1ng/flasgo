@@ -101,9 +101,7 @@ def _parse_content_type(header_value: str | None) -> tuple[str, dict[str, str]]:
         return "", {}
     message = BytesParser(policy=default).parsebytes(f"Content-Type: {header_value}\r\n\r\n".encode("latin-1"))
     content_type = message.get_content_type().lower()
-    params = {
-        key.lower(): value for key, value in message.get_params(header="content-type", failobj=[]) if key.lower() != content_type
-    }
+    params = {key.lower(): value for key, value in message.get_params(header="content-type", failobj=[]) if key.lower() != content_type}
     params.pop("", None)
     return content_type, params
 
@@ -203,9 +201,7 @@ def _parse_multipart_form(
     # actual delimiter lines with a cheap raw scan before parsing.
     if _count_multipart_part_delimiters(body, boundary_bytes) > max_parts:
         raise HTTPException(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.")
-    message = BytesParser(policy=default).parsebytes(
-        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body
-    )
+    message = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body)
     if not message.is_multipart():
         raise HTTPException(
             400,

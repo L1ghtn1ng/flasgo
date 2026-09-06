@@ -203,9 +203,7 @@ def _compile_callable(
         annotation = hints.get(parameter.name, parameter.annotation)
         annotation, marker = _split_marker(annotation, endpoint=endpoint, parameter=parameter.name)
         if marker is not None and _contains_forward_ref(annotation):
-            raise TypeError(
-                f"Could not resolve the marked annotation for parameter {parameter.name!r} on {_callable_name(endpoint)!r}."
-            )
+            raise TypeError(f"Could not resolve the marked annotation for parameter {parameter.name!r} on {_callable_name(endpoint)!r}.")
         default = parameter.default
 
         if parameter.name in path_names:

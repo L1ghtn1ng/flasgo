@@ -132,9 +132,7 @@ def test_deployment_check_distinguishes_declared_public_routes() -> None:
     assert [issue.code for issue in deployment_issues(app)] == ["FG011"]
 
 
-def test_cli_policy_snapshot_and_comparison(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_policy_snapshot_and_comparison(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     app = Flasgo()
     app.get("/", public=True)(lambda: "ok")
     monkeypatch.setattr(cli, "load_app", lambda *args, **kwargs: app)

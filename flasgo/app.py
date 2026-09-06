@@ -1522,9 +1522,7 @@ class Flasgo(RouteDecorators):
         if self.settings.METRICS_ENABLED:
             token = self.settings.METRICS_BEARER_TOKEN
             if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
-                raise ValueError(
-                    "METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled."
-                )
+                raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled.")
             if self.settings.METRICS_PATH in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}:
                 raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
 
@@ -1656,9 +1654,7 @@ class Flasgo(RouteDecorators):
         if isinstance(raw_response, Response):
             self._track_stream(req, raw_response)
         response = (
-            contract_response(raw_response, match.response_model, req)
-            if match.response_model is not None
-            else to_response(raw_response)
+            contract_response(raw_response, match.response_model, req) if match.response_model is not None else to_response(raw_response)
         )
         response.headers.update(rate_limit_result)
         return await self._run_after_middleware(req, response)
@@ -1685,9 +1681,7 @@ class Flasgo(RouteDecorators):
         indexed_rules = [
             (index, rule)
             for index, rule in enumerate(endpoint_rate_limits(endpoint))
-            if phase == "all"
-            or (phase == "pre_auth" and rule.key_func is None)
-            or (phase == "post_auth" and rule.key_func is not None)
+            if phase == "all" or (phase == "pre_auth" and rule.key_func is None) or (phase == "post_auth" and rule.key_func is not None)
         ]
         if not indexed_rules:
             return headers
@@ -2180,9 +2174,7 @@ def _security_rate_limit_response() -> Response:
 
 def _websocket_rate_limit_headers(response: Response) -> dict[str, str]:
     return {
-        name: value
-        for name, value in response.headers.items()
-        if name == "retry-after" or name.startswith(("ratelimit-", "x-ratelimit-"))
+        name: value for name, value in response.headers.items() if name == "retry-after" or name.startswith(("ratelimit-", "x-ratelimit-"))
     }
 
 

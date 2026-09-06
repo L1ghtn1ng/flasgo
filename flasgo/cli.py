@@ -200,9 +200,7 @@ def _check_command(args: argparse.Namespace) -> int:
             seen_names.add(route.name)
 
     errors.extend(
-        f"missing authentication backend: {auth.backend}"
-        for auth in app._route_auth.values()
-        if auth.backend not in app._auth_backends
+        f"missing authentication backend: {auth.backend}" for auth in app._route_auth.values() if auth.backend not in app._auth_backends
     )
 
     internal_paths: set[str] = set()
@@ -211,9 +209,7 @@ def _check_command(args: argparse.Namespace) -> int:
     if app.settings.METRICS_ENABLED:
         internal_paths.add(app.settings.METRICS_PATH)
     errors.extend(
-        f"route conflicts with enabled internal endpoint: {route.raw_path}"
-        for route in app._routes
-        if route.raw_path in internal_paths
+        f"route conflicts with enabled internal endpoint: {route.raw_path}" for route in app._routes if route.raw_path in internal_paths
     )
 
     issues = [{"code": "registration", "severity": "error", "message": error} for error in sorted(set(errors))]
@@ -437,9 +433,7 @@ def _import_target(target: _ResolvedTarget) -> ModuleType:
     modules_before = dict(sys.modules)
     if cached_namespace is not None and not _namespace_matches_target(cached_namespace, target):
         _clear_namespace(namespace)
-    evicted_modules = (
-        _evict_cli_owned_modules(previous_root) if previous_root is not None and previous_root != target.import_root else {}
-    )
+    evicted_modules = _evict_cli_owned_modules(previous_root) if previous_root is not None and previous_root != target.import_root else {}
 
     try:
         module = importlib.import_module(target.module_name)

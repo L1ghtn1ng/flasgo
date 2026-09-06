@@ -205,9 +205,7 @@ class ServerSentEvent:
                 characters, or if retry is not an integer from 0 through 2,147,483,647.
         """
         for value in (self.event, self.id):
-            if value is not None and (
-                not isinstance(value, str) or len(value) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in value)
-            ):
+            if value is not None and (not isinstance(value, str) or len(value) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in value)):
                 raise ValueError("SSE event/id must be bounded strings without control characters.")
         if self.retry is not None and (
             isinstance(self.retry, bool) or not isinstance(self.retry, int) or not 0 <= self.retry <= 2_147_483_647

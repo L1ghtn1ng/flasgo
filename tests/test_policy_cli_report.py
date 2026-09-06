@@ -20,9 +20,7 @@ def test_text_policy_report_identifies_each_changed_route_and_global_section(
     assert cli.main(["check", "unused", "--against", str(baseline)]) == 1
     lines = capsys.readouterr().err.splitlines()
     assert "policy changed: controls" in lines
-    identifiers = [
-        json.loads(line.removeprefix("policy changed: routes ")) for line in lines if line.startswith("policy changed: routes ")
-    ]
+    identifiers = [json.loads(line.removeprefix("policy changed: routes ")) for line in lines if line.startswith("policy changed: routes ")]
     assert len(identifiers) == 3
     assert ["http", "/items", ["GET", "HEAD"]] in identifiers
     assert ["http", "/items", ["POST"]] in identifiers
