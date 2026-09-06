@@ -123,10 +123,11 @@ uv run uvicorn app:app --reload --host 127.0.0.1 --port 8000
 `app.run(...)` and `flasgo run` use Uvicorn's H11 implementation with proxy-header trust disabled, bounded HTTP
 request heads and WebSocket queues/messages, lifespan enabled, and per-message compression disabled. Flasgo also
 enforces `MAX_REQUEST_BODY_BYTES`, `MAX_REQUEST_HEAD_BYTES`, and `REQUEST_READ_TIMEOUT_SECONDS` inside the app so
-those limits remain active under another ASGI server. HTTP requests and WebSocket upgrades exceeding the head limit
-are rejected before OpenTelemetry tracing, routing, or session storage. When metrics are enabled, oversized HTTP
-requests still increment `http_rejections` and record the HTTP observation. The built-in runner is intended for local
-development; configure a production ASGI process explicitly for deployment.
+those limits remain active under another ASGI server. `Flasgo.__call__` routes oversized HTTP request heads directly
+to `_handle_http`, so they bypass OpenTelemetry tracing and are rejected before routing or session storage. When
+metrics are enabled, they still increment `http_rejections` and record the HTTP observation. Oversized WebSocket
+upgrades are rejected before OpenTelemetry tracing, routing, or session storage. The built-in runner is intended for
+local development; configure a production ASGI process explicitly for deployment.
 
 ## WebSockets, lifespan, and background tasks
 
