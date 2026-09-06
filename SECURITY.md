@@ -137,3 +137,22 @@ Flasgo ships with security features enabled by default, but deployment still mat
 - Put a reverse proxy or edge service in front of the app for TLS termination and network controls.
 
 Thank you for helping keep Flasgo secure.
+
+## Development-branch security boundaries
+
+The [application features guide](docs/application-features.md) documents blueprint permission inheritance, route-policy
+snapshots and deployment checks, dependency lifetimes, response contracts, streaming limits, and optional shared
+storage. Treat custom middleware/authentication and snapshots' application-owned permissions as review boundaries.
+Snapshots report configuration and cannot prove application authorization correctness.
+
+Use function-scoped dependencies for transactions that must finish before a success response. Generator cleanup must
+re-raise application errors and cooperate with cancellation. Streaming errors after headers terminate the stream;
+they cannot replace its status. Keep producers bounded, configure proxy limits, and avoid modifying cookies/sessions
+inside producers. Existing stream/WebSocket identities are not continuously revalidated after session revocation.
+
+For shared storage, use TLS and authentication remotely, separate namespaces, a noeviction policy, and appropriate
+availability/persistence controls. Monitor `shared-storage-unavailable`, `response-prepare-failed`,
+`dependency-cleanup-failed`, and response-send failure events. Backend outages fail closed; state lost by the storage
+server cannot be recovered by the framework. Session CAS conflicts return 409 and require application-aware handling
+rather than automatic replay of side effects. Rotate server-side identifiers after authentication/privilege changes.
+Do not expose or log session IDs. Preserve CSRF protection when moving session state to an external store.

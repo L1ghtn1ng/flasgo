@@ -163,7 +163,7 @@ async def create_job() -> Response:
     return response
 ```
 
-Background tasks run sequentially after the final buffered response is sent successfully. A task failure is logged
+Background tasks run sequentially after the complete response is sent successfully and request dependencies close. A task failure is logged
 and does not stop later tasks. Tasks are in-process best effort work, so use a durable queue for critical jobs.
 
 For cross-origin WebSockets, add exact origins such as `https://app.example.com` to
@@ -320,7 +320,8 @@ For protected HTTP and WebSocket routes, default IP-based rules execute before a
 not repeatedly invoke a backend. Rules with a custom `key_func` execute after successful authentication so they can
 use the authenticated identity. Repeated authentication failures are also subject to the security-failure limiter.
 
-The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. If the ASGI server provides no client identity, security-failure events are still logged but never throttle a shared "unknown" bucket, so one client cannot lock out the others; run behind a server that supplies peer addresses. In multi-process or multi-host production deployments, use a shared external limiter at the edge or a future shared-storage backend so all workers enforce the same quota.
+The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. If the ASGI server provides no client identity, security-failure events are still logged but never throttle a shared "unknown" bucket, so one client cannot lock out the others; run behind a server that supplies peer addresses. In multi-process or multi-host production deployments, use an edge limiter or the optional `RedisRateLimiter` so all workers enforce the same decorated route quota.
+See the [shared storage guide](docs/application-features.md#shared-quotas-and-server-side-sessions).
 
 ## Typed request data and dependencies
 
@@ -561,6 +562,27 @@ handing off.
   - `(body, status)` / `(body, status, headers)`
   - `Response`
   - dataclass instances (recursive JSON; underscore-prefixed fields are omitted at every dataclass level)
+
+## Application structure, contracts, and shared storage
+
+The current development branch adds the following opt-in APIs. See the
+[application features guide](docs/application-features.md) for complete examples, defaults, migration behavior,
+security boundaries, and testing instructions.
+
+- `Blueprint`: reusable HTTP route groups with nested prefixes, namespaced endpoints, additive permissions,
+  shared dependencies, and atomic registration through `Flasgo.register_blueprint`.
+- `url_for` and `Flasgo.url_for`: validated relative URL generation, also available in configured Jinja templates.
+- `Flasgo.policy_snapshot`, `flasgo routes --policy/--json`, and `flasgo check --deploy/--against/--json`:
+  inspect framework policy and review changes in CI without exporting secrets.
+- `Depends`: sync/async generator providers with function/request lifetimes and deterministic cleanup;
+  `Flasgo.override_dependencies` supplies context-local test overrides.
+- `response_model=` and `ResponseValidationError`: opt-in response validation and recursive public-field filtering
+  using dataclasses; existing untyped responses keep their behavior.
+- `StreamingResponse`, `EventSourceResponse`, `ServerSentEvent`, and `NDJSONResponse`: bounded async streaming,
+  safe JSON event framing, disconnect cleanup, and incremental tests through `TestClient.astream`.
+- `RedisStore`, `RedisRateLimiter`, `ServerSideSessions`, `MemoryStore`, and `StoreUnavailable`: optional shared
+  route quotas and revocable server-side sessions, with atomic updates and explicit failure behavior.
+  Install `flasgo[redis]` for the Redis/Valkey client adapter. Signed-cookie sessions remain the default.
 
 ## Flask-style globals
 
