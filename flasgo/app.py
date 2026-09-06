@@ -359,6 +359,7 @@ class Flasgo(RouteDecorators):
         return self._metrics.backend_operation(component, operation)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Dispatch ASGI requests, rejecting oversized heads before tracing or trusting request IDs."""
         if scope.get("type") in {"http", "websocket"}:
             oversized_head = _request_head_size(scope) > self.security.max_request_head_bytes
             scope["request_id"] = uuid4().hex if oversized_head else self._request_id_for_scope(scope)
@@ -1087,11 +1088,13 @@ class Flasgo(RouteDecorators):
         *permissions: PermissionLike,
         backend: str = "default",
     ) -> Callable[[T], T]:
+        """Attach permission requirements to an endpoint using a registered authentication backend."""
         backend_name = backend.strip()
         if not backend_name:
             raise ValueError("Auth backend name must not be empty. Pass the name used in register_auth_backend(...).")
 
         def decorator(endpoint: T) -> T:
+            """Record endpoint authorization and refresh precedence for already registered routes."""
             route_permissions = permissions or (IsAuthenticated(),)
             self._route_auth[endpoint] = RouteAuth(
                 backend=backend_name,

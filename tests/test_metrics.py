@@ -34,6 +34,7 @@ def _scrape(app: Flasgo, *, accept: str | None = None) -> str:
 
 
 def test_http_metrics_include_runtime_status_latency_and_response_size() -> None:
+    """Record response measurements and version metadata without unbounded method labels."""
     app = _app()
 
     @app.post("/items/<int:item_id>")

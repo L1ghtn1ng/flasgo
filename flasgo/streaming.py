@@ -140,6 +140,7 @@ class StreamingResponse(Response):
         self._closed = True
 
         def expire() -> None:
+            """Cancel deferred cleanup at its deadline while recording the timeout outcome."""
             if not cleanup.done():
                 self._metrics_outcome = "cleanup_timeout"
                 cleanup.cancel()
@@ -147,6 +148,7 @@ class StreamingResponse(Response):
         timer = cleanup.get_loop().call_later(self.cleanup_timeout, expire) if deferred else None
 
         def done(task: asyncio.Future[Any]) -> None:
+            """Cancel the deadline timer and transfer the completed cleanup slot."""
             if timer is not None:
                 timer.cancel()
             _cleanup_slot_done(task)

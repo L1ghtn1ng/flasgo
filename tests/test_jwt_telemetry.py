@@ -223,6 +223,7 @@ def test_opentelemetry_does_not_export_rejected_host_values() -> None:
 
 
 def test_opentelemetry_excludes_route_templates_for_method_not_allowed_requests() -> None:
+    """Exclude sensitive route templates from tracing even when the request method is rejected."""
     app, exporter = _tracing_app(excluded_paths={"/reset/<token>"})
 
     @app.get("/reset/<token>")

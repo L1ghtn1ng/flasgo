@@ -33,6 +33,7 @@ def build_set_cookie(
     same_site: str = "Lax",
     path: str = "/",
 ) -> str:
+    """Build a Set-Cookie value after validating its name, value, path, and SameSite policy."""
     validate_cookie_name(name)
     _validate_cookie_value(value)
     _validate_cookie_path(path)
@@ -70,6 +71,7 @@ def _default_secret_key() -> str:
 
 
 def _validate_cookie_value(value: str) -> None:
+    """Reject cookie values containing forbidden control characters or separators."""
     if any(char in value for char in ("\r", "\n", "\x00")):
         raise ValueError("Invalid cookie value: contains control characters.")
     if any(char in value for char in (";", ",", " ", "\t")):
@@ -212,6 +214,7 @@ def ensure_csrf_cookie(
     *,
     session_token: str | None = None,
 ) -> None:
+    """Reuse a valid session-bound CSRF cookie or issue a fresh token."""
     if session_token is None:
         session_token = _single_request_cookie(request, config.session_cookie_name)
     existing = _single_request_cookie(request, config.csrf_cookie_name)
@@ -230,6 +233,7 @@ def ensure_csrf_cookie(
 
 
 def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
+    """Validate unsafe requests against origin policy and one matching cookie/header token pair."""
     if request.method in config.csrf_safe_methods:
         return True
     if config.csrf_check_origin and not _csrf_origin_is_valid(request, config):
@@ -249,6 +253,7 @@ def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
 
 
 def _single_request_cookie(request: Request, name: str) -> str | None:
+    """Return a cookie only when exactly one occurrence is present."""
     values = request.cookie_values(name)
     return values[0] if len(values) == 1 else None
 
@@ -295,6 +300,7 @@ def apply_security_headers(response: Response, config: SecurityConfig) -> None:
 
 
 def _csrf_origin_is_valid(request: Request, config: SecurityConfig) -> bool:
+    """Apply origin policy while rejecting duplicate Origin or Referer headers."""
     origins = request.header_values("origin")
     referers = request.header_values("referer")
     if len(origins) > 1 or len(referers) > 1:

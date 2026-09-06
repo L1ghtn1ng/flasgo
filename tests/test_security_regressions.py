@@ -38,6 +38,7 @@ def test_intersecting_route_ties_are_rejected_for_both_protocols(converter: str,
     app = Flasgo(settings={"CSRF_ENABLED": False})
 
     def endpoint(value: str) -> str:
+        """Echo the shared parameter for either HTTP registration order."""
         return value
 
     app.get(paths[0])(endpoint)
@@ -48,6 +49,7 @@ def test_intersecting_route_ties_are_rejected_for_both_protocols(converter: str,
     assert app.test_client().post("/foo/bar").status_code == 200
 
     async def socket(value: str) -> None:
+        """Provide a WebSocket endpoint for registration-only overlap checks."""
         return None
 
     app.add_websocket_route(paths[0], socket)
@@ -81,20 +83,25 @@ def test_cleanup_queue_overflow_is_explicit_and_pending_work_drains(monkeypatch:
     monkeypatch.setattr(streaming_module, "_MAX_PENDING_CLEANUPS", 1)
 
     async def run() -> None:
+        """Saturate active and pending cleanup, then verify automatic drain and explicit overflow."""
         release = asyncio.Event()
         entered: list[str] = []
 
         class Source:
             def __init__(self, name: str) -> None:
+                """Label each source so finalization order can be observed."""
                 self.name = name
 
             def __aiter__(self) -> Source:
+                """Return this source as its own async iterator."""
                 return self
 
             async def __anext__(self) -> bytes:
+                """End iteration immediately so the test isolates cleanup behavior."""
                 raise StopAsyncIteration
 
             async def aclose(self) -> None:
+                """Record closure, hold active capacity, and fail the queued primary finalizer."""
                 entered.append(self.name)
                 if self.name == "active":
                     try:
@@ -145,18 +152,22 @@ def test_deferred_cleanup_preserves_owning_loop_and_context(monkeypatch: pytest.
     marker: ContextVar[str] = ContextVar("cleanup_owner", default="unset")
 
     async def run() -> None:
+        """Release capacity on one loop and verify queued cleanup executes on its original loop."""
         release = asyncio.Event()
         queued = asyncio.Event()
         main_loop = asyncio.get_running_loop()
 
         class ActiveSource:
             def __aiter__(self) -> ActiveSource:
+                """Return the source whose cleanup occupies the sole active slot."""
                 return self
 
             async def __anext__(self) -> bytes:
+                """End iteration without producing a response body."""
                 raise StopAsyncIteration
 
             async def aclose(self) -> None:
+                """Hold the cleanup slot until explicitly released, surviving one cancellation."""
                 try:
                     await release.wait()
                 except asyncio.CancelledError:
@@ -166,13 +177,17 @@ def test_deferred_cleanup_preserves_owning_loop_and_context(monkeypatch: pytest.
         await StreamingResponse(ActiveSource(), cleanup_timeout=0.001).aclose()
 
         def worker() -> None:
+            """Run the queued response in a separate event-loop thread."""
+
             async def other_loop() -> None:
+                """Queue a finalizer under its own context and await its completion."""
                 owner = asyncio.get_running_loop()
                 closed = asyncio.Event()
                 observations: list[tuple[bool, str]] = []
 
                 class PendingSource(ActiveSource):
                     async def aclose(self) -> None:
+                        """Record the execution loop and context before signalling finalization."""
                         observations.append((asyncio.get_running_loop() is owner, marker.get()))
                         closed.set()
 
@@ -198,20 +213,24 @@ def test_deferred_cleanup_preserves_owning_loop_and_context(monkeypatch: pytest.
 
 class CountingMemoryStore(MemoryStore):
     def __init__(self) -> None:
+        """Initialize counters for session reads and creation attempts."""
         super().__init__()
         self.get_calls = 0
         self.create_calls = 0
 
     async def get(self, key: str) -> bytes | None:
+        """Count backend reads before delegating to the memory store."""
         self.get_calls += 1
         return await super().get(key)
 
     async def create(self, key: str, value: bytes, ttl: int) -> bool:
+        """Count session creation attempts before delegating to the memory store."""
         self.create_calls += 1
         return await super().create(key, value, ttl)
 
 
 def test_all_boolean_settings_reject_wrong_typed_values() -> None:
+    """Reject wrongly typed boolean settings at every construction and mutation entry point."""
     boolean_settings = [name for name, annotation in get_type_hints(Settings).items() if annotation is bool]
     assert boolean_settings
     for name in boolean_settings:
@@ -233,6 +252,7 @@ def test_all_boolean_settings_reject_wrong_typed_values() -> None:
 
 
 def test_all_security_config_booleans_reject_wrong_typed_values() -> None:
+    """Reject non-booleans when constructing or mutating security configuration."""
     boolean_settings = [name for name, annotation in get_type_hints(SecurityConfig).items() if annotation is bool]
     assert boolean_settings
     for name in boolean_settings:
@@ -256,15 +276,18 @@ def test_all_security_config_booleans_reject_wrong_typed_values() -> None:
     ],
 )
 def test_invalid_cookie_names_fail_application_initialization(setting: str, name: str) -> None:
+    """Reject invalid security-cookie names before the application can handle requests."""
     with pytest.raises(ValueError, match="Invalid cookie name"):
         Flasgo(settings={setting: name})
 
 
 def test_duplicate_signed_session_cookie_is_treated_as_anonymous() -> None:
+    """Treat duplicate signed session cookies as anonymous for HTTP and WebSocket requests."""
     app = Flasgo(settings={"CSRF_ENABLED": False, "SECRET_KEY": "s" * 32})
 
     @app.get("/identity")
     def identity() -> str:
+        """Expose the current session identity for cookie ambiguity checks."""
         return str(session().get("identity", "anonymous"))
 
     valid = app._session_signer.dumps({"identity": "alice"})
@@ -287,6 +310,7 @@ def test_duplicate_signed_session_cookie_is_treated_as_anonymous() -> None:
 
     @app.websocket("/identity", public=True)
     async def websocket_identity(websocket: WebSocket) -> None:
+        """Send the WebSocket session identity after accepting the connection."""
         await websocket.accept()
         active_session = websocket.scope["session"]
         await websocket.send_text(str(active_session.get("identity", "anonymous")))
@@ -302,14 +326,17 @@ def test_duplicate_signed_session_cookie_is_treated_as_anonymous() -> None:
 
 
 def test_duplicate_csrf_binding_values_are_rejected() -> None:
+    """Reject repeated CSRF tokens, origins, and referers even when one value is valid."""
     app = Flasgo(settings={"SECRET_KEY": "s" * 32})
 
     @app.get("/seed")
     def seed() -> str:
+        """Serve a safe request that issues the initial CSRF cookie."""
         return "seed"
 
     @app.post("/submit")
     def submit() -> str:
+        """Return success only if the request passes CSRF validation."""
         return "ok"
 
     client = app.test_client()
@@ -352,20 +379,24 @@ def test_duplicate_csrf_binding_values_are_rejected() -> None:
 
 
 def test_session_mutations_from_failed_handlers_are_not_committed() -> None:
+    """Roll back raised-handler mutations while preserving deliberate error responses."""
     app = Flasgo(settings={"CSRF_ENABLED": False})
 
     @app.get("/fail")
     def fail() -> str:
+        """Mutate the session and raise to exercise rollback."""
         session()["failed"] = True
         raise RuntimeError("boom")
 
     @app.get("/explicit-error")
     def explicit_error() -> Response:
+        """Return an intentional error response after a session mutation."""
         session()["explicit"] = True
         return Response.text("bad request", status_code=400)
 
     @app.get("/state")
     def state() -> dict[str, bool]:
+        """Expose persisted flags without mutating the session."""
         return {
             "failed": bool(session().get("failed")),
             "explicit": bool(session().get("explicit")),
@@ -379,11 +410,13 @@ def test_session_mutations_from_failed_handlers_are_not_committed() -> None:
 
 
 def test_failed_handler_does_not_create_server_session() -> None:
+    """Avoid creating a backend session for a handler that mutates state and then raises."""
     store = CountingMemoryStore()
     app = Flasgo(settings={"CSRF_ENABLED": False}, session_backend=ServerSideSessions(store))
 
     @app.get("/fail")
     def fail() -> str:
+        """Attempt a privileged session mutation before failing."""
         session()["admin"] = True
         raise RuntimeError("boom")
 
@@ -392,20 +425,24 @@ def test_failed_handler_does_not_create_server_session() -> None:
 
 
 def test_successful_error_handler_can_commit_session_revocation() -> None:
+    """Allow a successful error handler to revoke the restored session."""
     app = Flasgo(settings={"CSRF_ENABLED": False})
 
     @app.get("/seed")
     def seed() -> str:
+        """Establish an authenticated session before the revocation request."""
         session()["identity"] = "alice"
         return "ok"
 
     @app.get("/revoke")
     def revoke() -> str:
+        """Stage a mutation that must be discarded before the error handler runs."""
         session()["failed_mutation"] = True
         raise PermissionError("revoked")
 
     @app.errorhandler(PermissionError)
     def handle_revoke(request: Request, error: Exception) -> Response:
+        """Verify rollback and clear the session as a deliberate revocation."""
         assert isinstance(error, PermissionError)
         assert session().get("failed_mutation") is None
         session().clear()
@@ -413,6 +450,7 @@ def test_successful_error_handler_can_commit_session_revocation() -> None:
 
     @app.get("/identity")
     def identity() -> str:
+        """Expose the remaining identity after error-handler revocation."""
         return str(session().get("identity", "anonymous"))
 
     client = app.test_client()
@@ -423,11 +461,13 @@ def test_successful_error_handler_can_commit_session_revocation() -> None:
 
 
 def test_invalid_final_response_does_not_write_server_session() -> None:
+    """Validate outgoing headers before committing server-side session changes."""
     store = CountingMemoryStore()
     app = Flasgo(settings={"CSRF_ENABLED": False}, session_backend=ServerSideSessions(store))
 
     @app.get("/invalid")
     def invalid() -> Response:
+        """Combine a privileged mutation with an invalid outgoing header."""
         session()["admin"] = True
         response = Response.text("ok")
         response.headers["x-invalid"] = "value\nsmuggled"
@@ -439,6 +479,7 @@ def test_invalid_final_response_does_not_write_server_session() -> None:
 
 
 def test_oversized_request_head_bypasses_telemetry_and_untrusted_request_id() -> None:
+    """Reject oversized heads without invoking tracing or reusing an attacker request ID."""
     app = Flasgo(
         settings={
             "CSRF_ENABLED": False,
@@ -449,6 +490,7 @@ def test_oversized_request_head_bypasses_telemetry_and_untrusted_request_id() ->
     telemetry_calls = 0
 
     async def telemetry(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        """Count unexpected tracing calls for rejected request heads."""
         nonlocal telemetry_calls
         telemetry_calls += 1
 
@@ -464,6 +506,7 @@ def test_oversized_request_head_bypasses_telemetry_and_untrusted_request_id() ->
 
 
 def test_request_head_at_exact_limit_is_accepted() -> None:
+    """Accept an ASGI request whose measured head equals the configured byte limit."""
     scope: dict[str, Any] = {
         "type": "http",
         "http_version": "1.1",
@@ -480,15 +523,19 @@ def test_request_head_at_exact_limit_is_accepted() -> None:
 
     @app.get("/")
     def index() -> str:
+        """Return a success body for the request exactly at the head limit."""
         return "ok"
 
     async def run() -> list[dict[str, Any]]:
+        """Dispatch the exact-limit scope and collect ASGI response messages."""
         messages: list[dict[str, Any]] = []
 
         async def receive() -> dict[str, Any]:
+            """Supply an empty, completed HTTP request body."""
             return {"type": "http.request", "body": b"", "more_body": False}
 
         async def send(message: dict[str, Any]) -> None:
+            """Capture ASGI output for the response status assertion."""
             messages.append(message)
 
         await app(scope, receive, send)  # type: ignore[arg-type]
@@ -499,6 +546,7 @@ def test_request_head_at_exact_limit_is_accepted() -> None:
 
 
 def test_rejected_websocket_heads_and_origins_do_not_load_sessions() -> None:
+    """Reject invalid WebSocket heads, hosts, and origins before any session read."""
     store = CountingMemoryStore()
     app = Flasgo(
         settings={"CSRF_ENABLED": False, "MAX_REQUEST_HEAD_BYTES": 256},
@@ -507,6 +555,7 @@ def test_rejected_websocket_heads_and_origins_do_not_load_sessions() -> None:
 
     @app.websocket("/socket", public=True)
     async def socket(websocket: WebSocket) -> None:
+        """Accept the connection only if all handshake checks succeed."""
         await websocket.accept()
 
     with app.test_client() as client:
@@ -539,12 +588,14 @@ def test_rejected_websocket_heads_and_origins_do_not_load_sessions() -> None:
 
 
 def test_websocket_client_rate_limit_runs_before_session_storage() -> None:
+    """Apply the WebSocket client rate limit before reading a supplied session identifier."""
     store = CountingMemoryStore()
     app = Flasgo(settings={"CSRF_ENABLED": False}, session_backend=ServerSideSessions(store))
 
     @app.websocket("/limited", public=True)
     @app.ratelimit(1, per=60)
     async def limited(websocket: WebSocket) -> None:
+        """Accept the first connection under a one-request rate limit."""
         await websocket.accept()
 
     with app.test_client() as client:
@@ -564,14 +615,17 @@ def test_websocket_client_rate_limit_runs_before_session_storage() -> None:
 
 
 def test_security_failure_tracking_is_bounded_and_reuses_expired_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound failure-tracking identities and reclaim expired capacity without evicting live entries."""
     app = Flasgo(settings={"CSRF_ENABLED": False})
     now = 0.0
     monkeypatch.setattr(app_module.time, "monotonic", lambda: now)
 
     async def receive() -> dict[str, Any]:
+        """Supply an empty body for synthetic security-failure requests."""
         return {"type": "http.request", "body": b"", "more_body": False}
 
     def request_for(identity: str) -> Request:
+        """Build a request associated with the supplied client identity."""
         return Request(
             {
                 "type": "http",
@@ -596,23 +650,28 @@ def test_security_failure_tracking_is_bounded_and_reuses_expired_capacity(monkey
 
 
 def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_routes() -> None:
+    """Reject ambiguous route contracts while preserving specific routes and atomic blueprint registration."""
     app = Flasgo(settings={"CSRF_ENABLED": False})
 
     @app.get("/<path:value>")
     def catch_all(value: str) -> str:
+        """Expose catch-all dispatch without requiring authentication."""
         return f"public:{value}"
 
     @app.get("/admin")
     @app.authorize(IsAuthenticated())
     def admin() -> str:
+        """Provide the protected static route that must take precedence over the catch-all."""
         return "secret"
 
     @app.get("/items/<int:item_id>")
     def numeric_item(item_id: int) -> str:
+        """Identify successful dispatch through an integer converter."""
         return f"numeric:{item_id}"
 
     @app.get("/records/<value>")
     def string_item(value: str) -> str:
+        """Identify successful dispatch through a string converter."""
         return f"string:{value}"
 
     assert app.test_client().get("/admin").status_code == 401
@@ -623,20 +682,24 @@ def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_route
 
         @app.get("/records/<other>")
         def duplicate_shape(other: str) -> str:
+            """Provide a renamed parameter that must fail duplicate-shape registration."""
             return other
 
     with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
 
         @app.post("/records/<other>")
         def renamed_disjoint_method(other: str) -> str:
+            """Provide inconsistent parameter naming even though its HTTP method is disjoint."""
             return other
 
     @app.post("/records/<value>")
     def same_shape_and_parameter(value: str) -> str:
+        """Reuse the established parameter contract for a disjoint HTTP method."""
         return value
 
     @app.get("/<path:value>/admin")
     def ambiguous_public(value: str) -> str:
+        """Register the public member of an intersecting equal-specificity route pair."""
         return f"public:{value}"
 
     with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
@@ -644,12 +707,14 @@ def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_route
         @app.get("/users/<path:value>")
         @app.authorize(IsAuthenticated())
         def ambiguous_protected(value: str) -> str:
+            """Provide the protected member whose ambiguous registration must fail."""
             return f"protected:{value}"
 
     blueprint = Blueprint("conflicting")
 
     @blueprint.get("/records/<renamed>")
     def blueprint_duplicate(renamed: str) -> str:
+        """Introduce a blueprint conflict to verify registration rolls back atomically."""
         return renamed
 
     routes_before = tuple(app._routes)
@@ -659,19 +724,23 @@ def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_route
 
     @app.get("/numbers/<int:value>")
     def integer_value(value: int) -> str:
+        """Register the integer route before attempting an overlapping float contract."""
         return str(value)
 
     with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
 
         @app.get("/numbers/<float:value>")
         def overlapping_float(value: float) -> str:
+            """Provide a float route whose language includes the existing integer route."""
             return str(value)
 
 
 def test_websocket_route_shapes_and_multiple_path_converters_are_rejected() -> None:
+    """Reject equivalent WebSocket shapes and multiple greedy converters in both protocols."""
     app = Flasgo(settings={"CSRF_ENABLED": False})
 
     async def endpoint(websocket: WebSocket, **params: str) -> None:
+        """Accept a WebSocket connection for route-registration fixtures."""
         await websocket.accept()
 
     app.add_websocket_route("/socket/<room>", endpoint, public=True)
@@ -684,29 +753,37 @@ def test_websocket_route_shapes_and_multiple_path_converters_are_rejected() -> N
 
     @app.get("/archive/<path:directory>/download")
     def download(directory: str) -> str:
+        """Expose a valid single greedy converter followed by a literal suffix."""
         return directory
 
     assert app.test_client().get("/archive/a/b/download").text == "a/b"
 
 
 def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
+    """Bound direct and response-send cleanup even when a producer ignores cancellation."""
+
     class ResistantStream:
         def __init__(self) -> None:
+            """Create a release event that controls the resistant closer."""
             self.release = asyncio.Event()
 
         def __aiter__(self) -> ResistantStream:
+            """Return this stream as its async iterator."""
             return self
 
         async def __anext__(self) -> bytes:
+            """Exhaust the stream immediately to isolate finalizer timing."""
             raise StopAsyncIteration
 
         async def aclose(self) -> None:
+            """Keep finalization pending after cancellation until the test releases it."""
             try:
                 await self.release.wait()
             except asyncio.CancelledError:
                 await self.release.wait()
 
     async def run() -> None:
+        """Exercise direct cleanup, send teardown, and NDJSON timeout forwarding."""
         source = ResistantStream()
         response = StreamingResponse(source, cleanup_timeout=0.01)
         await asyncio.wait_for(response.aclose(), timeout=0.1)
@@ -718,6 +795,7 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
         streamed_response = StreamingResponse(streamed_source, cleanup_timeout=0.01)
 
         async def send(message: dict[str, Any]) -> None:
+            """Accept ASGI output without adding transport delay."""
             return None
 
         await asyncio.wait_for(streamed_response.send(send), timeout=0.1)
@@ -726,6 +804,7 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
         await asyncio.sleep(0)
 
         async def items() -> AsyncIterator[object]:
+            """Yield one JSON-serializable item for the NDJSON configuration check."""
             yield {"ok": True}
 
         assert NDJSONResponse(items(), cleanup_timeout=0.25).cleanup_timeout == 0.25
@@ -735,14 +814,19 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
 
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_stream_teardown_is_bounded_after_duration_or_disconnect(disconnect: bool) -> None:
+    """Bound teardown after duration expiry or disconnect despite a resistant producer."""
+
     class ResistantProducer:
         def __init__(self) -> None:
+            """Create the event that eventually unblocks item production."""
             self.release = asyncio.Event()
 
         def __aiter__(self) -> ResistantProducer:
+            """Return this cancellation-resistant producer as its iterator."""
             return self
 
         async def __anext__(self) -> bytes:
+            """Ignore one cancellation and exhaust only after explicit release."""
             try:
                 await self.release.wait()
             except asyncio.CancelledError:
@@ -750,16 +834,19 @@ def test_stream_teardown_is_bounded_after_duration_or_disconnect(disconnect: boo
             raise StopAsyncIteration
 
     async def run() -> None:
+        """Trigger the selected termination path and verify bounded response teardown."""
         source = ResistantProducer()
         response = StreamingResponse(source, max_duration=0.01, cleanup_timeout=0.01)
 
         async def receive() -> dict[str, Any]:
+            """Deliver a disconnect or remain idle until the response duration expires."""
             if disconnect:
                 return {"type": "http.disconnect"}
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
         async def send(message: dict[str, Any]) -> None:
+            """Accept response messages without affecting the producer deadline."""
             return None
 
         response.receive = receive
@@ -773,18 +860,24 @@ def test_stream_teardown_is_bounded_after_duration_or_disconnect(disconnect: boo
 
 
 def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> None:
+    """Consume late finalizer exceptions when outer teardown has already been cancelled."""
+
     class ResistantCloser:
         def __init__(self) -> None:
+            """Create an event controlling the finalizer that will eventually fail."""
             self.release = asyncio.Event()
 
         def __aiter__(self) -> ResistantCloser:
+            """Return this stream as its async iterator."""
             return self
 
         async def __anext__(self) -> bytes:
+            """Remain blocked in production until response teardown cancels the task."""
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
         async def aclose(self) -> None:
+            """Survive cancellation and then raise a late cleanup failure after release."""
             try:
                 await self.release.wait()
             except asyncio.CancelledError:
@@ -792,6 +885,7 @@ def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> 
             raise RuntimeError("cleanup failed after cancellation")
 
     async def run() -> None:
+        """Observe loop errors while disconnecting and releasing the detached finalizer."""
         source = ResistantCloser()
         response = StreamingResponse(source, cleanup_timeout=0.01)
         observed: list[dict[str, Any]] = []
@@ -800,9 +894,11 @@ def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> 
         loop.set_exception_handler(lambda _loop, context: observed.append(context))
 
         async def receive() -> dict[str, Any]:
+            """Immediately disconnect the client to trigger nested response teardown."""
             return {"type": "http.disconnect"}
 
         async def send(message: dict[str, Any]) -> None:
+            """Accept transport output without introducing additional failures."""
             return None
 
         response.receive = receive
@@ -819,19 +915,25 @@ def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> 
 
 
 def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
+    """Cap active finalizers and automatically drain accepted pending cleanup exactly once."""
+
     class ResistantCloser:
         entered = 0
 
         def __init__(self, release: asyncio.Event) -> None:
+            """Bind each closer to the shared event that releases active capacity."""
             self.release = release
 
         def __aiter__(self) -> ResistantCloser:
+            """Return this closer as its own async iterator."""
             return self
 
         async def __anext__(self) -> bytes:
+            """Exhaust immediately so only cleanup consumes concurrency slots."""
             raise StopAsyncIteration
 
         async def aclose(self) -> None:
+            """Count finalizer admission and hold capacity through cancellation until release."""
             type(self).entered += 1
             try:
                 await self.release.wait()
@@ -839,6 +941,7 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
                 await self.release.wait()
 
     async def run() -> None:
+        """Fill active capacity, queue two responses, and verify every accepted closer runs once."""
         release = asyncio.Event()
         responses = [
             StreamingResponse(ResistantCloser(release), cleanup_timeout=0.001) for _ in range(streaming_module._MAX_ACTIVE_CLEANUPS + 2)

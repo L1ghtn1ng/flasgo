@@ -110,6 +110,7 @@ def test_local_documentation_links_exist() -> None:
 
 
 def test_release_version_is_consistent_across_framework_and_docs() -> None:
+    """Keep source metadata, runtime defaults, and release documentation on the same version."""
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     version = project["project"]["version"]
 

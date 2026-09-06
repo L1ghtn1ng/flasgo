@@ -164,6 +164,7 @@ class WebSocketRoute:
 
 
 def _validate_route(path: str, name: str | None) -> None:
+    """Reject malformed route metadata and multiple greedy path converters."""
     if not path.startswith("/"):
         raise ValueError("Route paths must start with '/'.")
     if any(ord(char) < 32 or ord(char) == 127 for char in path):
@@ -234,11 +235,13 @@ def _route_automaton(path: str, alphabet: frozenset[str]) -> list[list[tuple[fro
     edges: list[list[tuple[frozenset[str] | None, int]]] = [[]]
 
     def append(chars: frozenset[str], *, repeat: bool = False) -> None:
+        """Append a character transition, optionally repeating at its destination state."""
         target = len(edges)
         edges[-1].append((chars, target))
         edges.append([(chars, target)] if repeat else [])
 
     def literal(value: str) -> None:
+        """Append one exact transition for each literal character."""
         for char in value:
             append(frozenset(char))
 

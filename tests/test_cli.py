@@ -410,6 +410,7 @@ def test_check_fails_when_app_registration_rejects_duplicate_routes(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Report conflicting application routes as a failed check with a useful diagnostic."""
     app_file = tmp_path / "bad_app.py"
     app_file.write_text(
         "\n".join(

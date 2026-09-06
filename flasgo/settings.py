@@ -174,6 +174,7 @@ type SettingsInput = Settings | Mapping[str, Any] | str | object
 
 
 def load_settings(source: SettingsInput | None) -> Settings:
+    """Load and validate settings from an instance, mapping, module name, or object."""
     if source is None:
         return Settings()
     if isinstance(source, Settings):
