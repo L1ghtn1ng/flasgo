@@ -32,7 +32,12 @@
 - Response validation completes before session storage writes, preventing malformed responses from committing state.
 - Invalid session and CSRF cookie names fail during application initialization, before session state can be written.
 - Streaming cleanup timeouts retain their distinct metrics outcome after an otherwise successful response send.
-- Stream finalization skipped at the cleanup-capacity limit remains retryable after capacity becomes available.
+- Stream finalization at the cleanup-capacity limit is queued and automatically scheduled when capacity becomes
+  available. Pending work is bounded, deduplicated, and executed on its owning loop; queue overflow raises explicitly.
+- Intersecting HTTP and WebSocket routes with equal specificity are rejected at registration instead of dispatching
+  by registration order. Disjoint HTTP methods and specific routes over catch-all routes remain supported.
+- `flasgo check --json` preserves its result schema on application load failures and redirects import diagnostics
+  to stderr so stdout remains parseable JSON.
 - Security-failure throttling uses bounded, amortized state and fails closed at capacity without evicting active
   clients.
 - Routes with multiple greedy `path` converters are rejected before they can create expensive backtracking matches.

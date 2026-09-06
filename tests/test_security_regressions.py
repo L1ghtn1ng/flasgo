@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from typing import Any, get_type_hints
 
 import flasgo.app as app_module
@@ -23,7 +24,176 @@ from flasgo import (
     session,
 )
 from flasgo.app import _request_head_size
+from flasgo.routing import routes_overlap
 from flasgo.security import SecurityConfig
+
+
+@pytest.mark.parametrize("converter", ["path", "str"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_intersecting_route_ties_are_rejected_for_both_protocols(converter: str, reverse: bool) -> None:
+    """Reject order-dependent matches while retaining disjoint methods and paths."""
+    paths = [f"/<{converter}:value>/bar", f"/foo/<{converter}:value>"]
+    if reverse:
+        paths.reverse()
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    def endpoint(value: str) -> str:
+        return value
+
+    app.get(paths[0])(endpoint)
+    with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
+        app.get(paths[1])(endpoint)
+    app.post(paths[1])(endpoint)
+    assert app.test_client().get("/foo/bar").status_code == 200
+    assert app.test_client().post("/foo/bar").status_code == 200
+
+    async def socket(value: str) -> None:
+        return None
+
+    app.add_websocket_route(paths[0], socket)
+    with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
+        app.add_websocket_route(paths[1], socket)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        ("/<path:a>/bar", "/foo/<path:b>", True),
+        ("/a/<str:x>", "/b/<str:y>", False),
+        ("/<int:x>/bar", "/foo/<int:y>", False),
+        ("/<float:x>", "/12.5", True),
+        ("/<float:x>", "/12.", False),
+        ("/<float:x>x", "/12x", True),
+        ("/a<x>b", "/ac<y>", True),
+        ("/雪/<path:x>", "/雪/道", True),
+        ("/<path:x>/bar", "/foo/bar/baz", False),
+    ],
+)
+def test_route_language_intersection(left: str, right: str, expected: bool) -> None:
+    """Cover converter repetition, optional decimals, embedded params, and Unicode literals."""
+    assert routes_overlap(left, right) is expected
+    assert routes_overlap(right, left) is expected
+
+
+def test_cleanup_queue_overflow_is_explicit_and_pending_work_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep active and pending counts bounded without losing accepted finalizers."""
+    monkeypatch.setattr(streaming_module, "_MAX_ACTIVE_CLEANUPS", 1)
+    monkeypatch.setattr(streaming_module, "_MAX_PENDING_CLEANUPS", 1)
+
+    async def run() -> None:
+        release = asyncio.Event()
+        entered: list[str] = []
+
+        class Source:
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def __aiter__(self) -> Source:
+                return self
+
+            async def __anext__(self) -> bytes:
+                raise StopAsyncIteration
+
+            async def aclose(self) -> None:
+                entered.append(self.name)
+                if self.name == "active":
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        await release.wait()
+                if self.name == "pending":
+                    raise RuntimeError("detached cleanup failure")
+
+        active = StreamingResponse(Source("active"), cleanup_timeout=0.001)
+        pending = StreamingResponse(Source("pending"), cleanup_timeout=0.001)
+        pending._source = Source("underlying")
+        overflow = StreamingResponse(Source("overflow"), cleanup_timeout=0.001)
+        observed: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        old_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: observed.append(context))
+        try:
+            await active.aclose()
+            await pending.aclose()
+            await pending.aclose()
+            with pytest.raises(RuntimeError, match="cleanup capacity exhausted"):
+                await overflow.aclose()
+            assert not overflow._closed
+            assert streaming_module._active_cleanups == 1
+            assert len(streaming_module._pending_cleanups) == 1
+            release.set()
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if streaming_module._active_cleanups == 0:
+                    break
+            assert entered == ["active", "pending", "underlying"]
+            assert not streaming_module._pending_cleanups
+            assert streaming_module._active_cleanups == 0
+            await overflow.aclose()
+            assert entered == ["active", "pending", "underlying", "overflow"]
+            assert observed == []
+        finally:
+            release.set()
+            loop.set_exception_handler(old_handler)
+
+    asyncio.run(run())
+
+
+def test_deferred_cleanup_preserves_owning_loop_and_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drain queued finalizers across loop threads without borrowing another request's context."""
+    monkeypatch.setattr(streaming_module, "_MAX_ACTIVE_CLEANUPS", 1)
+    marker: ContextVar[str] = ContextVar("cleanup_owner", default="unset")
+
+    async def run() -> None:
+        release = asyncio.Event()
+        queued = asyncio.Event()
+        main_loop = asyncio.get_running_loop()
+
+        class ActiveSource:
+            def __aiter__(self) -> ActiveSource:
+                return self
+
+            async def __anext__(self) -> bytes:
+                raise StopAsyncIteration
+
+            async def aclose(self) -> None:
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+
+        marker.set("active")
+        await StreamingResponse(ActiveSource(), cleanup_timeout=0.001).aclose()
+
+        def worker() -> None:
+            async def other_loop() -> None:
+                owner = asyncio.get_running_loop()
+                closed = asyncio.Event()
+                observations: list[tuple[bool, str]] = []
+
+                class PendingSource(ActiveSource):
+                    async def aclose(self) -> None:
+                        observations.append((asyncio.get_running_loop() is owner, marker.get()))
+                        closed.set()
+
+                marker.set("pending")
+                await StreamingResponse(PendingSource()).aclose()
+                main_loop.call_soon_threadsafe(queued.set)
+                await asyncio.wait_for(closed.wait(), 2)
+                assert observations == [(True, "pending")]
+
+            asyncio.run(other_loop())
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            await asyncio.wait_for(queued.wait(), 2)
+        finally:
+            release.set()
+        await asyncio.wait_for(task, 3)
+        assert not streaming_module._pending_cleanups
+        assert streaming_module._active_cleanups == 0
+
+    asyncio.run(run())
 
 
 class CountingMemoryStore(MemoryStore):
@@ -469,12 +639,12 @@ def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_route
     def ambiguous_public(value: str) -> str:
         return f"public:{value}"
 
-    @app.get("/users/<path:value>")
-    @app.authorize(IsAuthenticated())
-    def ambiguous_protected(value: str) -> str:
-        return f"protected:{value}"
+    with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
 
-    assert app.test_client().get("/users/admin").status_code == 401
+        @app.get("/users/<path:value>")
+        @app.authorize(IsAuthenticated())
+        def ambiguous_protected(value: str) -> str:
+            return f"protected:{value}"
 
     blueprint = Blueprint("conflicting")
 
@@ -677,18 +847,18 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
             await response.aclose()
         assert ResistantCloser.entered == streaming_module._MAX_ACTIVE_CLEANUPS
         assert streaming_module._active_cleanups == streaming_module._MAX_ACTIVE_CLEANUPS
+        assert len(streaming_module._pending_cleanups) == 2
+        for response in responses[-2:]:
+            await response.aclose()
+        assert len(streaming_module._pending_cleanups) == 2
         release.set()
         for _ in range(10):
             if streaming_module._active_cleanups == 0:
                 break
             await asyncio.sleep(0)
         assert streaming_module._active_cleanups == 0
-        assert all(response._closed for response in responses[:-2])
-        assert all(not response._closed for response in responses[-2:])
-
-        for response in responses[-2:]:
-            await response.aclose()
         assert ResistantCloser.entered == streaming_module._MAX_ACTIVE_CLEANUPS + 2
+        assert not streaming_module._pending_cleanups
         assert all(response._closed for response in responses)
 
     asyncio.run(run())

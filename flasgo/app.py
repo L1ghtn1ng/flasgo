@@ -66,6 +66,7 @@ from .routing import (
     WebSocketEndpoint,
     WebSocketMatchResult,
     WebSocketRoute,
+    routes_overlap,
 )
 from .security import (
     SecurityConfig,
@@ -1014,7 +1015,11 @@ class Flasgo(RouteDecorators):
         if not isinstance(public, bool):
             raise TypeError("public must be a bool.")
         route = WebSocketRoute(path, endpoint, name=name, public=public)
-        if any(existing.contract_shape == route.contract_shape for existing in self._websocket_routes):
+        if any(
+            existing.contract_shape == route.contract_shape
+            or (existing.specificity == route.specificity and routes_overlap(existing.raw_path, route.raw_path))
+            for existing in self._websocket_routes
+        ):
             raise ValueError(f"WebSocket route {path!r} conflicts with an existing route pattern.")
         self._websocket_routes.append(route)
         self._websocket_routes.sort(
@@ -1181,8 +1186,15 @@ class Flasgo(RouteDecorators):
             response_model=response_model,
         )
         if any(
-            existing.contract_shape == route.contract_shape
-            and (existing.parameter_names != route.parameter_names or existing.methods & route.methods)
+            (
+                existing.contract_shape == route.contract_shape
+                and (existing.parameter_names != route.parameter_names or existing.methods & route.methods)
+            )
+            or (
+                existing.methods & route.methods
+                and existing.specificity == route.specificity
+                and routes_overlap(existing.raw_path, route.raw_path)
+            )
             for existing in self._routes
         ):
             raise ValueError(

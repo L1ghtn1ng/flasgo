@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import threading
+from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,8 +17,10 @@ from .types import Receive, Send
 from .validation import ValidationBudget
 
 _MAX_ACTIVE_CLEANUPS = 128
+_MAX_PENDING_CLEANUPS = 128
 _active_cleanups = 0
 _active_cleanups_lock = threading.Lock()
+_pending_cleanups: deque[tuple[asyncio.AbstractEventLoop, StreamingResponse, Context]] = deque()
 
 
 def _positive_timeout(value: float, name: str) -> None:
@@ -98,33 +103,56 @@ class StreamingResponse(Response):
     async def aclose(self) -> None:
         """Close the response's iterators once.
 
-        Subsequent calls have no effect. Any available asynchronous close methods on the primary iterator and source iterator are
-        awaited.
+        Accepted cleanup runs once, immediately or from a bounded pending queue.
+        Queue overflow raises explicitly and leaves the response retryable.
         """
         if self._closed:
             return
 
-        async def close_iterators() -> None:
-            try:
-                close = getattr(self.iterator, "aclose", None)
-                if close is not None:
-                    await close()
-            finally:
-                source_close = getattr(self._source, "aclose", None)
-                if source_close is not None:
-                    await source_close()
-
-        if not _reserve_cleanup_slot():
+        if not _admit_cleanup(self):
+            self._closed = True
             self._metrics_outcome = "cleanup_timeout"
             return
+        cleanup = self._start_cleanup()
+        await self._await_cleanup(cleanup)
+
+    async def _close_iterators(self) -> None:
+        """Finalize both owned iterators even if the first closer fails."""
         try:
-            cleanup = asyncio.create_task(close_iterators())
+            close = getattr(self.iterator, "aclose", None)
+            if close is not None:
+                await close()
+        finally:
+            source_close = getattr(self._source, "aclose", None)
+            if source_close is not None:
+                await source_close()
+
+    def _start_cleanup(self, *, deferred: bool = False) -> asyncio.Task[None]:
+        """Start admitted cleanup on its owning loop with a cancellation deadline."""
+        coroutine = self._close_iterators()
+        try:
+            cleanup = asyncio.create_task(coroutine)
         except BaseException:
+            coroutine.close()
+            self._closed = False
             _release_cleanup_slot()
             raise
         self._closed = True
-        cleanup.add_done_callback(_cleanup_slot_done)
-        await self._await_cleanup(cleanup)
+
+        def expire() -> None:
+            if not cleanup.done():
+                self._metrics_outcome = "cleanup_timeout"
+                cleanup.cancel()
+
+        timer = cleanup.get_loop().call_later(self.cleanup_timeout, expire) if deferred else None
+
+        def done(task: asyncio.Future[Any]) -> None:
+            if timer is not None:
+                timer.cancel()
+            _cleanup_slot_done(task)
+
+        cleanup.add_done_callback(done)
+        return cleanup
 
     async def _await_cleanup(self, task: asyncio.Future[Any]) -> None:
         """Await application cleanup for a bounded interval and safely detach resistant work."""
@@ -262,26 +290,44 @@ def _consume_detached_cleanup_task(task: asyncio.Future[Any]) -> None:
         task.exception()
 
 
-def _reserve_cleanup_slot() -> bool:
-    """Reserve bounded process-wide capacity for application cleanup."""
+def _admit_cleanup(response: StreamingResponse) -> bool:
+    """Reserve active capacity or enqueue cleanup; reject overflow explicitly."""
     global _active_cleanups
     with _active_cleanups_lock:
         if _active_cleanups >= _MAX_ACTIVE_CLEANUPS:
+            if len(_pending_cleanups) >= _MAX_PENDING_CLEANUPS:
+                response._metrics_outcome = "cleanup_capacity"
+                raise RuntimeError("Streaming cleanup capacity exhausted; retry aclose() after capacity is available.")
+            _pending_cleanups.append((asyncio.get_running_loop(), response, copy_context()))
             return False
         _active_cleanups += 1
         return True
 
 
 def _release_cleanup_slot() -> None:
-    """Release one application-cleanup capacity slot."""
+    """Transfer released capacity to queued cleanup on its owning event loop."""
     global _active_cleanups
     with _active_cleanups_lock:
         _active_cleanups -= 1
+        pending = _pending_cleanups.popleft() if _pending_cleanups else None
+        if pending is not None:
+            _active_cleanups += 1
+    if pending is not None:
+        loop, response, context = pending
+        try:
+            loop.call_soon_threadsafe(lambda: response._start_cleanup(deferred=True), context=context)
+        except RuntimeError:
+            response._closed = False
+            logging.getLogger(__name__).error("Pending streaming cleanup cannot run: its event loop is closed.")
+            _release_cleanup_slot()
 
 
 def _cleanup_slot_done(task: asyncio.Future[Any]) -> None:
-    """Release cleanup capacity after the task finishes."""
-    _release_cleanup_slot()
+    """Observe detached failures and automatically drain pending cleanup."""
+    try:
+        _consume_detached_cleanup_task(task)
+    finally:
+        _release_cleanup_slot()
 
 
 @dataclass(frozen=True, slots=True)

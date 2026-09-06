@@ -198,6 +198,69 @@ def _route_specificity(path: str) -> tuple[int, int, int]:
     return literal_characters, converter_score, -len(matches)
 
 
+def routes_overlap(left: str, right: str) -> bool:
+    """Check language intersection without executing potentially expensive route regexes.
+
+    Literal characters, digits, slash, newline, and one other character form a
+    complete alphabet for the built-in converters. Product-state traversal is
+    bounded by the product of the two route automata sizes.
+    """
+    alphabet = frozenset(left + right + "0123456789/\n\x00")
+    first = _route_automaton(left, alphabet)
+    second = _route_automaton(right, alphabet)
+    pending = [(0, 0)]
+    visited = {(0, 0)}
+    while pending:
+        a, b = pending.pop()
+        if a == len(first) - 1 and b == len(second) - 1:
+            return True
+        successors = [(target, b) for chars, target in first[a] if chars is None]
+        successors.extend((a, target) for chars, target in second[b] if chars is None)
+        successors.extend(
+            (target_a, target_b)
+            for chars_a, target_a in first[a]
+            for chars_b, target_b in second[b]
+            if chars_a is not None and chars_b is not None and chars_a & chars_b
+        )
+        for state in successors:
+            if state not in visited:
+                visited.add(state)
+                pending.append(state)
+    return False
+
+
+def _route_automaton(path: str, alphabet: frozenset[str]) -> list[list[tuple[frozenset[str] | None, int]]]:
+    """Compile literals and the four built-in converters into a small NFA."""
+    edges: list[list[tuple[frozenset[str] | None, int]]] = [[]]
+
+    def append(chars: frozenset[str], *, repeat: bool = False) -> None:
+        target = len(edges)
+        edges[-1].append((chars, target))
+        edges.append([(chars, target)] if repeat else [])
+
+    def literal(value: str) -> None:
+        for char in value:
+            append(frozenset(char))
+
+    digits = frozenset("0123456789")
+    cursor = 0
+    for match in _PARAM_PATTERN.finditer(path):
+        literal(path[cursor : match.start()])
+        converter = match.group("converter") or "str"
+        if converter in {"int", "float"}:
+            append(digits, repeat=True)
+            if converter == "float":
+                integer_end = len(edges) - 1
+                append(frozenset("."))
+                append(digits, repeat=True)
+                edges[integer_end].append((None, len(edges) - 1))
+        else:
+            append(alphabet - ({"/"} if converter == "str" else {"\n"}), repeat=True)
+        cursor = match.end()
+    literal(path[cursor:])
+    return edges
+
+
 def _compile_path(
     raw_path: str,
 ) -> tuple[re.Pattern[str], dict[str, Callable[[str], Any]]]:

@@ -392,9 +392,10 @@ at route registration or stream construction.
 The same per-route endpoint plan drives runtime binding and OpenAPI generation, so request models, aliases, validation
 responses, and dependency-provided query fields stay aligned. Duplicate wire parameters merge requiredness when their
 schemas agree; conflicting schemas are rejected instead of producing an inaccurate contract.
-Literal routes and narrower converters take precedence over broader matches; equally specific protected routes take
-precedence over public ones. Equivalent patterns must reuse parameter names across disjoint methods, and overlapping
-methods are rejected at registration so runtime dispatch, authorization, and OpenAPI cannot disagree.
+Literal routes and narrower converters take precedence over broader matches. Intersecting HTTP routes with equal
+specificity and overlapping methods are rejected, as are intersecting WebSocket routes with equal specificity.
+This includes differently shaped patterns such as `/<path:value>/bar` and `/foo/<path:value>`, so registration order
+cannot choose between tied handlers. Equivalent patterns must reuse parameter names across disjoint HTTP methods.
 
 ## Developer commands
 
@@ -600,6 +601,9 @@ The current development branch adds the following opt-in APIs. The website guide
 - `StreamingResponse`, `EventSourceResponse`, `ServerSentEvent`, and `NDJSONResponse`: bounded async streaming,
   safe JSON event framing, deadline-bounded disconnect and producer cleanup, and incremental tests through
   `TestClient.astream`.
+  At most 128 iterator cleanup tasks run process-wide; a further 128 can wait in a queue that drains automatically
+  on their owning event loops. A full queue raises `RuntimeError` and leaves `aclose()` retryable. Keep the owning
+  loops running until queued finalizers finish; closing a loop first prevents its pending cleanup and logs an error.
 - `RedisStore`, `RedisRateLimiter`, `ServerSideSessions`, `MemoryStore`, and `StoreUnavailable`: optional shared
   route quotas and revocable server-side sessions, with atomic updates and explicit failure behavior.
   Install `flasgo[redis]` for the Redis/Valkey client adapter. Signed-cookie sessions remain the default.

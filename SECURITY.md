@@ -104,6 +104,9 @@ Flasgo ships with security features enabled by default, but deployment still mat
   path components, control characters, surrounding whitespace, and dot prefixes or suffixes.
 - Keep finite stream send, idle, duration, and cleanup timeouts. Cleanup deadlines bound request teardown when an
   application producer suppresses cancellation; application code remains responsible for stopping its detached work.
+  Cleanup uses a bounded pending queue when all 128 active slots are occupied. A full queue raises explicitly rather
+  than silently dropping finalization. Keep owning event loops alive while accepted cleanup drains, and monitor
+  cleanup-capacity failures; cancellation-resistant application code must eventually release its resources.
 - Trust incoming request IDs only when a trusted proxy replaces client-supplied values.
 - For `flasgo[jwt]`, use a dedicated random secret of at least 32 bytes, rotate it through a controlled deployment,
   validate a service-specific issuer and audience, keep tokens short-lived, and transmit them only in the

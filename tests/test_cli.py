@@ -429,6 +429,37 @@ def test_check_fails_when_app_registration_rejects_duplicate_routes(
     assert "conflicts with an existing route pattern" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("failure", [None, "import", "registration", "attribute"])
+def test_check_json_remains_parseable_during_application_loading(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], failure: str | None
+) -> None:
+    """Keep noisy imports and load failures inside the documented CLI output contract."""
+    source = "print('application diagnostic')\nfrom flasgo import Flasgo\napp = Flasgo()\n"
+    if failure == "import":
+        source += "raise RuntimeError('import failed')\n"
+    elif failure == "registration":
+        source += "app.get('/duplicate')(lambda: 'one')\napp.get('/duplicate')(lambda: 'two')\n"
+    elif failure == "attribute":
+        source += (
+            "class Container:\n    @property\n    def app(self):\n        raise RuntimeError('attribute failed')\ncontainer = Container()\n"
+        )
+    target = tmp_path / "noisy_app.py"
+    target.write_text(source)
+    target_spec = f"{target}:container.app" if failure == "attribute" else str(target)
+    assert cli_module.main(["check", target_spec, "--json"]) == int(failure is not None)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert set(result) == {"passed", "issues", "changes"}
+    assert result["passed"] is (failure is None)
+    assert result["changes"] == []
+    assert "application diagnostic" in captured.err
+    if failure is not None:
+        assert len(result["issues"]) == 1
+        assert result["issues"][0]["code"] == "registration"
+        assert result["issues"][0]["severity"] == "error"
+        assert result["issues"][0]["message"]
+
+
 def test_db_commands_delegate_to_alembic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[object, ...]] = []
     config_path = tmp_path / "alembic.ini"
