@@ -26,6 +26,15 @@
 - Request-scoped dependencies remain available through response sending and close before background tasks.
   Background tasks run only after complete successful delivery, with request, user, and session context cleared.
 
+### Fixed
+
+- Policy snapshots can be written atomically with `routes --json --output` (`-o`), separately from application import
+  output. Text policy comparisons identify each changed route by protocol, path, and methods.
+- Response contracts reject typed mappings with unsupported key types during registration, including nested models
+  and stream item models. Actual output keys must remain strings.
+- Missing or invalid dependency contexts raise a clear runtime error, including under optimized Python. Registered
+  dependency plans avoid repeated lifetime validation; overrides retain checks against the outer dependency scope.
+
 ### Security
 
 - Protected blueprint children cannot drop inherited permissions or change authentication backends. Registration
@@ -47,8 +56,10 @@
   review deliberate changes before replacing a baseline.
 - Use function-scoped dependencies for transactions that must finish before response headers. Background tasks must
   acquire their own resources. Applications must handle session conflicts without blindly replaying side effects.
-- See [Building and operating larger applications](docs/application-features.md) for configuration, migration,
-  streaming limits, storage requirements, and testing examples.
+- See the website guides for [blueprints](https://flasgo.dev/guides/blueprints-and-url-generation/),
+  [streaming](https://flasgo.dev/guides/streaming-responses/),
+  [shared storage](https://flasgo.dev/guides/shared-storage/), and [testing](https://flasgo.dev/guides/testing/)
+  for configuration, migration, limits, and examples.
 
 ## [0.8.0] - 2026-08-13
 
