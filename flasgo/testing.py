@@ -6,12 +6,14 @@ import queue
 import threading
 from collections.abc import Coroutine, Mapping, Sequence
 from concurrent.futures import Future
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from typing import Any, cast
 from urllib.parse import urlencode, urljoin, urlsplit
 from uuid import uuid4
 
+from .testing_stream import AsyncTestStream
 from .types import ASGIApp, Message, Scope
 from .websockets import WebSocketDisconnect
 
@@ -508,6 +510,41 @@ class TestClient:
 
         raise RuntimeError("Too many redirects")
 
+    @asynccontextmanager
+    async def astream(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: RequestHeaders | None = None,
+        body: bytes | None = None,
+        json: object | None = None,
+        scheme: str = "http",
+    ):
+        """Consume a response incrementally in an async test; disconnect on context exit."""
+        if self._mode == "sync":
+            raise RuntimeError("astream requires an async test client, not a synchronous lifespan context.")
+        stream = AsyncTestStream()
+        stream.task = asyncio.create_task(
+            self._send(
+                method,
+                path,
+                headers=headers,
+                body=body,
+                json=json,
+                data=None,
+                files=None,
+                scheme=scheme,
+                stream=stream,
+            )
+        )
+        try:
+            await stream.wait_started()
+            self._update_cookies(stream.headers.get("set-cookie"))
+            yield stream
+        finally:
+            await stream.aclose()
+
     async def _send(
         self,
         method: str,
@@ -519,6 +556,7 @@ class TestClient:
         data: RequestData | None,
         files: Mapping[str, FileValue] | None,
         scheme: str,
+        stream: AsyncTestStream | None = None,
     ) -> TestResponse:
         payload, content_type = _encode_request_body(body=body, json=json, data=data, files=files)
 
@@ -567,13 +605,19 @@ class TestClient:
         async def receive() -> Message:
             if queue:
                 return queue.pop(0)
+            if stream is None:
+                await asyncio.Event().wait()
+            else:
+                await stream.disconnected.wait()
             return {"type": "http.disconnect"}
 
         async def send(message: Message) -> None:
             nonlocal start_message
+            if stream is not None:
+                await stream.send(message)
             if message["type"] == "http.response.start":
                 start_message = message
-            elif message["type"] == "http.response.body":
+            elif message["type"] == "http.response.body" and stream is None:
                 body_chunks.append(bytes(message.get("body", b"")))
 
         await self.app(scope, receive, send)

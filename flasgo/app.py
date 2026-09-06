@@ -78,6 +78,7 @@ from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
+from .streaming import StreamingResponse
 from .telemetry import Telemetry
 from .templating import JinjaTemplates
 from .types import Receive, Scope, Send
@@ -341,6 +342,10 @@ class Flasgo(RouteDecorators):
                     req.scope["session"] = loaded_session
                     _session_ctx.set(loaded_session)
                     response = await self._dispatch(req)
+                    if isinstance(response, StreamingResponse):
+                        self._track_stream(req, response)
+                        await req.body()
+                        response.receive = req.receive
             except Exception as exc:
                 await self._close_request_dependencies(req, dependencies, exc)
                 response = await self._handle_error(req, exc)
@@ -1071,7 +1076,20 @@ class Flasgo(RouteDecorators):
                 break
         return uuid4().hex
 
+    def _track_stream(self, req: Request, response: Response) -> None:
+        if not isinstance(response, StreamingResponse):
+            return
+        tracked = req.scope.setdefault("flasgo.streams", set())
+        if id(response) not in tracked:
+            tracked.add(id(response))
+            dependencies = req.scope["flasgo.dependencies"]
+            dependencies.request_stack.push_async_callback(response.aclose)
+
     async def _prepare_response(self, req: Request, response: Response) -> None:
+        if isinstance(response, StreamingResponse) and response.receive is None:
+            self._track_stream(req, response)
+            await req.body()
+            response.receive = req.receive
         response.headers.setdefault("x-request-id", req.request_id)
         apply_security_headers(response, self.security)
         is_cors_preflight = req.scope.get("flasgo.cors_preflight") is True
@@ -1417,6 +1435,8 @@ class Flasgo(RouteDecorators):
             rate_limit_result.update(authenticated_rate_limit)
 
         raw_response = await self._call_endpoint(req, match)
+        if isinstance(raw_response, Response):
+            self._track_stream(req, raw_response)
         response = (
             contract_response(raw_response, match.response_model, req)
             if match.response_model is not None
@@ -1464,8 +1484,10 @@ class Flasgo(RouteDecorators):
 
     async def _run_after_middleware(self, req: Request, response: Response) -> Response:
         current = response
+        self._track_stream(req, current)
         for fn in self._after:
             current = to_response(await _maybe_await(fn(req, current)))
+            self._track_stream(req, current)
         return current
 
     async def _call_endpoint(self, req: Request, match: MatchResult) -> ResponseValue:

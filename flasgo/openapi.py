@@ -9,6 +9,7 @@ from .params import EndpointPlan, ParameterBinding, binding_wire_name, walk_bind
 from .ratelimit import endpoint_rate_limits
 from .response import Response
 from .routing import Route
+from .streaming import EventSourceResponse, NDJSONResponse, StreamingResponse
 from .validation import SchemaRegistry, contains_uploaded_file
 
 _PARAM_PATTERN = re.compile(r"<(?:(?P<converter>[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
@@ -195,6 +196,13 @@ def _request_body(binding: ParameterBinding, *, registry: SchemaRegistry) -> dic
 
 def _response_content(annotation: object, *, registry: SchemaRegistry) -> dict[str, Any]:
     annotation = _strip_response_tuple(annotation)
+    stream_types: dict[object, str] = {
+        StreamingResponse: "application/octet-stream",
+        EventSourceResponse: "text/event-stream",
+        NDJSONResponse: "application/x-ndjson",
+    }
+    if annotation in stream_types:
+        return {stream_types[annotation]: {"schema": {"type": "string"}}}
     if annotation is Response or annotation is str:
         return {"text/plain": {"schema": {"type": "string"}}}
     if annotation is bytes:
