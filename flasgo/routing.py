@@ -32,6 +32,7 @@ class MatchResult:
     route_path: str
     name: str | None
     cors: CORSConfig | None
+    methods: frozenset[str]
     response_model: object = None
 
 
@@ -73,6 +74,7 @@ class Route:
             route_path=self.raw_path,
             name=self.name,
             cors=self.cors,
+            methods=self.methods,
             response_model=self.response_model,
         )
 

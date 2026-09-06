@@ -39,6 +39,7 @@ otel = [
     "opentelemetry-instrumentation-asgi==0.65b0",
     "opentelemetry-sdk==1.44.0",
 ]
+redis = ["redis==8.1.0"]
 
 [project.urls]
 Homepage = "https://flasgo.dev"
@@ -62,6 +63,7 @@ dev = [
   "openapi-spec-validator==0.9.0",
   "prometheus-client==0.26.0",
   "pytest==9.1.1",
+  "redis==8.1.0",
   "ruff==0.16.4",
   "ty==0.0.74",
 ]

@@ -47,6 +47,7 @@ from .metrics import Metrics
 from .openapi import build_openapi_spec
 from .params import Depends, Provider, compile_endpoint_plan
 from .ratelimit import (
+    RateLimitBackend,
     RateLimiter,
     build_rate_limit_response,
     endpoint_rate_limits,
@@ -74,10 +75,12 @@ from .security import (
     websocket_origin_is_allowed,
 )
 from .server import run_dev_server
+from .server_sessions import ServerSideSessions
 from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
+from .stores import StoreUnavailable
 from .streaming import StreamingResponse
 from .telemetry import Telemetry
 from .templating import JinjaTemplates
@@ -193,6 +196,8 @@ class Flasgo(RouteDecorators):
         static_cache_max_age: int = 3600,
         tracer_provider: Any | None = None,
         cors: CORSConfig | None = None,
+        rate_limiter: RateLimitBackend | None = None,
+        session_backend: ServerSideSessions | None = None,
     ) -> None:
         self.settings = load_settings(settings)
         self.security = security or self.settings.to_security_config()
@@ -211,7 +216,8 @@ class Flasgo(RouteDecorators):
         self._auth_backends: dict[str, AuthBackend] = {"default": _default_auth_backend}
         self._auth_backend_schemes: dict[str, dict[str, Any]] = {}
         self._route_auth: dict[object, RouteAuth] = {}
-        self._rate_limiter = RateLimiter()
+        self._rate_limiter: RateLimitBackend = rate_limiter if rate_limiter is not None else RateLimiter()
+        self._session_backend = session_backend
         self._openapi_cache: dict[str, Any] | None = None
         self._openapi_dirty = True
         self._security_failures: dict[str, tuple[float, int]] = {}
@@ -355,7 +361,9 @@ class Flasgo(RouteDecorators):
             except Exception as exc:
                 await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-prepare-failed", req=req)
-                if isinstance(exc, HTTPException):
+                if isinstance(exc, StoreUnavailable):
+                    status, detail = 503, "Service Unavailable"
+                elif isinstance(exc, HTTPException):
                     status, detail = exc.status_code, exc.detail
                 else:
                     status, detail = 500, "Internal Server Error"
@@ -535,6 +543,7 @@ class Flasgo(RouteDecorators):
             loaded_session = await self._load_session(upgrade_req)
             upgrade_req.scope["session"] = loaded_session
             upgrade_req.scope["user"] = User.anonymous()
+            upgrade_req.scope["route_template"] = route
             scope["session"] = loaded_session
             scope["user"] = upgrade_req.scope["user"]
 
@@ -617,6 +626,11 @@ class Flasgo(RouteDecorators):
                     await websocket.deny(403, "WebSocket was not accepted")
         except WebSocketDisconnect:
             outcome = "closed"
+        except StoreUnavailable:
+            outcome = "dispatch_error"
+            self._log_security_event(logging.ERROR, "shared-storage-unavailable", req=upgrade_req)
+            if not websocket.accepted and not websocket.disconnected:
+                await websocket.deny(503, "Service Unavailable")
         except Exception:
             outcome = "dispatch_error"
             log_event(
@@ -1097,7 +1111,12 @@ class Flasgo(RouteDecorators):
         cors = req.scope.get("flasgo.cors")
         if isinstance(cors, CORSConfig) and not is_cors_preflight:
             _apply_cors_response_headers(req, response, cors)
-        if not response.allow_public_cache and not is_cors_preflight and not is_metrics_response:
+        if (
+            not response.allow_public_cache
+            and not is_cors_preflight
+            and not is_metrics_response
+            and not req.scope.get("flasgo.storage_failed")
+        ):
             session_token = await self._persist_session(req, response)
             if self.security.csrf_enabled:
                 ensure_csrf_cookie(req, response, self.security, session_token=session_token)
@@ -1414,6 +1433,7 @@ class Flasgo(RouteDecorators):
             )
 
         req.scope["route_template"] = match.route_path
+        req.scope["flasgo.route_id"] = json.dumps([match.route_path, sorted(match.methods)])
         if match.cors is not None:
             req.scope["flasgo.cors"] = match.cors
         else:
@@ -1464,7 +1484,17 @@ class Flasgo(RouteDecorators):
             return headers
 
         # Check all rules atomically using batch method
-        rules_with_ids = [(rule, f"{id(endpoint)}:{index}") for index, rule in indexed_rules]
+        stable_id = str(req.scope.get("flasgo.route_id", req.scope.get("route_template", req.path)))
+        protocol = "websocket" if req.scope.get("flasgo.websocket_upgrade") else "http"
+        rules_with_ids = [
+            (
+                rule,
+                f"{id(endpoint)}:{index}"
+                if isinstance(self._rate_limiter, RateLimiter)
+                else f"{protocol}:{stable_id}:{index}",
+            )
+            for index, rule in indexed_rules
+        ]
         decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
 
         # Process decisions
@@ -1524,6 +1554,10 @@ class Flasgo(RouteDecorators):
         return fallback
 
     async def _handle_error(self, req: Request, exc: Exception) -> Response:
+        if isinstance(exc, StoreUnavailable):
+            req.scope["flasgo.storage_failed"] = True
+            self._log_security_event(logging.ERROR, "shared-storage-unavailable", req=req)
+            return Response.text("Service Unavailable", status_code=503)
         handler = self._find_error_handler(exc)
         if handler is not None:
             try:
@@ -1568,6 +1602,14 @@ class Flasgo(RouteDecorators):
         return None
 
     async def _load_session(self, req: Request) -> Session:
+        if self._session_backend is not None:
+            hosts = _scope_header_values(req.scope, b"host")
+            if self.security.enforce_allowed_hosts and (
+                len(hosts) != 1 or not host_is_allowed(hosts[0], allowed_hosts=self.security.allowed_hosts)
+            ):
+                return Session({})
+            tokens = req.cookie_values(self.security.session_cookie_name)
+            return await self._session_backend.load(tokens[0] if len(tokens) == 1 else None)
         token = req.cookies.get(self.security.session_cookie_name)
         if not token:
             return Session({})
@@ -1578,6 +1620,17 @@ class Flasgo(RouteDecorators):
         current = req.scope.get("session")
         if not isinstance(current, Session) or not current.modified:
             return req.cookies.get(self.security.session_cookie_name)
+        if self._session_backend is not None:
+            token = await self._session_backend.save(current, max_age=self.security.session_cookie_max_age) or ""
+            response.set_cookie(
+                self.security.session_cookie_name,
+                token,
+                max_age=self.security.session_cookie_max_age if token else 0,
+                secure=self.security.session_cookie_secure,
+                http_only=self.security.session_cookie_http_only,
+                same_site=self.security.session_cookie_same_site,
+            )
+            return token
         if not current.data:
             response.cookies.append(
                 build_set_cookie(

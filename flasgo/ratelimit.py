@@ -6,7 +6,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .request import Request
 from .response import Response
@@ -24,9 +24,9 @@ class RateLimitRule:
     key_func: RateLimitKeyFunc | None = None
 
     def __post_init__(self) -> None:
-        if self.requests <= 0:
+        if isinstance(self.requests, bool) or not isinstance(self.requests, int) or self.requests <= 0:
             raise ValueError("Rate limit requests must be greater than 0.")
-        if self.window_seconds <= 0:
+        if isinstance(self.window_seconds, bool) or not math.isfinite(self.window_seconds) or self.window_seconds <= 0:
             raise ValueError("Rate limit window_seconds must be greater than 0.")
         if self.scope is not None and not self.scope.strip():
             raise ValueError("Rate limit scope must not be empty.")
@@ -41,6 +41,10 @@ class RateLimitDecision:
     remaining: int
     reset_after: int
     retry_after: int
+
+
+class RateLimitBackend(Protocol):
+    async def check_batch(self, rules: list[tuple[RateLimitRule, str]], req: Request) -> list[RateLimitDecision]: ...
 
 
 class RateLimiter:

@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -33,6 +33,18 @@ def hmac_digest(secret: str, payload: bytes) -> str:
 class Session:
     data: dict[str, Any]
     modified: bool = False
+    _session_id: str | None = field(default=None, repr=False)
+    _stored: bytes | None = field(default=None, repr=False)
+    _rotate: bool = field(default=False, repr=False)
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    def regenerate(self) -> None:
+        """Rotate a server-side session ID on save, for example after login."""
+        self._rotate = True
+        self.modified = True
 
     def __getitem__(self, key: str) -> Any:
         return self.data[key]
