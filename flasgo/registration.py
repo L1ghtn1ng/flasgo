@@ -19,6 +19,7 @@ class RouteDecorators:
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> None:
         raise NotImplementedError
@@ -30,6 +31,7 @@ class RouteDecorators:
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> Callable[[Endpoint], Endpoint]:
         def decorator(func: Endpoint) -> Endpoint:
@@ -39,6 +41,7 @@ class RouteDecorators:
                 methods=methods,
                 name=name,
                 cors=cors,
+                response_model=response_model,
                 dependencies=dependencies,
             )
             return func
@@ -51,6 +54,7 @@ class RouteDecorators:
         *,
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> Callable[[Endpoint], Endpoint]:
         return self.route(
@@ -58,6 +62,7 @@ class RouteDecorators:
             methods=("GET",),
             name=name,
             cors=cors,
+            response_model=response_model,
             dependencies=dependencies,
         )
 
@@ -67,6 +72,7 @@ class RouteDecorators:
         *,
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> Callable[[Endpoint], Endpoint]:
         return self.route(
@@ -74,6 +80,7 @@ class RouteDecorators:
             methods=("POST",),
             name=name,
             cors=cors,
+            response_model=response_model,
             dependencies=dependencies,
         )
 
@@ -83,6 +90,7 @@ class RouteDecorators:
         *,
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> Callable[[Endpoint], Endpoint]:
         return self.route(
@@ -90,6 +98,7 @@ class RouteDecorators:
             methods=("PUT",),
             name=name,
             cors=cors,
+            response_model=response_model,
             dependencies=dependencies,
         )
 
@@ -99,6 +108,7 @@ class RouteDecorators:
         *,
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> Callable[[Endpoint], Endpoint]:
         return self.route(
@@ -106,6 +116,7 @@ class RouteDecorators:
             methods=("PATCH",),
             name=name,
             cors=cors,
+            response_model=response_model,
             dependencies=dependencies,
         )
 
@@ -115,6 +126,7 @@ class RouteDecorators:
         *,
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> Callable[[Endpoint], Endpoint]:
         return self.route(
@@ -122,5 +134,6 @@ class RouteDecorators:
             methods=("DELETE",),
             name=name,
             cors=cors,
+            response_model=response_model,
             dependencies=dependencies,
         )

@@ -329,7 +329,7 @@ class SchemaRegistry:
         required: list[str] = []
         hints = _model_hints(model)
         for model_field in fields(model):
-            if input_model and not model_field.init:
+            if (input_model and not model_field.init) or (not input_model and model_field.name.startswith("_")):
                 continue
             properties[model_field.name] = self.schema_for(
                 hints.get(model_field.name, model_field.type),

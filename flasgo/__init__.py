@@ -11,6 +11,7 @@ from .auth import (
     extract_bearer_token,
 )
 from .background import BackgroundTasks
+from .contracts import ResponseValidationError
 from .cors import CORSConfig
 from .exceptions import HTTPException, abort
 from .globals import current_user, jsonify, redirect, request, session
@@ -67,6 +68,7 @@ __all__ = [
     "Request",
     "RequestValidationError",
     "Response",
+    "ResponseValidationError",
     "SSRFConfig",
     "SSRFGuard",
     "SSRFResolvedURL",

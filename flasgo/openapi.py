@@ -100,7 +100,10 @@ def _build_operation(
         "responses": {
             "200": {
                 "description": "Successful Response",
-                "content": _response_content(plan.return_annotation, registry=registry),
+                "content": _response_content(
+                    route.response_model if route.response_model is not None else plan.return_annotation,
+                    registry=registry,
+                ),
             }
         },
     }

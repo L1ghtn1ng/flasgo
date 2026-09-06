@@ -31,6 +31,7 @@ from .auth import (
     extract_bearer_token,
     validate_openapi_security_scheme,
 )
+from .contracts import contract_response, validate_response_model
 from .cors import (
     CORSConfig,
     _apply_cors_response_headers,
@@ -856,6 +857,7 @@ class Flasgo(RouteDecorators):
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> None:
         if cors is not None and cors is not False and not isinstance(cors, CORSConfig):
@@ -878,6 +880,8 @@ class Flasgo(RouteDecorators):
         if "GET" in normalized:
             normalized = frozenset((*normalized, "HEAD"))
         resolved_cors = self.cors if cors is None else None if cors is False else cors
+        if response_model is not None:
+            validate_response_model(response_model)
         plan = compile_endpoint_plan(endpoint, path, dependencies=dependencies)
         self._routes.append(
             Route(
@@ -887,6 +891,7 @@ class Flasgo(RouteDecorators):
                 plan,
                 name=name,
                 cors=resolved_cors,
+                response_model=response_model,
             )
         )
         if resolved_cors is not None:
@@ -1358,7 +1363,11 @@ class Flasgo(RouteDecorators):
             rate_limit_result.update(authenticated_rate_limit)
 
         raw_response = await self._call_endpoint(req, match)
-        response = to_response(raw_response)
+        response = (
+            contract_response(raw_response, match.response_model, req)
+            if match.response_model is not None
+            else to_response(raw_response)
+        )
         response.headers.update(rate_limit_result)
         return await self._run_after_middleware(req, response)
 

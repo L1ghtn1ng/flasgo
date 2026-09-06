@@ -32,6 +32,7 @@ class MatchResult:
     route_path: str
     name: str | None
     cors: CORSConfig | None
+    response_model: object = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -50,6 +51,7 @@ class Route:
     endpoint_plan: EndpointPlan
     name: str | None = None
     cors: CORSConfig | None = None
+    response_model: object = None
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
 
@@ -70,6 +72,7 @@ class Route:
             route_path=self.raw_path,
             name=self.name,
             cors=self.cors,
+            response_model=self.response_model,
         )
 
     def path_matches(self, path: str) -> bool:
