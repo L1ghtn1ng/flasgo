@@ -8,12 +8,16 @@ from flasgo import Flasgo
 
 @pytest.mark.parametrize("stalled", [False, True])
 def test_benchmark_startup_failure_is_bounded_and_cleans_up(monkeypatch: pytest.MonkeyPatch, stalled: bool) -> None:
+    """Verify failed or stalled benchmark startup reports an error and leaves no lifespan task."""
+
     async def run() -> None:
+        """Inject the startup failure mode and check bounded waiting and generator cleanup."""
         app = Flasgo()
         closed = asyncio.Event()
 
         @app.lifespan
         async def startup(current: Flasgo) -> AsyncGenerator[None]:
+            """Fail or stall before startup completion and record lifespan generator cleanup."""
             try:
                 if stalled:
                     await asyncio.Event().wait()

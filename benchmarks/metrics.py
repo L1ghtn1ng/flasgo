@@ -22,6 +22,7 @@ _LIFESPAN_TIMEOUT_SECONDS = 10
 
 
 def scope(path: str) -> dict[str, Any]:
+    """Build an HTTP scope with the benchmark Host and metrics bearer token."""
     return {
         "type": "http",
         "asgi": {"version": "3.0"},
@@ -38,23 +39,28 @@ def scope(path: str) -> dict[str, Any]:
 
 
 async def measure(enabled: bool, streaming: bool, routes: int, requests: int, rounds: int) -> dict[str, Any]:
+    """Measure median request and scrape costs for one route-count and response configuration."""
     app = Flasgo(settings={"METRICS_ENABLED": enabled, "METRICS_BEARER_TOKEN": _TOKEN, "CSRF_ENABLED": False})
 
     async def chunks() -> AsyncIterator[bytes]:
+        """Yield sixteen fixed-size chunks to measure streaming overhead."""
         for _ in range(16):
             yield b"x" * 1024
 
     async def endpoint():
+        """Return either a buffered payload or a fresh streaming response for this case."""
         return StreamingResponse(chunks()) if streaming else b"x" * 1024
 
     for index in range(routes):
         app.add_route(f"/route/{index}", endpoint, methods={"GET"}, name=f"route_{index}")
 
     async def invoke(path: str) -> int:
+        """Invoke the app in process and return the number of body bytes sent."""
         received = False
         size = 0
 
         async def receive():
+            """Deliver an empty request body once, then keep the simulated connection open."""
             nonlocal received
             if not received:
                 received = True
@@ -63,6 +69,7 @@ async def measure(enabled: bool, streaming: bool, routes: int, requests: int, ro
             raise AssertionError("unreachable")
 
         async def send(message):
+            """Count response body bytes without retaining or transporting the payload."""
             nonlocal size
             size += len(message.get("body", b""))
 
@@ -73,6 +80,7 @@ async def measure(enabled: bool, streaming: bool, routes: int, requests: int, ro
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     async def lifespan_send(message):
+        """Complete the startup future with either success or the reported application failure."""
         if message["type"] == "lifespan.startup.complete":
             ready.set_result(None)
         elif message["type"] == "lifespan.startup.failed":
@@ -112,6 +120,7 @@ async def measure(enabled: bool, streaming: bool, routes: int, requests: int, ro
 
 
 async def main(requests: int, rounds: int) -> None:
+    """Run the buffered and streaming matrix with metrics disabled and enabled, then emit JSON."""
     results = []
     for routes in (1, 100):
         for streaming in (False, True):
