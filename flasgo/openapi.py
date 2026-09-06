@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection, Iterable, Mapping
-from typing import Any, get_args, get_origin
+from typing import Annotated, Any, get_args, get_origin
 
 from .auth import HasScope
 from .params import EndpointPlan, ParameterBinding, binding_wire_name, walk_bindings
 from .ratelimit import endpoint_rate_limits
 from .response import Response
 from .routing import Route
+from .streaming import EventSourceResponse, NDJSONResponse, StreamingResponse
 from .validation import SchemaRegistry, contains_uploaded_file
 
 _PARAM_PATTERN = re.compile(r"<(?:(?P<converter>[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
@@ -89,6 +90,23 @@ def _build_operation(
     csrf_enabled: bool,
     csrf_safe_methods: Collection[str],
 ) -> tuple[dict[str, Any], str | None]:
+    """
+    Build an OpenAPI operation definition for a route and HTTP method.
+
+    Parameters:
+        route (Route): Route whose operation is being described.
+        plan (EndpointPlan): Endpoint plan containing request bindings and response annotations.
+        method (str): HTTP method for the operation.
+        known_operation_ids (set[str]): Operation IDs already assigned, used to ensure uniqueness.
+        registry (SchemaRegistry): Schema registry used to generate component references.
+        route_auth (Mapping[object, object]): Authentication configuration associated with routes.
+        auth_schemes (Mapping[str, dict[str, Any]]): Available OpenAPI security schemes.
+        csrf_enabled (bool): Whether CSRF responses should be included for unsafe methods.
+        csrf_safe_methods (Collection[str]): Methods exempt from CSRF protection.
+
+    Returns:
+        tuple[dict[str, Any], str | None]: The operation definition and the name of its security scheme, if authentication applies.
+    """
     parameters = _path_parameters(route.raw_path)
     bindings = walk_bindings(plan)
     parameters.extend(_bound_parameters(bindings, registry=registry))
@@ -100,7 +118,10 @@ def _build_operation(
         "responses": {
             "200": {
                 "description": "Successful Response",
-                "content": _response_content(plan.return_annotation, registry=registry),
+                "content": _response_content(
+                    route.response_model if route.response_model is not None else plan.return_annotation,
+                    registry=registry,
+                ),
             }
         },
     }
@@ -138,9 +159,7 @@ def _build_operation(
         operation["responses"].setdefault("403", {"description": "Forbidden"})
         if backend_name in auth_schemes:
             permissions = getattr(auth, "permissions", ())
-            required_scopes = sorted(
-                {permission.scope for permission in permissions if isinstance(permission, HasScope)}
-            )
+            required_scopes = sorted({permission.scope for permission in permissions if isinstance(permission, HasScope)})
             operation["security"] = [{backend_name: required_scopes}]
             security_name = backend_name
     return operation, security_name
@@ -191,7 +210,26 @@ def _request_body(binding: ParameterBinding, *, registry: SchemaRegistry) -> dic
 
 
 def _response_content(annotation: object, *, registry: SchemaRegistry) -> dict[str, Any]:
+    """
+    Map a response annotation to its OpenAPI content definition.
+
+    Parameters:
+        annotation (object): The response annotation to convert.
+        registry (SchemaRegistry): The schema registry used for annotations requiring generated schemas.
+
+    Returns:
+        dict[str, Any]: An OpenAPI content mapping with the appropriate media type and schema.
+    """
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
     annotation = _strip_response_tuple(annotation)
+    stream_types: dict[object, str] = {
+        StreamingResponse: "application/octet-stream",
+        EventSourceResponse: "text/event-stream",
+        NDJSONResponse: "application/x-ndjson",
+    }
+    if annotation in stream_types:
+        return {stream_types[annotation]: {"schema": {"type": "string"}}}
     if annotation is Response or annotation is str:
         return {"text/plain": {"schema": {"type": "string"}}}
     if annotation is bytes:
@@ -269,13 +307,7 @@ def _path_parameters(path: str) -> list[dict[str, Any]]:
     parameters: list[dict[str, Any]] = []
     for match in _PARAM_PATTERN.finditer(path):
         converter = match.group("converter") or "str"
-        schema = (
-            {"type": "integer"}
-            if converter == "int"
-            else {"type": "number"}
-            if converter == "float"
-            else {"type": "string"}
-        )
+        schema = {"type": "integer"} if converter == "int" else {"type": "number"} if converter == "float" else {"type": "string"}
         parameters.append({"name": match.group("name"), "in": "path", "required": True, "schema": schema})
     return parameters
 

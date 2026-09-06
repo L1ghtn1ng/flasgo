@@ -63,9 +63,7 @@ def run_with_reload(
     try:
         from watchfiles import run_process
     except ImportError as exc:
-        raise RuntimeError(
-            "Reload support requires the 'watchfiles' package. Install project dependencies and retry."
-        ) from exc
+        raise RuntimeError("Reload support requires the 'watchfiles' package. Install project dependencies and retry.") from exc
 
     watch_paths = tuple(str(resolve_reload_dir(path)) for path in (reload_dirs or (Path.cwd(),)))
     command = build_reload_command()
@@ -103,9 +101,7 @@ def build_reload_command() -> str:
     if not argv:
         argv = [sys.executable, *sys.argv]
     if len(argv) < 2 and not Path(argv[0]).exists():
-        raise RuntimeError(
-            "Reload support requires starting Flasgo from a Python script or module import, not an interactive shell."
-        )
+        raise RuntimeError("Reload support requires starting Flasgo from a Python script or module import, not an interactive shell.")
     return shlex.join(argv)
 
 

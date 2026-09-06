@@ -30,9 +30,7 @@ class Telemetry:
             from opentelemetry import trace
             from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
         except ImportError as exc:
-            raise RuntimeError(
-                "OpenTelemetry tracing requires the optional dependency. Install Flasgo with `flasgo[otel]`."
-            ) from exc
+            raise RuntimeError("OpenTelemetry tracing requires the optional dependency. Install Flasgo with `flasgo[otel]`.") from exc
 
         self._excluded_paths = frozenset((*settings.OTEL_EXCLUDED_PATHS, settings.METRICS_PATH))
         self._app = app
@@ -111,9 +109,7 @@ def _build_tracer_provider(settings: Settings) -> Any:
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
     except ImportError as exc:
-        raise RuntimeError(
-            "Turnkey OpenTelemetry export requires the optional dependency. Install Flasgo with `flasgo[otel]`."
-        ) from exc
+        raise RuntimeError("Turnkey OpenTelemetry export requires the optional dependency. Install Flasgo with `flasgo[otel]`.") from exc
 
     attributes: dict[str, str] = {"service.name": settings.OTEL_SERVICE_NAME}
     if settings.OTEL_SERVICE_VERSION:

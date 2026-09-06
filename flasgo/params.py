@@ -3,9 +3,9 @@ from __future__ import annotations
 import inspect
 import re
 from annotationlib import Format, ForwardRef
-from collections.abc import Callable
-from dataclasses import dataclass, is_dataclass
-from typing import Annotated, Any, get_args, get_origin, get_type_hints
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, is_dataclass, replace
+from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 from .request import Request
 from .routing import Endpoint
@@ -67,6 +67,21 @@ class Depends:
 
     provider: Provider
     use_cache: bool = True
+    scope: Literal["function", "request"] = "request"
+
+    def __post_init__(self) -> None:
+        """Validate the dependency provider, scope, and cache configuration.
+
+        Raises:
+            TypeError: If the provider is not callable or `use_cache` is not a boolean.
+            ValueError: If the scope is not `"function"` or `"request"`.
+        """
+        if not callable(self.provider):
+            raise TypeError("Depends provider must be callable.")
+        if self.scope not in {"function", "request"}:
+            raise ValueError("Depends scope must be 'function' or 'request'.")
+        if not isinstance(self.use_cache, bool):
+            raise TypeError("Depends use_cache must be a bool.")
 
 
 type ParameterMarker = Body | Query | Header | Cookie | Form | Depends
@@ -91,13 +106,44 @@ class EndpointPlan:
     endpoint: Provider
     bindings: tuple[ParameterBinding, ...]
     return_annotation: object = inspect.Signature.empty
+    dependencies: tuple[ParameterBinding, ...] = ()
 
 
-def compile_endpoint_plan(endpoint: Endpoint, route_path: str) -> EndpointPlan:
-    """Compile one endpoint and its dependency graph into a stable binding plan."""
+def compile_endpoint_plan(
+    endpoint: Endpoint,
+    route_path: str,
+    *,
+    dependencies: Sequence[Depends] = (),
+) -> EndpointPlan:
+    """Compile an endpoint and its dependency graph into a stable parameter-binding plan.
+
+    Parameters:
+        endpoint (Endpoint): The endpoint callable to compile.
+        route_path (str): The route pattern used to identify path parameters.
+        dependencies (Sequence[Depends]): Route-level dependency markers to include in the plan.
+
+    Returns:
+        EndpointPlan: The compiled endpoint plan.
+    """
 
     path_names = {match.group("name") for match in _PATH_PARAM_PATTERN.finditer(route_path)}
     plan = _compile_callable(endpoint, path_names=path_names, stack=())
+    extra = []
+    for index, marker in enumerate(dependencies):
+        if not isinstance(marker, Depends):
+            raise TypeError("Route dependencies must be Depends instances.")
+        extra.append(
+            ParameterBinding(
+                str(index),
+                Any,
+                "dependency",
+                inspect.Parameter.empty,
+                marker=marker,
+                dependency=_compile_callable(marker.provider, path_names=path_names, stack=(endpoint,)),
+            )
+        )
+    plan = replace(plan, dependencies=tuple(extra))
+    _validate_dependency_scopes(plan)
     body_sources = _body_sources(plan, seen=set())
     if len(body_sources) > 1:
         endpoint_name = _callable_name(endpoint)
@@ -114,25 +160,38 @@ def _compile_callable(
     path_names: set[str],
     stack: tuple[Provider, ...],
 ) -> EndpointPlan:
+    """
+    Compile a callable into an endpoint plan with validated parameter bindings and dependencies.
+
+    Parameters:
+        endpoint (Provider): Callable whose signature and annotations are compiled.
+        path_names (set[str]): Route parameter names that must be bound from the path.
+        stack (tuple[Provider, ...]): Providers currently being compiled for cycle detection.
+
+    Returns:
+        EndpointPlan: The compiled endpoint plan, including parameter bindings and return annotation.
+
+    Raises:
+        TypeError: If the callable has unsupported parameters, invalid annotations or markers,
+            an invalid dependency, or a dependency cycle.
+    """
     if any(endpoint is item for item in stack):
         chain = " -> ".join(getattr(item, "__name__", repr(item)) for item in (*stack, endpoint))
         raise TypeError(f"Dependency cycle detected: {chain}")
 
     signature = inspect.signature(endpoint)
     try:
-        hints = get_type_hints(endpoint, include_extras=True)
+        hints = get_type_hints(inspect.unwrap(endpoint), include_extras=True)
     except (NameError, TypeError) as exc:
         try:
-            hints = get_type_hints(endpoint, include_extras=True, format=Format.FORWARDREF)
+            hints = get_type_hints(inspect.unwrap(endpoint), include_extras=True, format=Format.FORWARDREF)
         except (NameError, TypeError) as fallback_exc:
             raise TypeError(f"Could not resolve annotations for {_callable_name(endpoint)!r}: {fallback_exc}") from exc
 
     bindings: list[ParameterBinding] = []
     for parameter in signature.parameters.values():
         if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL}:
-            raise TypeError(
-                f"Endpoint parameter {parameter.name!r} on {_callable_name(endpoint)!r} must be keyword-compatible."
-            )
+            raise TypeError(f"Endpoint parameter {parameter.name!r} on {_callable_name(endpoint)!r} must be keyword-compatible.")
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             continue
         if isinstance(parameter.default, (Body, Query, Header, Cookie, Form, Depends)):
@@ -144,10 +203,7 @@ def _compile_callable(
         annotation = hints.get(parameter.name, parameter.annotation)
         annotation, marker = _split_marker(annotation, endpoint=endpoint, parameter=parameter.name)
         if marker is not None and _contains_forward_ref(annotation):
-            raise TypeError(
-                f"Could not resolve the marked annotation for parameter {parameter.name!r} "
-                f"on {_callable_name(endpoint)!r}."
-            )
+            raise TypeError(f"Could not resolve the marked annotation for parameter {parameter.name!r} on {_callable_name(endpoint)!r}.")
         default = parameter.default
 
         if parameter.name in path_names:
@@ -194,9 +250,7 @@ def _compile_callable(
             continue
         if isinstance(marker, Form):
             if not is_dataclass(annotation) or not isinstance(annotation, type):
-                raise TypeError(
-                    f"Form parameter {parameter.name!r} on {_callable_name(endpoint)!r} must use a dataclass model."
-                )
+                raise TypeError(f"Form parameter {parameter.name!r} on {_callable_name(endpoint)!r} must use a dataclass model.")
             bindings.append(ParameterBinding(parameter.name, annotation, "form", default, marker=marker))
             continue
 
@@ -225,12 +279,22 @@ def _contains_forward_ref(annotation: object) -> bool:
 
 
 def _body_sources(plan: EndpointPlan, *, seen: set[int]) -> set[tuple[int, str, str]]:
+    """
+    Collect body and form parameter sources from an endpoint plan and its dependencies.
+
+    Parameters:
+        plan (EndpointPlan): The endpoint plan to inspect.
+        seen (set[int]): Endpoint identifiers already visited during traversal.
+
+    Returns:
+        set[tuple[int, str, str]]: Body and form sources identified by endpoint, source type, and parameter name.
+    """
     endpoint_id = id(plan.endpoint)
     if endpoint_id in seen:
         return set()
     seen.add(endpoint_id)
     sources: set[tuple[int, str, str]] = set()
-    for binding in plan.bindings:
+    for binding in (*plan.dependencies, *plan.bindings):
         if binding.source in {"body", "form"}:
             sources.add((endpoint_id, binding.source, binding.name))
         elif binding.dependency is not None:
@@ -249,7 +313,7 @@ def walk_bindings(plan: EndpointPlan) -> tuple[ParameterBinding, ...]:
         if endpoint_id in seen:
             return
         seen.add(endpoint_id)
-        for binding in current.bindings:
+        for binding in (*current.dependencies, *current.bindings):
             collected.append(binding)
             if binding.dependency is not None:
                 visit(binding.dependency)
@@ -288,7 +352,38 @@ def _reject_reserved_header(value: str) -> None:
 
 
 def _contains_collection(annotation: object) -> bool:
+    """Determine whether an annotation contains a list, set, or tuple type."""
     origin = get_origin(annotation)
     if origin in {list, set, tuple}:
         return True
     return any(_contains_collection(item) for item in get_args(annotation))
+
+
+def _validate_dependency_scopes(
+    plan: EndpointPlan,
+    *,
+    parent_scope: str | None = None,
+    _seen: set[tuple[int, str | None]] | None = None,
+) -> None:
+    """
+    Validate dependency scope nesting throughout an endpoint plan.
+
+    Parameters:
+        plan (EndpointPlan): The dependency plan to validate.
+        parent_scope (str | None): Scope inherited from the parent dependency.
+
+    Raises:
+        TypeError: If a request-scoped dependency depends on a function-scoped dependency.
+    """
+    seen = _seen if _seen is not None else set()
+    key = (id(plan.endpoint), parent_scope)
+    if key in seen:
+        return
+    seen.add(key)
+    for binding in (*plan.dependencies, *plan.bindings):
+        marker = binding.marker
+        if not isinstance(marker, Depends) or binding.dependency is None:
+            continue
+        if parent_scope == "request" and marker.scope == "function":
+            raise TypeError("A request-scoped dependency cannot depend on a function-scoped dependency.")
+        _validate_dependency_scopes(binding.dependency, parent_scope=marker.scope, _seen=seen)

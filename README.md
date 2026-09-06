@@ -5,7 +5,7 @@ Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
 - Django security defaults: CSRF protection, host validation, secure headers, signed sessions.
 
-The current framework release is `0.8.0`.
+The current framework release is `0.9.0`.
 
 ## Project goals
 
@@ -163,7 +163,7 @@ async def create_job() -> Response:
     return response
 ```
 
-Background tasks run sequentially after the final buffered response is sent successfully. A task failure is logged
+Background tasks run sequentially after the complete response is sent successfully and request dependencies close. A task failure is logged
 and does not stop later tasks. Tasks are in-process best effort work, so use a durable queue for critical jobs.
 
 For cross-origin WebSockets, add exact origins such as `https://app.example.com` to
@@ -320,7 +320,8 @@ For protected HTTP and WebSocket routes, default IP-based rules execute before a
 not repeatedly invoke a backend. Rules with a custom `key_func` execute after successful authentication so they can
 use the authenticated identity. Repeated authentication failures are also subject to the security-failure limiter.
 
-The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. If the ASGI server provides no client identity, security-failure events are still logged but never throttle a shared "unknown" bucket, so one client cannot lock out the others; run behind a server that supplies peer addresses. In multi-process or multi-host production deployments, use a shared external limiter at the edge or a future shared-storage backend so all workers enforce the same quota.
+The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. If the ASGI server provides no client identity, security-failure events are still logged but never throttle a shared "unknown" bucket, so one client cannot lock out the others; run behind a server that supplies peer addresses. In multi-process or multi-host production deployments, use an edge limiter or the optional `RedisRateLimiter` so all workers enforce the same decorated route quota.
+See the [shared storage guide](https://flasgo.dev/guides/shared-storage/).
 
 ## Typed request data and dependencies
 
@@ -382,6 +383,8 @@ not markup. Non-finite floats (`NaN`, `Infinity`) are rejected on input and neve
 
 When a handler returns a dataclass instance, Flasgo recursively converts nested dataclasses to JSON and omits every
 underscore-prefixed dataclass field before conversion. Ordinary mapping keys are application data and are not filtered.
+Typed mapping models require `str` or `Any` keys; output keys must always be strings. Unsupported key types fail
+at route registration or stream construction.
 
 The same per-route endpoint plan drives runtime binding and OpenAPI generation, so request models, aliases, validation
 responses, and dependency-provided query fields stay aligned. Duplicate wire parameters merge requiredness when their
@@ -561,6 +564,32 @@ handing off.
   - `(body, status)` / `(body, status, headers)`
   - `Response`
   - dataclass instances (recursive JSON; underscore-prefixed fields are omitted at every dataclass level)
+
+## Application structure, contracts, and shared storage
+
+The current development branch adds the following opt-in APIs. The website guides cover
+[blueprints](https://flasgo.dev/guides/blueprints-and-url-generation/),
+[policy checks](https://flasgo.dev/guides/policy-and-deployment-checks/),
+[dependencies](https://flasgo.dev/guides/request-data-and-dependencies/),
+[response contracts](https://flasgo.dev/guides/response-contracts/),
+[streaming](https://flasgo.dev/guides/streaming-responses/), and
+[shared storage](https://flasgo.dev/guides/shared-storage/), including defaults, migration behavior, and testing.
+
+- `Blueprint`: reusable HTTP route groups with nested prefixes, namespaced endpoints, additive permissions,
+  shared dependencies, and atomic registration through `Flasgo.register_blueprint`.
+- `url_for` and `Flasgo.url_for`: validated relative URL generation, also available in configured Jinja templates.
+- `Flasgo.policy_snapshot`, `flasgo routes --policy/--json`, and `flasgo check --deploy/--against/--json`:
+  inspect framework policy and review changes in CI without exporting secrets. Save baselines atomically with
+  `flasgo routes app.py --json --output policy.json` (`-o`); this keeps app import output out of the snapshot.
+- `Depends`: sync/async generator providers with function/request lifetimes and deterministic cleanup;
+  `Flasgo.override_dependencies` supplies context-local test overrides.
+- `response_model=` and `ResponseValidationError`: opt-in response validation and recursive public-field filtering
+  using dataclasses; existing untyped responses keep their behavior.
+- `StreamingResponse`, `EventSourceResponse`, `ServerSentEvent`, and `NDJSONResponse`: bounded async streaming,
+  safe JSON event framing, disconnect cleanup, and incremental tests through `TestClient.astream`.
+- `RedisStore`, `RedisRateLimiter`, `ServerSideSessions`, `MemoryStore`, and `StoreUnavailable`: optional shared
+  route quotas and revocable server-side sessions, with atomic updates and explicit failure behavior.
+  Install `flasgo[redis]` for the Redis/Valkey client adapter. Signed-cookie sessions remain the default.
 
 ## Flask-style globals
 

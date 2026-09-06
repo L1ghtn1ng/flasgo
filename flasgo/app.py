@@ -7,12 +7,14 @@ import json
 import logging
 import re
 import secrets
+import sys
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -29,6 +31,7 @@ from .auth import (
     extract_bearer_token,
     validate_openapi_security_scheme,
 )
+from .contracts import contract_response, validate_response_model
 from .cors import (
     CORSConfig,
     _apply_cors_response_headers,
@@ -37,19 +40,21 @@ from .cors import (
     _parse_cors_preflight,
 )
 from .debug import Debug
-from .di import resolve_endpoint_arguments
+from .di import DependencyContext, resolve_endpoint_arguments
 from .exceptions import HTTPException
 from .logging import configure_logging, log_event
 from .metrics import Metrics
 from .openapi import build_openapi_spec
-from .params import compile_endpoint_plan
+from .params import Depends, Provider, compile_endpoint_plan
 from .ratelimit import (
+    RateLimitBackend,
     RateLimiter,
     build_rate_limit_response,
     endpoint_rate_limits,
     rate_limit,
     rate_limit_success_headers,
 )
+from .registration import RouteDecorators
 from .request import Request
 from .response import Response, ResponseValue, to_response
 from .routing import (
@@ -70,10 +75,13 @@ from .security import (
     websocket_origin_is_allowed,
 )
 from .server import run_dev_server
+from .server_sessions import ServerSideSessions
 from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
+from .stores import StoreUnavailable
+from .streaming import StreamingResponse
 from .telemetry import Telemetry
 from .templating import JinjaTemplates
 from .types import Receive, Scope, Send
@@ -81,6 +89,7 @@ from .validation import RequestValidationError
 from .websockets import WebSocket, WebSocketDisconnect
 
 if TYPE_CHECKING:
+    from .blueprints import Blueprint
     from .testing import TestClient
 
 BeforeMiddleware = Callable[[Request], ResponseValue | Awaitable[ResponseValue] | None]
@@ -96,9 +105,7 @@ _HTTP_METHOD_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 # Stable HTTP server span known methods (RFC 9110 + PATCH + QUERY).
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
-_OTEL_HTTP_METHODS = frozenset(
-    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"}
-)
+_OTEL_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 _INSECURE_SENTINEL = "dev-insecure-secret-change-this"
 _SWAGGER_UI_VERSION = "5.32.12"
 _SWAGGER_UI_CSS_INTEGRITY = "sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT"
@@ -165,7 +172,15 @@ def session() -> Session:
 
 
 def user() -> User:
-    """Return the active user for the current handler."""
+    """
+    Get the active user for the current HTTP request.
+
+    Returns:
+        User: The user associated with the active request.
+
+    Raises:
+        RuntimeError: If accessed outside an active HTTP request.
+    """
 
     current = _user_ctx.get()
     if current is None:
@@ -173,7 +188,7 @@ def user() -> User:
     return current
 
 
-class Flasgo:
+class Flasgo(RouteDecorators):
     """Async-first web application with Flask-style routing and secure defaults."""
 
     def __init__(
@@ -187,7 +202,27 @@ class Flasgo:
         static_cache_max_age: int = 3600,
         tracer_provider: Any | None = None,
         cors: CORSConfig | None = None,
+        rate_limiter: RateLimitBackend | None = None,
+        session_backend: ServerSideSessions | None = None,
     ) -> None:
+        """
+        Initialize the application with its security, routing, middleware, session, and optional integration configuration.
+
+        Parameters:
+            settings (SettingsInput | None): Application settings used to configure default behavior.
+            security (SecurityConfig | None): Security configuration; derived from settings when omitted.
+            templates (JinjaTemplates | None): Template environment available to the application.
+            static_folder (str | Path | None): Directory to serve as static files.
+            static_url_path (str): URL prefix for static files.
+            static_cache_max_age (int): Maximum cache lifetime for static files, in seconds.
+            tracer_provider (Any | None): Optional telemetry tracer provider.
+            cors (CORSConfig | None): Cross-origin resource sharing configuration.
+            rate_limiter (RateLimitBackend | None): Optional custom rate-limiting backend.
+            session_backend (ServerSideSessions | None): Optional server-side session backend.
+
+        Raises:
+            TypeError: If `cors` is not a `CORSConfig` instance or `None`.
+        """
         self.settings = load_settings(settings)
         self.security = security or self.settings.to_security_config()
         self._validate_security_config()
@@ -205,7 +240,8 @@ class Flasgo:
         self._auth_backends: dict[str, AuthBackend] = {"default": _default_auth_backend}
         self._auth_backend_schemes: dict[str, dict[str, Any]] = {}
         self._route_auth: dict[object, RouteAuth] = {}
-        self._rate_limiter = RateLimiter()
+        self._rate_limiter: RateLimitBackend = rate_limiter if rate_limiter is not None else RateLimiter()
+        self._session_backend = session_backend
         self._openapi_cache: dict[str, Any] | None = None
         self._openapi_dirty = True
         self._security_failures: dict[str, tuple[float, int]] = {}
@@ -217,6 +253,10 @@ class Flasgo:
         self._lifespan_iterator: AsyncGenerator[None] | None = None
         self._lifespan_active = False
         self.state = SimpleNamespace()
+        self._dependency_overrides: ContextVar[Mapping[Provider, Provider]] = ContextVar(
+            "flasgo_dependency_overrides",
+            default=MappingProxyType({}),
+        )
         self._metrics = Metrics() if self.settings.METRICS_ENABLED else None
         self._telemetry = (
             Telemetry(
@@ -271,6 +311,14 @@ class Flasgo:
         raise RuntimeError(f"Unsupported ASGI scope type: {scope_type!r}")
 
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """
+        Handle an HTTP request through dispatch, response preparation, sending, cleanup, and metrics recording.
+
+        Parameters:
+                scope (Scope): The ASGI HTTP connection scope.
+                receive (Receive): Callable that receives ASGI events.
+                send (Send): Callable that sends ASGI events.
+        """
         started = time.perf_counter()
         if _request_head_size(scope) > self.security.max_request_head_bytes:
             instrument = self._metrics is not None and scope.get("path") != self.settings.METRICS_PATH
@@ -305,6 +353,7 @@ class Flasgo:
                         self._metrics.http_active.dec()
             return
         req = Request(scope, receive)
+        req.scope["flasgo.app"] = self
         req.scope["max_request_body_bytes"] = self.security.max_request_body_bytes
         req.scope["request_read_timeout_seconds"] = self.security.request_read_timeout_seconds
         req.scope["max_multipart_parts"] = self.security.max_multipart_parts
@@ -316,31 +365,45 @@ class Flasgo:
         if instrument:
             self._metrics.http_active.inc()
         req_token = _request_ctx.set(req)
-        loaded_session = self._load_session(req)
+        loaded_session = Session({})
         req.scope["session"] = loaded_session
         session_token = _session_ctx.set(loaded_session)
         req.scope["user"] = User.anonymous()
         user_token = _user_ctx.set(req.scope["user"])
+        contexts_reset = False
+        dependencies = DependencyContext(self._dependency_overrides.get())
+        req.scope["flasgo.dependencies"] = dependencies
         try:
             try:
-                response = await self._dispatch(req)
+                async with dependencies.function_stack:
+                    loaded_session = await self._load_session(req)
+                    req.scope["session"] = loaded_session
+                    _session_ctx.set(loaded_session)
+                    response = await self._dispatch(req)
+                    if isinstance(response, StreamingResponse):
+                        self._track_stream(req, response)
+                        await req.body()
+                        response.receive = req.receive
             except Exception as exc:
+                await self._close_request_dependencies(req, dependencies, exc)
                 response = await self._handle_error(req, exc)
-            finally:
-                _user_ctx.reset(user_token)
-                _session_ctx.reset(session_token)
-                _request_ctx.reset(req_token)
 
             try:
-                self._prepare_response(req, response)
-            except Exception:
+                await self._prepare_response(req, response)
+            except Exception as exc:
+                await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-prepare-failed", req=req)
-                response = Response.text(
-                    "Internal Server Error. Check the application logs for the original failure.",
-                    status_code=500,
-                    headers={"x-request-id": req.request_id},
-                )
+                if isinstance(exc, StoreUnavailable):
+                    status, detail = 503, "Service Unavailable"
+                elif isinstance(exc, HTTPException):
+                    status, detail = exc.status_code, exc.detail
+                else:
+                    status, detail = 500, "Internal Server Error"
+                response = Response.text(detail, status_code=status, headers={"x-request-id": req.request_id})
                 apply_security_headers(response, self.security)
+                cors = req.scope.get("flasgo.cors")
+                if isinstance(cors, CORSConfig):
+                    _apply_cors_response_headers(req, response, cors)
                 response.prepare()
 
             sent = False
@@ -348,8 +411,11 @@ class Flasgo:
             try:
                 await response.send(observed_send, head_only=req.method == "HEAD")
                 sent = True
-            except Exception:
+            except Exception as exc:
+                await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-send-failed", req=req)
+            else:
+                await self._close_request_dependencies(req, dependencies)
 
             duration = time.perf_counter() - started
             route = str(req.scope.get("route_template", "<unmatched>"))
@@ -374,16 +440,44 @@ class Flasgo:
                     response_sent=sent,
                 )
 
+            _user_ctx.reset(user_token)
+            _session_ctx.reset(session_token)
+            _request_ctx.reset(req_token)
+            contexts_reset = True
             if sent and response.background is not None:
                 response.background.bind_request_id(req.request_id)
                 if self._metrics is not None:
                     response.background.bind_observer(self._metrics.observe_background)
                 await response.background()
         finally:
-            if instrument:
-                self._metrics.http_active.dec()
+            try:
+                await self._close_request_dependencies(req, dependencies, sys.exception())
+            finally:
+                if not contexts_reset:
+                    _user_ctx.reset(user_token)
+                    _session_ctx.reset(session_token)
+                    _request_ctx.reset(req_token)
+                if instrument:
+                    self._metrics.http_active.dec()
+
+    async def _close_request_dependencies(
+        self,
+        req: Request,
+        dependencies: DependencyContext,
+        exc: BaseException | None = None,
+    ) -> None:
+        """Close request-scoped dependencies and record cleanup failures."""
+        try:
+            await dependencies.close_request(exc)
+        except Exception:
+            self._log_security_event(logging.ERROR, "dependency-cleanup-failed", req=req)
 
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Handle ASGI lifespan startup and shutdown events for the application.
+
+        Initializes the registered lifespan handler during startup, finalizes it during shutdown, and reports lifecycle completion or
+        failure through ASGI messages.
+        """
         state = scope.get("state")
         if isinstance(state, dict):
             state["flasgo"] = self.state
@@ -463,6 +557,9 @@ class Flasgo:
                 raise RuntimeError(f"Unexpected lifespan event: {message_type!r}")
 
     async def _handle_websocket(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Handle a WebSocket connection from upgrade through completion, including routing, security checks, authorization, rate
+        limiting, endpoint execution, and cleanup.
+        """
         started = time.perf_counter()
         websocket = WebSocket(
             scope,
@@ -484,9 +581,10 @@ class Flasgo:
             route = match.route_path
             websocket.path_params = dict(match.params)
             upgrade_req = self._request_from_websocket_scope(scope)
-            loaded_session = self._load_session(upgrade_req)
+            loaded_session = await self._load_session(upgrade_req)
             upgrade_req.scope["session"] = loaded_session
             upgrade_req.scope["user"] = User.anonymous()
+            upgrade_req.scope["route_template"] = route
             scope["session"] = loaded_session
             scope["user"] = upgrade_req.scope["user"]
 
@@ -569,6 +667,11 @@ class Flasgo:
                     await websocket.deny(403, "WebSocket was not accepted")
         except WebSocketDisconnect:
             outcome = "closed"
+        except StoreUnavailable:
+            outcome = "dispatch_error"
+            self._log_security_event(logging.ERROR, "shared-storage-unavailable", req=upgrade_req)
+            if not websocket.accepted and not websocket.disconnected:
+                await websocket.deny(503, "Service Unavailable")
         except Exception:
             outcome = "dispatch_error"
             log_event(
@@ -707,6 +810,15 @@ class Flasgo:
         return scope_type or "ASGI", {}
 
     def _otel_scope_headers(self, scope: Scope) -> list[tuple[bytes, bytes]]:
+        """
+        Return telemetry headers with an invalid or disallowed host header removed.
+
+        Parameters:
+            scope (Scope): The ASGI connection scope containing request headers.
+
+        Returns:
+            list[tuple[bytes, bytes]]: The request headers, excluding the host header when allowed-host enforcement rejects it.
+        """
         headers = list(scope.get("headers", []))
         if not self.security.enforce_allowed_hosts:
             return headers
@@ -715,73 +827,27 @@ class Flasgo:
             return headers
         return [(name, value) for name, value in headers if name.lower() != b"host"]
 
-    def route(
-        self,
-        path: str,
-        *,
-        methods: Iterable[str] = ("GET",),
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        def decorator(func: Endpoint) -> Endpoint:
-            self.add_route(path, func, methods=methods, name=name, cors=cors)
-            return func
-
-        return decorator
-
-    def get(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("GET",), name=name, cors=cors)
-
-    def post(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("POST",), name=name, cors=cors)
-
-    def put(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("PUT",), name=name, cors=cors)
-
-    def patch(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("PATCH",), name=name, cors=cors)
-
-    def delete(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("DELETE",), name=name, cors=cors)
-
     def websocket(
         self,
         path: str,
         *,
         name: str | None = None,
+        public: bool = False,
     ) -> Callable[[WebSocketEndpoint], WebSocketEndpoint]:
+        """
+        Create a decorator that registers a WebSocket endpoint at the specified path.
+
+        Parameters:
+                path (str): The URL path for the WebSocket route
+                name (str | None): An optional unique name for the route
+                public (bool): Whether the route can be accessed without authentication
+
+        Returns:
+                Callable[[WebSocketEndpoint], WebSocketEndpoint]: A decorator that registers and returns the WebSocket endpoint
+        """
+
         def decorator(func: WebSocketEndpoint) -> WebSocketEndpoint:
-            self.add_websocket_route(path, func, name=name)
+            self.add_websocket_route(path, func, name=name, public=public)
             return func
 
         return decorator
@@ -792,10 +858,38 @@ class Flasgo:
         endpoint: WebSocketEndpoint,
         *,
         name: str | None = None,
+        public: bool = False,
     ) -> None:
-        self._websocket_routes.append(WebSocketRoute(path, endpoint, name=name))
+        """
+        Register a WebSocket endpoint for the specified path.
+
+        Parameters:
+                path (str): The path pattern for the WebSocket route.
+                endpoint (WebSocketEndpoint): The callable that handles matching connections.
+                name (str | None): An optional unique name for URL generation.
+                public (bool): Whether the route permits unauthenticated access.
+
+        Raises:
+                TypeError: If `public` is not a boolean.
+        """
+        if not isinstance(public, bool):
+            raise TypeError("public must be a bool.")
+        self._websocket_routes.append(WebSocketRoute(path, endpoint, name=name, public=public))
 
     def lifespan(self, fn: LifespanHandler) -> LifespanHandler:
+        """
+        Register the application's lifespan handler.
+
+        Parameters:
+                fn (LifespanHandler): An async generator that yields exactly once.
+
+        Returns:
+                LifespanHandler: The registered handler.
+
+        Raises:
+                RuntimeError: If a lifespan handler is already registered.
+                TypeError: If `fn` is not an async generator function.
+        """
         if self._lifespan_handler is not None:
             raise RuntimeError("Only one Flasgo lifespan handler may be registered.")
         if not inspect.isasyncgenfunction(fn):
@@ -875,7 +969,30 @@ class Flasgo:
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        public: bool = False,
+        response_model: object = None,
+        dependencies: Sequence[Depends] = (),
     ) -> None:
+        """
+        Register an HTTP route with its endpoint, methods, access policy, and response configuration.
+
+        Parameters:
+            path (str): URL path for the route.
+            endpoint (Endpoint): Callable that handles matching requests.
+            methods (Iterable[str]): HTTP methods accepted by the route.
+            name (str | None): Optional unique name used for URL generation.
+            cors (CORSConfig | Literal[False] | None): CORS configuration, disabled explicitly with `False`, or inherited from the
+                application with `None`.
+            public (bool): Whether the route can be accessed without authentication.
+            response_model (object): Optional model used to validate endpoint responses.
+            dependencies (Sequence[Depends]): Dependencies resolved for the endpoint.
+
+        Raises:
+            TypeError: If `public` or `cors` has an invalid type.
+            ValueError: If a method, path, or response model configuration is invalid.
+        """
+        if not isinstance(public, bool):
+            raise TypeError("public must be a bool.")
         if cors is not None and cors is not False and not isinstance(cors, CORSConfig):
             raise TypeError("Route cors must be a CORSConfig instance, False, or None.")
         reserved_paths: set[str] = set()
@@ -896,11 +1013,115 @@ class Flasgo:
         if "GET" in normalized:
             normalized = frozenset((*normalized, "HEAD"))
         resolved_cors = self.cors if cors is None else None if cors is False else cors
-        plan = compile_endpoint_plan(endpoint, path)
-        self._routes.append(Route(path, normalized, endpoint, plan, name=name, cors=resolved_cors))
+        if response_model is not None:
+            validate_response_model(response_model)
+        plan = compile_endpoint_plan(endpoint, path, dependencies=dependencies)
+        self._routes.append(
+            Route(
+                path,
+                normalized,
+                endpoint,
+                plan,
+                name=name,
+                cors=resolved_cors,
+                public=public,
+                response_model=response_model,
+            )
+        )
         if resolved_cors is not None:
             self._has_cors_routes = True
         self._openapi_dirty = True
+
+    def register_blueprint(self, blueprint: Blueprint) -> None:
+        """
+        Register a blueprint's routes and authorization configuration atomically.
+
+        Parameters:
+                blueprint (Blueprint): The blueprint whose routes should be registered.
+
+        Raises:
+                TypeError: If `blueprint` is not a `Blueprint` instance.
+                ValueError: If registration creates duplicate route names or HTTP routes.
+        """
+        from .blueprints import Blueprint
+
+        if not isinstance(blueprint, Blueprint):
+            raise TypeError("Expected a Blueprint.")
+        routes = list(self._routes)
+        auth = dict(self._route_auth)
+        had_cors = self._has_cors_routes
+        try:
+            blueprint._register(self)
+            names = [route.name for route in self._routes if route.name]
+            keys = [(route.raw_path, method) for route in self._routes for method in route.methods]
+            if len(names) != len(set(names)) or len(keys) != len(set(keys)):
+                raise ValueError("Blueprint registration creates duplicate route names or HTTP routes.")
+        except Exception:
+            self._routes = routes
+            self._route_auth = auth
+            self._has_cors_routes = had_cors
+            raise
+
+    def url_for(self, endpoint: str, **values: Any) -> str:
+        """
+        Generate a URL for a uniquely identified HTTP or WebSocket route.
+
+        Parameters:
+                endpoint (str): The route name or endpoint function name.
+                **values (Any): Values used to populate the route parameters.
+
+        Returns:
+                str: The generated URL, including the active application's root path when applicable.
+
+        Raises:
+                ValueError: If the endpoint does not identify exactly one route.
+        """
+        from .blueprints import build_url
+
+        routes = [
+            route
+            for route in (*self._routes, *self._websocket_routes)
+            if (route.name or getattr(route.endpoint, "__name__", None)) == endpoint
+        ]
+        if len(routes) != 1:
+            raise ValueError("URL generation requires exactly one route with the requested name.")
+        result = build_url(routes[0].raw_path, values)
+        active = _request_ctx.get()
+        if active is not None and active.scope.get("flasgo.app") is self:
+            root = str(active.scope.get("root_path", "")).rstrip("/")
+            if root:
+                result = build_url(root, {}) + result
+        return result
+
+    @contextmanager
+    def override_dependencies(self, overrides: Mapping[Provider, Provider]):
+        """
+        Temporarily override dependency providers within the current execution context.
+
+        Parameters:
+            overrides (Mapping[Provider, Provider]): A mapping from original callable
+                providers to replacement callable providers.
+
+        Raises:
+            TypeError: If any key or value in `overrides` is not callable.
+        """
+        if not all(callable(key) and callable(value) for key, value in overrides.items()):
+            raise TypeError("Dependency overrides must map callables to callables.")
+        token = self._dependency_overrides.set({**self._dependency_overrides.get(), **overrides})
+        try:
+            yield
+        finally:
+            self._dependency_overrides.reset(token)
+
+    def policy_snapshot(self) -> dict[str, Any]:
+        """Return a snapshot of the application's authorization policy.
+
+        Returns:
+                dict[str, Any]: The current authorization policy snapshot.
+        """
+        from .policy import policy_snapshot
+
+        return policy_snapshot(self)
 
     def run(
         self,
@@ -910,6 +1131,16 @@ class Flasgo:
         reload: bool | None = None,
         reload_dirs: Sequence[str | Path] | None = None,
     ) -> None:
+        """
+        Start the development server for the application.
+
+        Parameters:
+                host (str): Host address on which to listen.
+                port (int): Port on which to listen.
+                reload (bool | None): Whether to reload the server when source files change; defaults to the debug setting when
+                    omitted.
+                reload_dirs (Sequence[str | Path] | None): Directories to monitor for reload-triggering changes.
+        """
         configure_logging(format=self.settings.LOG_FORMAT, level=self.settings.LOG_LEVEL)
         asyncio.run(
             run_dev_server(
@@ -934,9 +1165,23 @@ class Flasgo:
         enable_async: bool = False,
         max_template_bytes: int = 262_144,
     ) -> JinjaTemplates:
+        """
+        Configure Jinja template loading and return the initialized template environment.
+
+        Parameters:
+            template_dirs: A template directory or sequence of template directories.
+            globals: Optional template-global values.
+            filters: Optional custom template filters.
+            tests: Optional custom template tests.
+            enable_async: Whether to enable asynchronous template rendering.
+            max_template_bytes: Maximum permitted template size in bytes.
+
+        Returns:
+            The configured Jinja template environment.
+        """
         self.templates = JinjaTemplates(
             template_dirs,
-            globals=globals,
+            globals={"url_for": self.url_for, **(globals or {})},
             filters=filters,
             tests=tests,
             enable_async=enable_async,
@@ -946,9 +1191,7 @@ class Flasgo:
 
     def render_template(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
         if self.templates is None:
-            raise RuntimeError(
-                "Templates are not configured. Call app.configure_templates(...) or pass templates=... first."
-            )
+            raise RuntimeError("Templates are not configured. Call app.configure_templates(...) or pass templates=... first.")
         return self.templates.render(template_name, context)
 
     def configure_static(
@@ -958,6 +1201,13 @@ class Flasgo:
         url_path: str = "/static",
         cache_max_age: int = 3600,
     ) -> None:
+        """Configure a static-file directory and register its public route.
+
+        Parameters:
+                directory (str | Path): The directory containing files to serve.
+                url_path (str): The URL path prefix for the static files.
+                cache_max_age (int): The maximum cache lifetime in seconds.
+        """
         static_directory = resolve_static_directory(
             directory,
             url_path=url_path,
@@ -969,9 +1219,15 @@ class Flasgo:
             self._build_static_endpoint(static_directory),
             methods=("GET",),
             name=f"static:{static_directory.url_path}",
+            public=True,
         )
 
     def test_client(self) -> TestClient:
+        """Create a test client for the application.
+
+        Returns:
+            TestClient: A client configured to send requests to this application.
+        """
         from .testing import TestClient
 
         return TestClient(self)
@@ -997,6 +1253,15 @@ class Flasgo:
         return await self.ssrf.aresolve_url(url)
 
     def _request_id_for_scope(self, scope: Scope) -> str:
+        """
+        Return a trusted incoming request ID or generate a new one for the scope.
+
+        Parameters:
+                scope (Scope): The ASGI scope containing optional request headers.
+
+        Returns:
+                str: The accepted request ID or a newly generated identifier.
+        """
         if self.settings.TRUST_INCOMING_REQUEST_ID:
             for key, value in scope.get("headers", []):
                 if key.lower() != b"x-request-id":
@@ -1010,7 +1275,27 @@ class Flasgo:
                 break
         return uuid4().hex
 
-    def _prepare_response(self, req: Request, response: Response) -> None:
+    def _track_stream(self, req: Request, response: Response) -> None:
+        """Registers a streaming response for cleanup when the request ends.
+
+        Parameters:
+                req (Request): The current request.
+                response (Response): The response to track.
+        """
+        if not isinstance(response, StreamingResponse):
+            return
+        tracked = req.scope.setdefault("flasgo.streams", set())
+        if id(response) not in tracked:
+            tracked.add(id(response))
+            dependencies = req.scope["flasgo.dependencies"]
+            dependencies.request_stack.push_async_callback(response.aclose)
+
+    async def _prepare_response(self, req: Request, response: Response) -> None:
+        """Prepare an HTTP response with request, security, CORS, session, CSRF, and finalization metadata."""
+        if isinstance(response, StreamingResponse) and response.receive is None:
+            self._track_stream(req, response)
+            await req.body()
+            response.receive = req.receive
         response.headers.setdefault("x-request-id", req.request_id)
         apply_security_headers(response, self.security)
         is_cors_preflight = req.scope.get("flasgo.cors_preflight") is True
@@ -1018,8 +1303,13 @@ class Flasgo:
         cors = req.scope.get("flasgo.cors")
         if isinstance(cors, CORSConfig) and not is_cors_preflight:
             _apply_cors_response_headers(req, response, cors)
-        if not response.allow_public_cache and not is_cors_preflight and not is_metrics_response:
-            session_token = self._persist_session(req, response)
+        if (
+            not response.allow_public_cache
+            and not is_cors_preflight
+            and not is_metrics_response
+            and not req.scope.get("flasgo.storage_failed")
+        ):
+            session_token = await self._persist_session(req, response)
             if self.security.csrf_enabled:
                 ensure_csrf_cookie(req, response, self.security, session_token=session_token)
         response.prepare()
@@ -1226,22 +1516,26 @@ class Flasgo:
             raise ValueError("SERVER_LIMIT_CONCURRENCY must be greater than 0.")
         for origin in self.settings.WEBSOCKET_ALLOWED_ORIGINS:
             if not _valid_websocket_origin(origin):
-                raise ValueError(
-                    "WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths."
-                )
+                raise ValueError("WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths.")
         if not self.settings.METRICS_PATH.startswith("/"):
             raise ValueError("METRICS_PATH must start with '/'.")
         if self.settings.METRICS_ENABLED:
             token = self.settings.METRICS_BEARER_TOKEN
             if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
-                raise ValueError(
-                    "METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters "
-                    "when metrics are enabled."
-                )
+                raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled.")
             if self.settings.METRICS_PATH in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}:
                 raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
 
     async def _dispatch(self, req: Request) -> Response:
+        """
+        Dispatch an HTTP request through security checks, middleware, routing, authorization, rate limiting, and response processing.
+
+        Parameters:
+                req (Request): The incoming HTTP request.
+
+        Returns:
+                Response: The response generated for the request.
+        """
         host_values = _scope_header_values(req.scope, b"host")
         if self.security.enforce_allowed_hosts and (
             len(host_values) != 1 or not host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts)
@@ -1335,6 +1629,7 @@ class Flasgo:
             )
 
         req.scope["route_template"] = match.route_path
+        req.scope["flasgo.route_id"] = json.dumps([match.route_path, sorted(match.methods)])
         if match.cors is not None:
             req.scope["flasgo.cors"] = match.cors
         else:
@@ -1356,7 +1651,11 @@ class Flasgo:
             rate_limit_result.update(authenticated_rate_limit)
 
         raw_response = await self._call_endpoint(req, match)
-        response = to_response(raw_response)
+        if isinstance(raw_response, Response):
+            self._track_stream(req, raw_response)
+        response = (
+            contract_response(raw_response, match.response_model, req) if match.response_model is not None else to_response(raw_response)
+        )
         response.headers.update(rate_limit_result)
         return await self._run_after_middleware(req, response)
 
@@ -1367,19 +1666,36 @@ class Flasgo:
         *,
         phase: str = "all",
     ) -> dict[str, str] | Response:
+        """
+        Check the applicable rate limits for a request endpoint.
+
+        Parameters:
+            phase (str): Rate-limit phase to evaluate: ``"all"``, ``"pre_auth"``, or
+                ``"post_auth"``.
+
+        Returns:
+            dict[str, str] | Response: Rate-limit headers when all applicable limits
+                allow the request, or a denial response when a limit is exceeded.
+        """
         headers: dict[str, str] = {}
         indexed_rules = [
             (index, rule)
             for index, rule in enumerate(endpoint_rate_limits(endpoint))
-            if phase == "all"
-            or (phase == "pre_auth" and rule.key_func is None)
-            or (phase == "post_auth" and rule.key_func is not None)
+            if phase == "all" or (phase == "pre_auth" and rule.key_func is None) or (phase == "post_auth" and rule.key_func is not None)
         ]
         if not indexed_rules:
             return headers
 
         # Check all rules atomically using batch method
-        rules_with_ids = [(rule, f"{id(endpoint)}:{index}") for index, rule in indexed_rules]
+        stable_id = str(req.scope.get("flasgo.route_id", req.scope.get("route_template", req.path)))
+        protocol = "websocket" if req.scope.get("flasgo.websocket_upgrade") else "http"
+        rules_with_ids = [
+            (
+                rule,
+                f"{id(endpoint)}:{index}" if isinstance(self._rate_limiter, RateLimiter) else f"{protocol}:{stable_id}:{index}",
+            )
+            for index, rule in indexed_rules
+        ]
         decisions = await self._rate_limiter.check_batch(rules_with_ids, req)
 
         # Process decisions
@@ -1398,12 +1714,34 @@ class Flasgo:
         return headers
 
     async def _run_after_middleware(self, req: Request, response: Response) -> Response:
+        """
+        Apply registered after-request middleware to a response.
+
+        Parameters:
+                req (Request): The request associated with the response.
+                response (Response): The initial response to process.
+
+        Returns:
+                Response: The response produced by the after-request middleware chain.
+        """
         current = response
+        self._track_stream(req, current)
         for fn in self._after:
             current = to_response(await _maybe_await(fn(req, current)))
+            self._track_stream(req, current)
         return current
 
     async def _call_endpoint(self, req: Request, match: MatchResult) -> ResponseValue:
+        """
+        Invoke the matched endpoint with resolved request arguments.
+
+        Parameters:
+                req (Request): The current request.
+                match (MatchResult): The matched route and endpoint information.
+
+        Returns:
+                ResponseValue: The endpoint's response value.
+        """
         arguments = await resolve_endpoint_arguments(match.endpoint_plan, req, match.params)
         value = match.endpoint(**arguments)
         return await _maybe_await(value)
@@ -1428,6 +1766,15 @@ class Flasgo:
         return any(route.cors is not None and route.path_matches(path) for route in self._routes)
 
     def _otel_route_template(self, path: str) -> str | None:
+        """
+        Finds the route template matching a request path for telemetry.
+
+        Parameters:
+                path (str): The request path to match.
+
+        Returns:
+                str | None: The matching route template, or `None` when no route matches.
+        """
         fallback: str | None = None
         for route in self._routes:
             if route.path_matches(path):
@@ -1437,6 +1784,20 @@ class Flasgo:
         return fallback
 
     async def _handle_error(self, req: Request, exc: Exception) -> Response:
+        """
+        Map an exception to an appropriate HTTP response.
+
+        Parameters:
+            req (Request): The request associated with the exception.
+            exc (Exception): The exception to handle.
+
+        Returns:
+            Response: The HTTP response representing the exception.
+        """
+        if isinstance(exc, StoreUnavailable):
+            req.scope["flasgo.storage_failed"] = True
+            self._log_security_event(logging.ERROR, "shared-storage-unavailable", req=req)
+            return Response.text("Service Unavailable", status_code=503)
         handler = self._find_error_handler(exc)
         if handler is not None:
             try:
@@ -1474,23 +1835,70 @@ class Flasgo:
         )
 
     def _find_error_handler(self, exc: Exception) -> ErrorHandler | None:
+        """Find the registered error handler for an exception.
+
+        Parameters:
+                exc (Exception): The exception whose handler should be found.
+
+        Returns:
+                ErrorHandler | None: The matching error handler, or `None` if no handler is registered.
+        """
         for klass in type(exc).__mro__:
             handler = self._error_handlers.get(klass)
             if handler is not None:
                 return handler
         return None
 
-    def _load_session(self, req: Request) -> Session:
+    async def _load_session(self, req: Request) -> Session:
+        """
+        Load the session associated with a request.
+
+        An empty session is returned when no session cookie is present, the cookie is invalid, or the request host is disallowed.
+        Server-side sessions are loaded through the configured session backend; otherwise, the signed session cookie is used.
+
+        Returns:
+                Session: The request's session data.
+        """
+        if self._session_backend is not None:
+            hosts = _scope_header_values(req.scope, b"host")
+            if self.security.enforce_allowed_hosts and (
+                len(hosts) != 1 or not host_is_allowed(hosts[0], allowed_hosts=self.security.allowed_hosts)
+            ):
+                return Session({})
+            tokens = req.cookie_values(self.security.session_cookie_name)
+            return await self._session_backend.load(tokens[0] if len(tokens) == 1 else None)
         token = req.cookies.get(self.security.session_cookie_name)
         if not token:
             return Session({})
         data = self._session_signer.loads(token, max_age=self.security.session_cookie_max_age)
         return Session(data or {})
 
-    def _persist_session(self, req: Request, response: Response) -> str | None:
+    async def _persist_session(self, req: Request, response: Response) -> str | None:
+        """
+        Persist the modified session and update the response session cookie.
+
+        Parameters:
+                req (Request): Request containing the session and existing session cookie.
+                response (Response): Response to receive the updated or cleared session cookie.
+
+        Returns:
+                str | None: The session token, an empty string when the session is cleared, or the existing cookie value when no
+                persistence is needed.
+        """
         current = req.scope.get("session")
         if not isinstance(current, Session) or not current.modified:
             return req.cookies.get(self.security.session_cookie_name)
+        if self._session_backend is not None:
+            token = await self._session_backend.save(current, max_age=self.security.session_cookie_max_age) or ""
+            response.set_cookie(
+                self.security.session_cookie_name,
+                token,
+                max_age=self.security.session_cookie_max_age if token else 0,
+                secure=self.security.session_cookie_secure,
+                http_only=self.security.session_cookie_http_only,
+                same_site=self.security.session_cookie_same_site,
+            )
+            return token
         if not current.data:
             response.cookies.append(
                 build_set_cookie(
@@ -1567,8 +1975,7 @@ class Flasgo:
             return None
         if denial.reason == "backend-missing":
             return Response.text(
-                f"Authentication backend {denial.backend_name!r} is not configured. "
-                "Register it with app.register_auth_backend(...).",
+                f"Authentication backend {denial.backend_name!r} is not configured. Register it with app.register_auth_backend(...).",
                 status_code=500,
             )
         if denial.reason == "rate-limited":
@@ -1593,9 +2000,7 @@ class Flasgo:
         now = time.monotonic()
         if len(self._security_failures) > 10_000:
             cutoff = now - window
-            self._security_failures = {
-                key: value for key, value in self._security_failures.items() if value[0] >= cutoff
-            }
+            self._security_failures = {key: value for key, value in self._security_failures.items() if value[0] >= cutoff}
         start, count = self._security_failures.get(client, (now, 0))
         if now - start >= window:
             start = now
@@ -1769,9 +2174,7 @@ def _security_rate_limit_response() -> Response:
 
 def _websocket_rate_limit_headers(response: Response) -> dict[str, str]:
     return {
-        name: value
-        for name, value in response.headers.items()
-        if name == "retry-after" or name.startswith(("ratelimit-", "x-ratelimit-"))
+        name: value for name, value in response.headers.items() if name == "retry-after" or name.startswith(("ratelimit-", "x-ratelimit-"))
     }
 
 

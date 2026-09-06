@@ -94,9 +94,7 @@ def test_websocket_origin_auth_size_and_rate_limits() -> None:
     )
     app.register_auth_backend(
         "token",
-        lambda request: (
-            User(id="alice", is_authenticated=True) if request.headers.get("authorization") == "Bearer valid" else None
-        ),
+        lambda request: User(id="alice", is_authenticated=True) if request.headers.get("authorization") == "Bearer valid" else None,
     )
 
     @app.websocket("/socket")

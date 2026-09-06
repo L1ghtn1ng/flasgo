@@ -62,11 +62,30 @@ def redirect(
     status_code: int = 302,
     headers: dict[str, str] | None = None,
 ) -> Response:
-    """Return a redirect :class:`Response`.
+    """
+    Create a redirect response for the specified location.
 
-    The target is not validated beyond header safety. Never redirect to
-    request-controlled input (for example a ``next`` query parameter) without
-    checking it first with :func:`flasgo.is_safe_redirect_target`.
+    Parameters:
+        location (str): The redirect target.
+        status_code (int): The HTTP status code for the redirect.
+        headers (dict[str, str] | None): Optional response headers.
+
+    Returns:
+        Response: A redirect response targeting `location`.
     """
 
     return Response.redirect(location, status_code=status_code, headers=headers)
+
+
+def url_for(endpoint: str, **values: Any) -> str:
+    """
+    Build a relative URL for an application endpoint.
+
+    Parameters:
+        endpoint (str): The endpoint name.
+        values (Any): Values used to construct the URL.
+
+    Returns:
+        str: The generated relative URL.
+    """
+    return _get_request().scope["flasgo.app"].url_for(endpoint, **values)

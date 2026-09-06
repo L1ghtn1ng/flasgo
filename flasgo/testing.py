@@ -6,12 +6,14 @@ import queue
 import threading
 from collections.abc import Coroutine, Mapping, Sequence
 from concurrent.futures import Future
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from typing import Any, cast
 from urllib.parse import urlencode, urljoin, urlsplit
 from uuid import uuid4
 
+from .testing_stream import AsyncTestStream
 from .types import ASGIApp, Message, Scope
 from .websockets import WebSocketDisconnect
 
@@ -71,10 +73,7 @@ def _encode_multipart(
         content_type = rest[0] if rest else "application/octet-stream"
         body.extend(f"--{boundary}\r\n".encode("ascii"))
         body.extend(
-            (
-                f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n"
-            ).encode()
+            (f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n').encode()
         )
         file_bytes = payload.encode() if isinstance(payload, str) else bytes(payload)
         body.extend(file_bytes)
@@ -458,6 +457,18 @@ class TestClient:
         scheme: str,
         follow_redirects: bool,
     ) -> TestResponse:
+        """
+        Send an asynchronous request and optionally follow redirects.
+
+        Parameters:
+            follow_redirects (bool): Whether to follow up to ten redirects.
+
+        Returns:
+            TestResponse: The final response, including redirect history when redirects are followed.
+
+        Raises:
+            RuntimeError: If more than ten redirects are encountered.
+        """
         response = await self._send(
             method,
             path,
@@ -508,6 +519,53 @@ class TestClient:
 
         raise RuntimeError("Too many redirects")
 
+    @asynccontextmanager
+    async def astream(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: RequestHeaders | None = None,
+        body: bytes | None = None,
+        json: object | None = None,
+        scheme: str = "http",
+    ):
+        """
+        Stream an ASGI response incrementally within an asynchronous test context.
+
+        Parameters:
+            json (object | None): JSON data to encode as the request body. Cannot be combined with ``body``.
+            scheme (str): URL scheme used to construct the request scope.
+
+        Yields:
+            AsyncTestStream: The response stream, which is closed when the context exits.
+
+        Raises:
+            RuntimeError: If used with a synchronous lifespan context.
+        """
+        if self._mode == "sync":
+            raise RuntimeError("astream requires an async test client, not a synchronous lifespan context.")
+        stream = AsyncTestStream()
+        stream.task = asyncio.create_task(
+            self._send(
+                method,
+                path,
+                headers=headers,
+                body=body,
+                json=json,
+                data=None,
+                files=None,
+                scheme=scheme,
+                stream=stream,
+            )
+        )
+        try:
+            await stream.wait_started()
+            self._update_cookies(stream.headers.get("set-cookie"))
+            yield stream
+        finally:
+            await stream.aclose()
+
     async def _send(
         self,
         method: str,
@@ -519,7 +577,28 @@ class TestClient:
         data: RequestData | None,
         files: Mapping[str, FileValue] | None,
         scheme: str,
+        stream: AsyncTestStream | None = None,
     ) -> TestResponse:
+        """
+        Send an HTTP request through the ASGI application and collect its response.
+
+        Parameters:
+            method (str): HTTP method to use.
+            path (str): Request path and optional query string.
+            headers (RequestHeaders | None): Additional request headers.
+            body (bytes | None): Raw request body.
+            json (object | None): JSON value to encode as the request body.
+            data (RequestData | None): Form fields to encode as the request body.
+            files (Mapping[str, FileValue] | None): Files to include in multipart form data.
+            scheme (str): Request URL scheme.
+            stream (AsyncTestStream | None): Stream that receives response messages as they are sent.
+
+        Returns:
+            TestResponse: The application's response.
+
+        Raises:
+            RuntimeError: If the application does not send an HTTP response start message.
+        """
         payload, content_type = _encode_request_body(body=body, json=json, data=data, files=files)
 
         parsed = urlsplit(path)
@@ -565,15 +644,33 @@ class TestClient:
         body_chunks: list[bytes] = []
 
         async def receive() -> Message:
+            """
+            Provide the next queued message, or an HTTP disconnect message when the stream disconnects.
+
+            Returns:
+                Message: The next queued message or an HTTP disconnect message.
+            """
             if queue:
                 return queue.pop(0)
+            if stream is None:
+                await asyncio.Event().wait()
+            else:
+                await stream.disconnected.wait()
             return {"type": "http.disconnect"}
 
         async def send(message: Message) -> None:
+            """
+            Process an ASGI response message and forward or collect it for the response.
+
+            Parameters:
+                message (Message): ASGI response message to process.
+            """
             nonlocal start_message
+            if stream is not None:
+                await stream.send(message)
             if message["type"] == "http.response.start":
                 start_message = message
-            elif message["type"] == "http.response.body":
+            elif message["type"] == "http.response.body" and stream is None:
                 body_chunks.append(bytes(message.get("body", b"")))
 
         await self.app(scope, receive, send)

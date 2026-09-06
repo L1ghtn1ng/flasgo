@@ -124,9 +124,7 @@ class SSRFGuard:
         pinned_address = sorted(addresses, key=lambda item: item.packed)[0] if addresses else None
         return SSRFResolvedURL(
             original_url=url,
-            url=_replace_hostname(parsed, pinned_address, port=port, explicit_port=explicit_port)
-            if pinned_address is not None
-            else url,
+            url=_replace_hostname(parsed, pinned_address, port=port, explicit_port=explicit_port) if pinned_address is not None else url,
             hostname=host,
             port=port,
             address=pinned_address,
@@ -260,13 +258,7 @@ def _ip_is_disallowed(address: IPAddress, *, allow_private_networks: bool) -> bo
     inspected: IPAddress = address
     if isinstance(inspected, ipaddress.IPv6Address) and inspected.ipv4_mapped is not None:
         inspected = inspected.ipv4_mapped
-    if (
-        inspected.is_loopback
-        or inspected.is_link_local
-        or inspected.is_multicast
-        or inspected.is_reserved
-        or inspected.is_unspecified
-    ):
+    if inspected.is_loopback or inspected.is_link_local or inspected.is_multicast or inspected.is_reserved or inspected.is_unspecified:
         return True
     if any(inspected in network for network in _PRIVATE_NETWORKS if inspected.version == network.version):
         return not allow_private_networks

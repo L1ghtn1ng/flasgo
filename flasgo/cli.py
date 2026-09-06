@@ -14,6 +14,7 @@ from types import ModuleType
 from typing import Any
 
 from .app import Flasgo
+from .policy import compare_policy, deployment_issues
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     routes_parser = subparsers.add_parser("routes", help="List registered HTTP and WebSocket routes")
     _add_target_arguments(routes_parser)
+    routes_parser.add_argument("--policy", action="store_true", help="Explain effective route security policies")
+    routes_parser.add_argument("--json", action="store_true", help="Emit a versioned policy snapshot as JSON")
+    routes_parser.add_argument("-o", "--output", help="Write the JSON policy snapshot atomically to this file")
     routes_parser.set_defaults(handler=_routes_command)
 
     openapi_parser = subparsers.add_parser("openapi", help="Render the application's OpenAPI document")
@@ -66,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Validate routes and application configuration")
     _add_target_arguments(check_parser)
+    check_parser.add_argument("--deploy", action="store_true", help="Check production security settings and declared access")
+    check_parser.add_argument("--json", action="store_true", help="Emit structured issues and policy changes")
+    check_parser.add_argument("--against", help="Compare with a routes --json policy snapshot; fail on any change")
     check_parser.set_defaults(handler=_check_command)
 
     db_parser = subparsers.add_parser("db", help="Manage optional Alembic database migrations")
@@ -94,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "routes" and args.output is not None and not args.json:
+        parser.error("routes --output requires --json")
     handler = args.handler
     return int(handler(args))
 
@@ -116,7 +125,26 @@ def _add_target_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _routes_command(args: argparse.Namespace) -> int:
+    """
+    List the application's registered HTTP and WebSocket routes or emit its policy snapshot.
+
+    Returns:
+        int: Zero after successfully displaying or writing the route information.
+    """
     app = load_app(args.target, app_name=args.app)
+    if args.json or args.policy:
+        snapshot = app.policy_snapshot()
+        if args.json:
+            document = json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"
+            if args.output is None:
+                print(document, end="")
+            else:
+                _atomic_write(Path(args.output), document)
+        else:
+            print(snapshot["scope"])
+            for route in snapshot["routes"]:
+                print(json.dumps(route, sort_keys=True, allow_nan=False))
+        return 0
     print("PROTOCOL  METHODS      PATH                      NAME")
     for route in app._routes:
         methods = ",".join(sorted(route.methods))
@@ -137,6 +165,14 @@ def _openapi_command(args: argparse.Namespace) -> int:
 
 
 def _check_command(args: argparse.Namespace) -> int:
+    """Validate registered routes, authentication configuration, internal endpoint conflicts, deployment settings, and policy changes.
+
+    Parameters:
+        args (argparse.Namespace): Command-line options specifying the application target and enabled checks.
+
+    Returns:
+        int: 1 if validation issues or policy changes are found, otherwise 0.
+    """
     app = load_app(args.target, app_name=args.app)
     errors: list[str] = []
     seen_http: set[tuple[str, str]] = set()
@@ -164,9 +200,7 @@ def _check_command(args: argparse.Namespace) -> int:
             seen_names.add(route.name)
 
     errors.extend(
-        f"missing authentication backend: {auth.backend}"
-        for auth in app._route_auth.values()
-        if auth.backend not in app._auth_backends
+        f"missing authentication backend: {auth.backend}" for auth in app._route_auth.values() if auth.backend not in app._auth_backends
     )
 
     internal_paths: set[str] = set()
@@ -175,20 +209,45 @@ def _check_command(args: argparse.Namespace) -> int:
     if app.settings.METRICS_ENABLED:
         internal_paths.add(app.settings.METRICS_PATH)
     errors.extend(
-        f"route conflicts with enabled internal endpoint: {route.raw_path}"
-        for route in app._routes
-        if route.raw_path in internal_paths
+        f"route conflicts with enabled internal endpoint: {route.raw_path}" for route in app._routes if route.raw_path in internal_paths
     )
 
-    if errors:
-        for error in sorted(set(errors)):
-            print(f"error: {error}", file=sys.stderr)
-        return 1
-    print("Flasgo check passed.")
-    return 0
+    issues = [{"code": "registration", "severity": "error", "message": error} for error in sorted(set(errors))]
+    if args.deploy:
+        issues.extend(issue.to_dict() for issue in deployment_issues(app))
+    changes = []
+    if args.against:
+        try:
+            with Path(args.against).open("rb") as source:
+                raw = source.read(2_097_153)
+            if len(raw) > 2_097_152:
+                raise ValueError("Policy snapshot exceeds 2 MiB.")
+            changes = compare_policy(json.loads(raw), app.policy_snapshot())
+        except (OSError, ValueError, RecursionError) as exc:
+            issues.append({"code": "policy_snapshot", "severity": "error", "message": str(exc)})
+    failed = bool(issues or changes)
+    if args.json:
+        print(json.dumps({"passed": not failed, "issues": issues, "changes": changes}, indent=2, sort_keys=True))
+    else:
+        for issue in issues:
+            print(f"{issue['severity']}: {issue['code']}: {issue['message']}", file=sys.stderr)
+        for change in changes:
+            target = change.get("route")
+            detail = f"{change['section']} {target}" if target else change["section"]
+            print(f"policy changed: {detail}", file=sys.stderr)
+        if not failed:
+            print("Flasgo check passed.")
+    return int(failed)
 
 
 def _atomic_write(path: Path, value: str) -> None:
+    """
+    Atomically write text content to a file.
+
+    Parameters:
+        path (Path): Destination file path.
+        value (str): Text content to write.
+    """
     expanded = path.expanduser()
     absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
     parent = absolute.parent.resolve()
@@ -251,9 +310,7 @@ def _load_app_target(target: str, *, app_name: str) -> tuple[Flasgo, _ResolvedTa
     try:
         module = _import_target(resolved)
     except ModuleNotFoundError as exc:
-        if exc.name is not None and (
-            resolved.module_name == exc.name or resolved.module_name.startswith(f"{exc.name}.")
-        ):
+        if exc.name is not None and (resolved.module_name == exc.name or resolved.module_name.startswith(f"{exc.name}.")):
             raise SystemExit(
                 f"Could not import target module '{resolved.module_name}' from import root "
                 f"'{resolved.import_root}'. Check the target name and path."
@@ -376,19 +433,13 @@ def _import_target(target: _ResolvedTarget) -> ModuleType:
     modules_before = dict(sys.modules)
     if cached_namespace is not None and not _namespace_matches_target(cached_namespace, target):
         _clear_namespace(namespace)
-    evicted_modules = (
-        _evict_cli_owned_modules(previous_root)
-        if previous_root is not None and previous_root != target.import_root
-        else {}
-    )
+    evicted_modules = _evict_cli_owned_modules(previous_root) if previous_root is not None and previous_root != target.import_root else {}
 
     try:
         module = importlib.import_module(target.module_name)
         if not _module_matches_source(module, target.source):
             location = _module_location(module)
-            raise ImportError(
-                f"resolved to '{location or 'an unknown location'}' instead of the requested '{target.source}'"
-            )
+            raise ImportError(f"resolved to '{location or 'an unknown location'}' instead of the requested '{target.source}'")
     except BaseException:
         _restore_namespace(namespace, snapshot)
         sys.modules.update(evicted_modules)

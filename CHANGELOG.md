@@ -2,12 +2,64 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-06
+
+### Added
+
+- HTTP `Blueprint` groups with nested prefixes/namespaces, additive permissions/dependencies/rate rules, atomic
+  registration, and safe `url_for` helpers for handlers and templates.
+- Versioned route-policy snapshots, deployment security checks, JSON CLI output, and baseline comparison for CI.
+- Generator dependency providers with function/request resource lifetimes and context-local test overrides.
+- Opt-in dataclass response contracts with recursive field projection, bounded validation, and matching OpenAPI.
+- Async streaming, JSON SSE, and NDJSON responses with bounded sending, heartbeats, disconnect cleanup, and an
+  incremental async test-client API.
+- Optional pinned Redis/Valkey storage adapter, atomic shared sliding-window route quotas, and revocable server-side
+  sessions with rotation, expiry, and compare-and-swap updates. Existing in-process quotas and signed cookies remain
+  the defaults. CI runs against pinned Redis and Valkey service images.
+
 ### Changed
 
 - Dispatch now reuses the route match performed for CORS setup instead of matching the route twice per request;
   the match is repeated when a `before_request` middleware rewrote the request path or method.
 - HTTP and WebSocket authorization share a single implementation, response body byte counting is unified, and
   unused internal helpers were removed. Ruff's `SIM`, `PIE`, and `PERF` rules are now enforced.
+- Request-scoped dependencies remain available through response sending and close before background tasks.
+  Background tasks run only after complete successful delivery, with request, user, and session context cleared.
+
+### Fixed
+
+- Policy snapshots can be written atomically with `routes --json --output` (`-o`), separately from application import
+  output. Text policy comparisons identify each changed route by protocol, path, and methods.
+- Response contracts reject typed mappings with unsupported key types during registration, including nested models
+  and stream item models. Actual output keys must remain strings.
+- Missing or invalid dependency contexts raise a clear runtime error, including under optimized Python. Registered
+  dependency plans avoid repeated lifetime validation; overrides retain checks against the outer dependency scope.
+
+### Security
+
+- Protected blueprint children cannot drop inherited permissions or change authentication backends. Registration
+  failures roll back partial changes, and policy snapshots omit credential values.
+- Response contracts prevent raw-response bypasses and omit undeclared/private dataclass fields. Output schemas now
+  consistently omit underscore-prefixed fields.
+- Function-scoped dependency cleanup failures before sending prevent success responses; streaming send failures never
+  emit a second response. Shared-storage failures return 503 without fallback; stale session writes return 409 without
+  resurrection.
+
+### Upgrade notes
+
+- Python 3.14 or newer remains required. Existing response coercion, signed-cookie sessions, and in-process route
+  quotas remain the defaults; response contracts and shared storage require explicit configuration.
+- Switching to `ServerSideSessions` requires users with existing signed cookies to log in again. Revocation affects
+  subsequent session loads, not identities already acquired by active requests, streams, or WebSockets.
+- `flasgo check --deploy` fails on deployment warnings, including undeclared route access. Declare intentional public
+  routes with `public=True` or protect them with authorization. `check --against` fails on any policy difference;
+  review deliberate changes before replacing a baseline.
+- Use function-scoped dependencies for transactions that must finish before response headers. Background tasks must
+  acquire their own resources. Applications must handle session conflicts without blindly replaying side effects.
+- See the website guides for [blueprints](https://flasgo.dev/guides/blueprints-and-url-generation/),
+  [streaming](https://flasgo.dev/guides/streaming-responses/),
+  [shared storage](https://flasgo.dev/guides/shared-storage/), and [testing](https://flasgo.dev/guides/testing/)
+  for configuration, migration, limits, and examples.
 
 ## [0.8.0] - 2026-08-13
 

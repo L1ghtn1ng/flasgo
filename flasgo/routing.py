@@ -32,6 +32,8 @@ class MatchResult:
     route_path: str
     name: str | None
     cors: CORSConfig | None
+    methods: frozenset[str]
+    response_model: object = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -50,6 +52,8 @@ class Route:
     endpoint_plan: EndpointPlan
     name: str | None = None
     cors: CORSConfig | None = None
+    public: bool = False
+    response_model: object = None
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
 
@@ -58,6 +62,16 @@ class Route:
         self._regex, self._casts = _compile_path(self.raw_path)
 
     def match(self, path: str, method: str) -> MatchResult | None:
+        """
+        Match an HTTP request path and method to this route.
+
+        Parameters:
+            path (str): The request path to match.
+            method (str): The HTTP method to match.
+
+        Returns:
+            MatchResult | None: Route metadata and converted path parameters when matched; `None` otherwise.
+        """
         if method.upper() not in self.methods:
             return None
         params = _match_path(path, self._regex, self._casts)
@@ -70,11 +84,21 @@ class Route:
             route_path=self.raw_path,
             name=self.name,
             cors=self.cors,
+            methods=self.methods,
+            response_model=self.response_model,
         )
 
     def path_matches(self, path: str) -> bool:
         # Cast-aware: a value the converter cannot cast (for example an integer above
         # the interpreter digit limit) does not match the route at all.
+        """Determine whether a path matches the route and its parameter converters.
+
+        Parameters:
+                path (str): The path to check.
+
+        Returns:
+                bool: `True` if the path matches and all parameters can be converted, `False` otherwise.
+        """
         return _match_path(path, self._regex, self._casts) is not None
 
 
@@ -83,6 +107,7 @@ class WebSocketRoute:
     raw_path: str
     endpoint: WebSocketEndpoint
     name: str | None = None
+    public: bool = False
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
 
