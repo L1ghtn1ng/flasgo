@@ -224,7 +224,9 @@ def _check_command(args: argparse.Namespace) -> int:
         for issue in issues:
             print(f"{issue['severity']}: {issue['code']}: {issue['message']}", file=sys.stderr)
         for change in changes:
-            print(f"policy changed: {change['section']}", file=sys.stderr)
+            target = change.get("route")
+            detail = f"{change['section']} {target}" if target else change["section"]
+            print(f"policy changed: {detail}", file=sys.stderr)
         if not failed:
             print("Flasgo check passed.")
     return int(failed)
