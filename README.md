@@ -447,6 +447,12 @@ Flasgo attaches the active `trace_id` and `span_id` to request-duration, respons
 allowing a dashboard to jump from an anomalous metric observation to its trace. Plain Prometheus text remains the
 fallback for clients that do not request OpenMetrics.
 
+Additional metrics cover event-loop lag, backend operation latency/outcomes, bounded rejection and internal-error
+reasons, pending/running background tasks, and streaming response start/first-body timing, bytes, and outcomes.
+`app.metrics_registry` exposes the application-local registry for custom Prometheus metrics and returns `None` when
+metrics are disabled. See [the metrics reference](METRICS.md) for names, measurement boundaries, the lifespan-owned
+sampler settings, custom metric examples, security considerations, and the local overhead benchmark.
+
 The registry is per process. For multi-worker deployments, expose and scrape every worker as a distinct Prometheus
 target or place a supported aggregation layer in front of them; scraping a load-balanced `/metrics` URL can sample a
 different worker on each scrape.

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Metrics for event-loop responsiveness, backend operation latency/outcomes, rejection reasons, internal failures,
+  response start/first-body timing, and incremental streaming bytes/outcomes.
+- Separate response-in-flight and background pending/running gauges, with background duration and cancelled/skipped
+  outcomes. Existing HTTP and background success/failure metric contracts remain intact.
+- Public `app.metrics_registry` access, authenticated collection/encoding in a worker thread, a detailed metrics
+  reference, and a repeatable local overhead benchmark.
+
 ## [0.9.0] - 2026-09-06
 
 ### Added
