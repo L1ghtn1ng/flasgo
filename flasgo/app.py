@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import inspect
 import json
@@ -9,6 +10,7 @@ import re
 import secrets
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -64,6 +66,7 @@ from .routing import (
     WebSocketEndpoint,
     WebSocketMatchResult,
     WebSocketRoute,
+    routes_overlap,
 )
 from .security import (
     SecurityConfig,
@@ -72,6 +75,7 @@ from .security import (
     csrf_is_valid,
     ensure_csrf_cookie,
     host_is_allowed,
+    validate_cookie_name,
     websocket_origin_is_allowed,
 )
 from .server import run_dev_server
@@ -271,6 +275,7 @@ class Flasgo(RouteDecorators):
         """
         self.settings = load_settings(settings)
         self.security = security or self.settings.to_security_config()
+        self.security._validate_boolean_fields()
         self._validate_security_config()
         if cors is not None and not isinstance(cors, CORSConfig):
             raise TypeError("cors must be a CORSConfig instance or None.")
@@ -290,7 +295,7 @@ class Flasgo(RouteDecorators):
         self._session_backend = session_backend
         self._openapi_cache: dict[str, Any] | None = None
         self._openapi_dirty = True
-        self._security_failures: dict[str, tuple[float, int]] = {}
+        self._security_failures: OrderedDict[str, tuple[float, int]] = OrderedDict()
         self._logger = logging.getLogger("flasgo.security")
         self._access_logger = logging.getLogger("flasgo.access")
         self._websocket_logger = logging.getLogger("flasgo.websocket")
@@ -354,8 +359,16 @@ class Flasgo(RouteDecorators):
         return self._metrics.backend_operation(component, operation)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Dispatch ASGI requests, rejecting oversized heads before tracing or trusting request IDs."""
         if scope.get("type") in {"http", "websocket"}:
-            scope["request_id"] = self._request_id_for_scope(scope)
+            oversized_head = _request_head_size(scope) > self.security.max_request_head_bytes
+            scope["request_id"] = uuid4().hex if oversized_head else self._request_id_for_scope(scope)
+            if oversized_head:
+                if scope.get("type") == "http":
+                    await self._handle_http(scope, receive, send)
+                else:
+                    await self._handle_websocket(scope, receive, send)
+                return
             if self._telemetry is not None:
                 await self._telemetry(scope, receive, send)
                 return
@@ -449,23 +462,32 @@ class Flasgo(RouteDecorators):
         dependencies = DependencyContext(self._dependency_overrides.get())
         req.scope["flasgo.dependencies"] = dependencies
         try:
+            persist_session = False
+            session_before_dispatch: Session | None = None
             try:
                 async with dependencies.function_stack:
                     loaded_session = await self._load_session(req)
                     req.scope["session"] = loaded_session
                     _session_ctx.set(loaded_session)
+                    session_before_dispatch = _copy_session(loaded_session)
                     response = await self._dispatch(req)
                     if isinstance(response, StreamingResponse):
                         self._track_response(req, response)
                         await req.body()
                         response.receive = req.receive
+                persist_session = True
             except Exception as exc:
+                if session_before_dispatch is not None:
+                    loaded_session = session_before_dispatch
+                    req.scope["session"] = loaded_session
+                    _session_ctx.set(loaded_session)
                 await self._close_request_dependencies(req, dependencies, exc)
                 response = await self._handle_error(req, exc)
+                persist_session = req.scope.pop("flasgo.error_handler_succeeded", False) is True
 
             try:
                 self._track_response(req, response)
-                await self._prepare_response(req, response)
+                await self._prepare_response(req, response, persist_session=persist_session)
             except Exception as exc:
                 self._observe_rejection_exception(req, exc)
                 await self._close_request_dependencies(req, dependencies, exc)
@@ -687,6 +709,10 @@ class Flasgo(RouteDecorators):
         active = False
         try:
             await websocket.receive_connect()
+            if _request_head_size(scope) > self.security.max_request_head_bytes:
+                outcome = "request_head_limit"
+                await websocket.deny(431, "Request headers exceed MAX_REQUEST_HEAD_BYTES.")
+                return
             match = self._match_websocket_route(websocket.path)
             if match is None:
                 outcome = "not_found"
@@ -695,7 +721,7 @@ class Flasgo(RouteDecorators):
             route = match.route_path
             websocket.path_params = dict(match.params)
             upgrade_req = self._request_from_websocket_scope(scope)
-            loaded_session = await self._load_session(upgrade_req)
+            loaded_session = Session({})
             upgrade_req.scope["session"] = loaded_session
             upgrade_req.scope["user"] = User.anonymous()
             upgrade_req.scope["route_template"] = route
@@ -716,9 +742,7 @@ class Flasgo(RouteDecorators):
                 await websocket.deny(403, "Forbidden")
                 return
 
-            websocket_auth = self._route_auth.get(match.endpoint)
-            rate_phase = "pre_auth" if websocket_auth is not None else "all"
-            rate_limit_result = await self._check_rate_limits(upgrade_req, match.endpoint, phase=rate_phase)
+            rate_limit_result = await self._check_rate_limits(upgrade_req, match.endpoint, phase="pre_auth")
             if isinstance(rate_limit_result, Response):
                 outcome = "rate_limited"
                 await websocket.deny(
@@ -728,6 +752,10 @@ class Flasgo(RouteDecorators):
                 )
                 return
 
+            loaded_session = await self._load_session(upgrade_req)
+            upgrade_req.scope["session"] = loaded_session
+            scope["session"] = loaded_session
+
             denial = await self._authorize_websocket(upgrade_req, match.endpoint)
             scope["user"] = upgrade_req.scope["user"]
             if denial is not None:
@@ -736,20 +764,19 @@ class Flasgo(RouteDecorators):
                 await websocket.deny(status, _status_text(status), headers=headers)
                 return
 
-            if websocket_auth is not None:
-                authenticated_rate_limit = await self._check_rate_limits(
-                    upgrade_req,
-                    match.endpoint,
-                    phase="post_auth",
+            authenticated_rate_limit = await self._check_rate_limits(
+                upgrade_req,
+                match.endpoint,
+                phase="post_auth",
+            )
+            if isinstance(authenticated_rate_limit, Response):
+                outcome = "rate_limited"
+                await websocket.deny(
+                    429,
+                    _status_text(429),
+                    headers=_websocket_rate_limit_headers(authenticated_rate_limit),
                 )
-                if isinstance(authenticated_rate_limit, Response):
-                    outcome = "rate_limited"
-                    await websocket.deny(
-                        429,
-                        _status_text(429),
-                        headers=_websocket_rate_limit_headers(authenticated_rate_limit),
-                    )
-                    return
+                return
 
             if self._metrics is not None:
                 self._metrics.websocket_active.labels(route=route).inc()
@@ -988,7 +1015,15 @@ class Flasgo(RouteDecorators):
         """
         if not isinstance(public, bool):
             raise TypeError("public must be a bool.")
-        self._websocket_routes.append(WebSocketRoute(path, endpoint, name=name, public=public))
+        route = WebSocketRoute(path, endpoint, name=name, public=public)
+        if any(
+            existing.contract_shape == route.contract_shape
+            or (existing.specificity == route.specificity and routes_overlap(existing.raw_path, route.raw_path))
+            for existing in self._websocket_routes
+        ):
+            raise ValueError(f"WebSocket route {path!r} conflicts with an existing route pattern.")
+        self._websocket_routes.append(route)
+        self._websocket_routes.sort(key=self._route_precedence, reverse=True)
 
     def lifespan(self, fn: LifespanHandler) -> LifespanHandler:
         """
@@ -1045,21 +1080,29 @@ class Flasgo(RouteDecorators):
             self._auth_backend_schemes[normalized] = validated_scheme
         self._openapi_dirty = True
 
+    def _route_precedence(self, route: Route | WebSocketRoute) -> tuple[tuple[int, int, int], bool]:
+        """Order both protocols by specificity, then by endpoint authorization."""
+        return route.specificity, route.endpoint in self._route_auth
+
     def authorize[T: Callable[..., Any]](
         self,
         *permissions: PermissionLike,
         backend: str = "default",
     ) -> Callable[[T], T]:
+        """Attach permission requirements to an endpoint using a registered authentication backend."""
         backend_name = backend.strip()
         if not backend_name:
             raise ValueError("Auth backend name must not be empty. Pass the name used in register_auth_backend(...).")
 
         def decorator(endpoint: T) -> T:
+            """Record endpoint authorization and refresh precedence for already registered routes."""
             route_permissions = permissions or (IsAuthenticated(),)
             self._route_auth[endpoint] = RouteAuth(
                 backend=backend_name,
                 permissions=route_permissions,
             )
+            self._routes.sort(key=self._route_precedence, reverse=True)
+            self._websocket_routes.sort(key=self._route_precedence, reverse=True)
             self._openapi_dirty = True
             return endpoint
 
@@ -1130,18 +1173,34 @@ class Flasgo(RouteDecorators):
         if response_model is not None:
             validate_response_model(response_model)
         plan = compile_endpoint_plan(endpoint, path, dependencies=dependencies)
-        self._routes.append(
-            Route(
-                path,
-                normalized,
-                endpoint,
-                plan,
-                name=name,
-                cors=resolved_cors,
-                public=public,
-                response_model=response_model,
-            )
+        route = Route(
+            path,
+            normalized,
+            endpoint,
+            plan,
+            name=name,
+            cors=resolved_cors,
+            public=public,
+            response_model=response_model,
         )
+        if any(
+            (
+                existing.contract_shape == route.contract_shape
+                and (existing.parameter_names != route.parameter_names or existing.methods & route.methods)
+            )
+            or (
+                existing.methods & route.methods
+                and existing.specificity == route.specificity
+                and routes_overlap(existing.raw_path, route.raw_path)
+            )
+            for existing in self._routes
+        ):
+            raise ValueError(
+                f"HTTP route {path!r} duplicates or conflicts with an existing route pattern. "
+                "Reuse parameter names for disjoint methods and avoid overlapping methods."
+            )
+        self._routes.append(route)
+        self._routes.sort(key=self._route_precedence, reverse=True)
         if resolved_cors is not None:
             self._has_cors_routes = True
         self._openapi_dirty = True
@@ -1408,7 +1467,7 @@ class Flasgo(RouteDecorators):
             dependencies = req.scope["flasgo.dependencies"]
             dependencies.request_stack.push_async_callback(response.aclose)
 
-    async def _prepare_response(self, req: Request, response: Response) -> None:
+    async def _prepare_response(self, req: Request, response: Response, *, persist_session: bool = True) -> None:
         """Prepare an HTTP response with request, security, CORS, session, CSRF, and finalization metadata."""
         if isinstance(response, StreamingResponse) and response.receive is None:
             self._track_response(req, response)
@@ -1421,13 +1480,18 @@ class Flasgo(RouteDecorators):
         cors = req.scope.get("flasgo.cors")
         if isinstance(cors, CORSConfig) and not is_cors_preflight:
             _apply_cors_response_headers(req, response, cors)
+        response.prepare()
         if (
             not response.allow_public_cache
             and not is_cors_preflight
             and not is_metrics_response
             and not req.scope.get("flasgo.storage_failed")
         ):
-            session_token = await self._persist_session(req, response)
+            session_token = (
+                await self._persist_session(req, response)
+                if persist_session
+                else _single_cookie_value(req, self.security.session_cookie_name)
+            )
             if self.security.csrf_enabled:
                 ensure_csrf_cookie(req, response, self.security, session_token=session_token)
         response.prepare()
@@ -1579,6 +1643,8 @@ class Flasgo(RouteDecorators):
             raise ValueError("SESSION_COOKIE_SAME_SITE must be one of 'Lax', 'Strict', or 'None'.")
         if same_site == "none" and not self.security.session_cookie_secure:
             raise ValueError("SESSION_COOKIE_SAME_SITE='None' requires SESSION_COOKIE_SECURE=True.")
+        validate_cookie_name(self.security.session_cookie_name)
+        validate_cookie_name(self.security.csrf_cookie_name)
         if self.security.max_request_body_bytes <= 0:
             raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0.")
         if self.security.max_request_head_bytes <= 0:
@@ -1930,7 +1996,9 @@ class Flasgo(RouteDecorators):
         handler = self._find_error_handler(exc)
         if handler is not None:
             try:
-                return to_response(await _maybe_await(handler(req, exc)))
+                response = to_response(await _maybe_await(handler(req, exc)))
+                req.scope["flasgo.error_handler_succeeded"] = True
+                return response
             except Exception:
                 # A failing error handler must never escape the app: fall back to the
                 # built-in responses so security headers and safe bodies still apply.
@@ -1988,16 +2056,16 @@ class Flasgo(RouteDecorators):
         Returns:
                 Session: The request's session data.
         """
+        tokens = req.cookie_values(self.security.session_cookie_name)
+        token = tokens[0] if len(tokens) == 1 else None
         if self._session_backend is not None:
             hosts = _scope_header_values(req.scope, b"host")
             if self.security.enforce_allowed_hosts and (
                 len(hosts) != 1 or not host_is_allowed(hosts[0], allowed_hosts=self.security.allowed_hosts)
             ):
                 return Session({})
-            tokens = req.cookie_values(self.security.session_cookie_name)
             with self._backend_operation(req, "session", "load"):
-                return await self._session_backend.load(tokens[0] if len(tokens) == 1 else None)
-        token = req.cookies.get(self.security.session_cookie_name)
+                return await self._session_backend.load(token)
         if not token:
             return Session({})
         data = self._session_signer.loads(token, max_age=self.security.session_cookie_max_age)
@@ -2017,7 +2085,7 @@ class Flasgo(RouteDecorators):
         """
         current = req.scope.get("session")
         if not isinstance(current, Session) or not current.modified:
-            return req.cookies.get(self.security.session_cookie_name)
+            return _single_cookie_value(req, self.security.session_cookie_name)
         if self._session_backend is not None:
             with self._backend_operation(req, "session", "save"):
                 token = await self._session_backend.save(current, max_age=self.security.session_cookie_max_age) or ""
@@ -2131,19 +2199,30 @@ class Flasgo(RouteDecorators):
             return False
         window = self.security.security_failure_window_seconds
         now = time.monotonic()
-        if len(self._security_failures) > 10_000:
-            cutoff = now - window
-            self._security_failures = {key: value for key, value in self._security_failures.items() if value[0] >= cutoff}
+        self._prune_security_failures(now, window)
         start, count = self._security_failures.get(client, (now, 0))
         if now - start >= window:
+            self._security_failures.pop(client, None)
             start = now
             count = 0
+        if client not in self._security_failures and len(self._security_failures) >= 10_000:
+            self._observe_rejection(req, "security_rate_limit")
+            return True
         count += 1
         self._security_failures[client] = (start, count)
         if count > limit:
             self._observe_rejection(req, "security_rate_limit")
             return True
         return False
+
+    def _prune_security_failures(self, now: float, window: float) -> None:
+        """Remove expired client buckets in amortized insertion order."""
+        cutoff = now - window
+        while self._security_failures:
+            client, (started, _count) = next(iter(self._security_failures.items()))
+            if started >= cutoff:
+                break
+            self._security_failures.pop(client)
 
     def _security_failure_is_limited(self, req: Request) -> bool:
         """Check existing failure state and observe a throttle decision without incrementing failures."""
@@ -2305,6 +2384,23 @@ def _valid_websocket_origin(value: str) -> bool:
 
 def _scope_header_values(scope: Scope, name: bytes) -> list[str]:
     return [value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == name]
+
+
+def _single_cookie_value(req: Request, name: str) -> str | None:
+    """Return one unambiguous wire-level cookie value."""
+    values = req.cookie_values(name)
+    return values[0] if len(values) == 1 else None
+
+
+def _copy_session(current: Session) -> Session:
+    """Copy loaded session state so failed dispatch can roll back before error handling."""
+    return Session(
+        copy.deepcopy(current.data),
+        modified=current.modified,
+        _session_id=current._session_id,
+        _stored=current._stored,
+        _rotate=current._rotate,
+    )
 
 
 def _request_head_size(scope: Scope) -> int:

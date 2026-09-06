@@ -8,6 +8,7 @@ import re
 import sys
 import tempfile
 import traceback
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -173,7 +174,21 @@ def _check_command(args: argparse.Namespace) -> int:
     Returns:
         int: 1 if validation issues or policy changes are found, otherwise 0.
     """
-    app = load_app(args.target, app_name=args.app)
+    try:
+        with redirect_stdout(sys.stderr) if args.json else nullcontext():
+            app = load_app(args.target, app_name=args.app)
+    except (SystemExit, Exception) as exc:
+        if args.json:
+            print(
+                json.dumps(
+                    {"passed": False, "issues": [{"code": "registration", "severity": "error", "message": str(exc)}], "changes": []},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(str(exc), file=sys.stderr)
+        return 1
     errors: list[str] = []
     seen_http: set[tuple[str, str]] = set()
     seen_ws: set[str] = set()

@@ -4,7 +4,7 @@ import importlib
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 
 from .security import SecurityConfig
 
@@ -79,7 +79,7 @@ class Settings:
     DOCS_PATH: str = "/docs"
     OPENAPI_PATH: str = "/openapi.json"
     API_TITLE: str = "Flasgo API"
-    API_VERSION: str = "0.9.0"
+    API_VERSION: str = "0.9.1"
     API_DESCRIPTION: str = ""
     API_SERVERS: list[str] = field(default_factory=list)
     SSRF_ENABLED: bool = True
@@ -92,6 +92,23 @@ class Settings:
 
     SECURITY_HEADERS: dict[str, str] = field(default_factory=_default_security_headers)
     EXTRA: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Reject wrong-typed boolean assignments throughout the settings lifetime."""
+        annotation = type(self).__annotations__.get(name)
+        if annotation in {bool, "bool"} and not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool.")
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self) -> None:
+        """Reject wrong-typed booleans before any security setting is consumed."""
+        self._validate_boolean_fields()
+
+    def _validate_boolean_fields(self) -> None:
+        """Validate boolean fields, including after a caller mutates an existing instance."""
+        for name, annotation in get_type_hints(type(self)).items():
+            if annotation is bool and not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool.")
 
     def to_security_config(self) -> SecurityConfig:
         return SecurityConfig(
@@ -157,9 +174,11 @@ type SettingsInput = Settings | Mapping[str, Any] | str | object
 
 
 def load_settings(source: SettingsInput | None) -> Settings:
+    """Load and validate settings from an instance, mapping, module name, or object."""
     if source is None:
         return Settings()
     if isinstance(source, Settings):
+        source._validate_boolean_fields()
         return source
     if isinstance(source, Mapping):
         return Settings.from_mapping(cast(Mapping[str, Any], source))

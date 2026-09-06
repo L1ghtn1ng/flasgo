@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
+import threading
+from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from contextvars import Context, copy_context
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +15,12 @@ from .contracts import project_response, validate_response_model
 from .response import Response
 from .types import Receive, Send
 from .validation import ValidationBudget
+
+_MAX_ACTIVE_CLEANUPS = 128
+_MAX_PENDING_CLEANUPS = 128
+_active_cleanups = 0
+_active_cleanups_lock = threading.Lock()
+_pending_cleanups: deque[tuple[asyncio.AbstractEventLoop, StreamingResponse, Context]] = deque()
 
 
 def _positive_timeout(value: float, name: str) -> None:
@@ -41,6 +51,7 @@ class StreamingResponse(Response):
         send_timeout: float = 10,
         idle_timeout: float = 60,
         max_duration: float = 3600,
+        cleanup_timeout: float = 10,
     ) -> None:
         """
         Initialize a streaming response with chunk and lifecycle limits.
@@ -51,6 +62,7 @@ class StreamingResponse(Response):
                 send_timeout (float): Maximum time allowed for sending a message.
                 idle_timeout (float): Maximum time allowed while waiting for the next chunk.
                 max_duration (float): Maximum total streaming duration.
+                cleanup_timeout (float): Maximum time to await producer and iterator cleanup.
 
         Raises:
                 TypeError: If `content` is not an asynchronous iterable.
@@ -64,6 +76,7 @@ class StreamingResponse(Response):
             ("send_timeout", send_timeout),
             ("idle_timeout", idle_timeout),
             ("max_duration", max_duration),
+            ("cleanup_timeout", cleanup_timeout),
         ):
             _positive_timeout(value, name)
         self.iterator = aiter(content)
@@ -71,6 +84,7 @@ class StreamingResponse(Response):
         self.send_timeout = send_timeout
         self.idle_timeout = idle_timeout
         self.max_duration = max_duration
+        self.cleanup_timeout = cleanup_timeout
         self.receive: Receive | None = None
         self._used = False
         self._closed = False
@@ -89,12 +103,21 @@ class StreamingResponse(Response):
     async def aclose(self) -> None:
         """Close the response's iterators once.
 
-        Subsequent calls have no effect. Any available asynchronous close methods on the primary iterator and source iterator are
-        awaited.
+        Accepted cleanup runs once, immediately or from a bounded pending queue.
+        Queue overflow raises explicitly and leaves the response retryable.
         """
         if self._closed:
             return
-        self._closed = True
+
+        if not _admit_cleanup(self):
+            self._closed = True
+            self._metrics_outcome = "cleanup_timeout"
+            return
+        cleanup = self._start_cleanup()
+        await self._await_cleanup(cleanup)
+
+    async def _close_iterators(self) -> None:
+        """Finalize both owned iterators even if the first closer fails."""
         try:
             close = getattr(self.iterator, "aclose", None)
             if close is not None:
@@ -103,6 +126,50 @@ class StreamingResponse(Response):
             source_close = getattr(self._source, "aclose", None)
             if source_close is not None:
                 await source_close()
+
+    def _start_cleanup(self, *, deferred: bool = False) -> asyncio.Task[None]:
+        """Start admitted cleanup on its owning loop with a cancellation deadline."""
+        coroutine = self._close_iterators()
+        try:
+            cleanup = asyncio.create_task(coroutine)
+        except BaseException:
+            coroutine.close()
+            self._closed = False
+            _release_cleanup_slot()
+            raise
+        self._closed = True
+
+        def expire() -> None:
+            """Cancel deferred cleanup at its deadline while recording the timeout outcome."""
+            if not cleanup.done():
+                self._metrics_outcome = "cleanup_timeout"
+                cleanup.cancel()
+
+        timer = cleanup.get_loop().call_later(self.cleanup_timeout, expire) if deferred else None
+
+        def done(task: asyncio.Future[Any]) -> None:
+            """Cancel the deadline timer and transfer the completed cleanup slot."""
+            if timer is not None:
+                timer.cancel()
+            _cleanup_slot_done(task)
+
+        cleanup.add_done_callback(done)
+        return cleanup
+
+    async def _await_cleanup(self, task: asyncio.Future[Any]) -> None:
+        """Await application cleanup for a bounded interval and safely detach resistant work."""
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self.cleanup_timeout)
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(_consume_detached_cleanup_task)
+            raise
+        if task in done:
+            await task
+            return
+        self._metrics_outcome = "cleanup_timeout"
+        task.cancel()
+        task.add_done_callback(_consume_detached_cleanup_task)
 
     async def _send_message(self, send: Send, message: dict[str, Any]) -> None:
         """Send an ASGI message within the configured send timeout."""
@@ -200,7 +267,8 @@ class StreamingResponse(Response):
                 done, _ = await asyncio.wait({pump, disconnect}, return_when=asyncio.FIRST_COMPLETED)
                 if pump in done:
                     await pump
-                    self._metrics_outcome = "completed"
+                    if self._metrics_outcome != "cleanup_timeout":
+                        self._metrics_outcome = "completed"
                 else:
                     await disconnect
                     self._metrics_outcome = "client_disconnect"
@@ -215,7 +283,53 @@ class StreamingResponse(Response):
         finally:
             pump.cancel()
             disconnect.cancel()
-            await asyncio.gather(pump, disconnect, return_exceptions=True)
+            await self._await_cleanup(asyncio.gather(pump, disconnect, return_exceptions=True))
+
+
+def _consume_detached_cleanup_task(task: asyncio.Future[Any]) -> None:
+    """Consume the result when cancellation-resistant cleanup eventually finishes."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _admit_cleanup(response: StreamingResponse) -> bool:
+    """Reserve active capacity or enqueue cleanup; reject overflow explicitly."""
+    global _active_cleanups
+    with _active_cleanups_lock:
+        if _active_cleanups >= _MAX_ACTIVE_CLEANUPS:
+            if len(_pending_cleanups) >= _MAX_PENDING_CLEANUPS:
+                response._metrics_outcome = "cleanup_capacity"
+                raise RuntimeError("Streaming cleanup capacity exhausted; retry aclose() after capacity is available.")
+            _pending_cleanups.append((asyncio.get_running_loop(), response, copy_context()))
+            return False
+        _active_cleanups += 1
+        return True
+
+
+def _release_cleanup_slot() -> None:
+    """Transfer released capacity to queued cleanup on its owning event loop."""
+    global _active_cleanups
+    with _active_cleanups_lock:
+        _active_cleanups -= 1
+        pending = _pending_cleanups.popleft() if _pending_cleanups else None
+        if pending is not None:
+            _active_cleanups += 1
+    if pending is not None:
+        loop, response, context = pending
+        try:
+            loop.call_soon_threadsafe(lambda: response._start_cleanup(deferred=True), context=context)
+        except RuntimeError:
+            response._closed = False
+            logging.getLogger(__name__).error("Pending streaming cleanup cannot run: its event loop is closed.")
+            _release_cleanup_slot()
+
+
+def _cleanup_slot_done(task: asyncio.Future[Any]) -> None:
+    """Observe detached failures and automatically drain pending cleanup."""
+    try:
+        _consume_detached_cleanup_task(task)
+    finally:
+        _release_cleanup_slot()
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +384,7 @@ class EventSourceResponse(StreamingResponse):
         send_timeout: float = 10,
         idle_timeout: float = 60,
         max_duration: float = 3600,
+        cleanup_timeout: float = 10,
         max_chunk_bytes: int = 65_536,
     ) -> None:
         """
@@ -283,6 +398,7 @@ class EventSourceResponse(StreamingResponse):
             send_timeout (float): Maximum time allowed for sending each ASGI message.
             idle_timeout (float): Maximum time allowed while waiting for streamed data.
             max_duration (float): Maximum response lifetime in seconds.
+            cleanup_timeout (float): Maximum time to await producer cleanup.
             max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
         """
         _positive_timeout(heartbeat, "heartbeat")
@@ -326,6 +442,7 @@ class EventSourceResponse(StreamingResponse):
             send_timeout=send_timeout,
             idle_timeout=idle_timeout,
             max_duration=max_duration,
+            cleanup_timeout=cleanup_timeout,
             max_chunk_bytes=max_chunk_bytes,
         )
         self._source = source
@@ -341,6 +458,7 @@ class NDJSONResponse(StreamingResponse):
         send_timeout: float = 10,
         idle_timeout: float = 60,
         max_duration: float = 3600,
+        cleanup_timeout: float = 10,
         max_chunk_bytes: int = 65_536,
     ) -> None:
         """
@@ -353,6 +471,7 @@ class NDJSONResponse(StreamingResponse):
             send_timeout (float): Maximum time allowed for sending each chunk.
             idle_timeout (float): Maximum time allowed between source items.
             max_duration (float): Maximum response streaming duration.
+            cleanup_timeout (float): Maximum time to await producer cleanup.
             max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
         """
         validate_response_model(item_model)
@@ -375,6 +494,7 @@ class NDJSONResponse(StreamingResponse):
             send_timeout=send_timeout,
             idle_timeout=idle_timeout,
             max_duration=max_duration,
+            cleanup_timeout=cleanup_timeout,
             max_chunk_bytes=max_chunk_bytes,
         )
         self._source = source

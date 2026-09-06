@@ -34,6 +34,7 @@ def _scrape(app: Flasgo, *, accept: str | None = None) -> str:
 
 
 def test_http_metrics_include_runtime_status_latency_and_response_size() -> None:
+    """Record response measurements and version metadata without unbounded method labels."""
     app = _app()
 
     @app.post("/items/<int:item_id>")
@@ -49,7 +50,7 @@ def test_http_metrics_include_runtime_status_latency_and_response_size() -> None
     assert client.request("X-ATTACKER-METHOD", "/known").status_code == 405
 
     metrics = _scrape(app)
-    assert 'flasgo_info{version="0.9.0"} 1.0' in metrics
+    assert 'flasgo_info{version="0.9.1"} 1.0' in metrics
     assert "python_info{" in metrics
     assert "python_gc_collections_total{" in metrics
     if sys.platform.startswith("linux"):

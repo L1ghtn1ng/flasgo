@@ -4,6 +4,7 @@ import ipaddress
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import get_type_hints
 from urllib.parse import urlsplit
 
 from .request import Request
@@ -19,6 +20,7 @@ def _format_http_date(value: datetime) -> str:
 
 
 _SAME_SITE_VALUES = {"lax": "Lax", "strict": "Strict", "none": "None"}
+_COOKIE_NAME_PUNCTUATION = frozenset("!#$%&'*+-.^_`|~")
 
 
 def build_set_cookie(
@@ -31,8 +33,9 @@ def build_set_cookie(
     same_site: str = "Lax",
     path: str = "/",
 ) -> str:
-    _validate_cookie_part(name, part="name")
-    _validate_cookie_part(value, part="value")
+    """Build a Set-Cookie value after validating its name, value, path, and SameSite policy."""
+    validate_cookie_name(name)
+    _validate_cookie_value(value)
     _validate_cookie_path(path)
     normalized_same_site = _SAME_SITE_VALUES.get(same_site.strip().lower())
     if normalized_same_site is None:
@@ -67,16 +70,18 @@ def _default_secret_key() -> str:
     return secrets.token_urlsafe(48)
 
 
-def _validate_cookie_part(value: str, *, part: str) -> None:
-    if any(char in value for char in ("\r", "\n", "\x00")):
-        msg = f"Invalid cookie {part}: contains control characters."
-        raise ValueError(msg)
-    if part == "name" and any(char in value for char in (";", "=", " ")):
-        msg = "Invalid cookie name: contains forbidden separators."
-        raise ValueError(msg)
-    if part == "value" and any(char in value for char in (";", ",", " ", "\t")):
-        msg = "Invalid cookie value: contains forbidden separators."
-        raise ValueError(msg)
+def _validate_cookie_value(value: str) -> None:
+    """Reject cookie values containing forbidden control characters or separators."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError("Invalid cookie value: contains control characters.")
+    if any(char in value for char in (";", ",", " ")):
+        raise ValueError("Invalid cookie value: contains forbidden separators.")
+
+
+def validate_cookie_name(name: str) -> None:
+    """Require a non-empty ASCII HTTP token for a cookie name."""
+    if not name or any(not char.isascii() or not (char.isalnum() or char in _COOKIE_NAME_PUNCTUATION) for char in name):
+        raise ValueError("Invalid cookie name: must be a non-empty ASCII HTTP token.")
 
 
 @dataclass(slots=True)
@@ -128,6 +133,23 @@ class SecurityConfig:
     )
 
     secret_key: str = field(default_factory=_default_secret_key)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Reject wrong-typed boolean assignments throughout the configuration lifetime."""
+        annotation = type(self).__annotations__.get(name)
+        if annotation in {bool, "bool"} and not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool.")
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self) -> None:
+        """Reject wrong-typed booleans before they can disable a security control."""
+        self._validate_boolean_fields()
+
+    def _validate_boolean_fields(self) -> None:
+        """Validate boolean fields, including after a caller mutates an existing instance."""
+        for name, annotation in get_type_hints(type(self)).items():
+            if annotation is bool and not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool.")
 
 
 def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
@@ -192,9 +214,10 @@ def ensure_csrf_cookie(
     *,
     session_token: str | None = None,
 ) -> None:
+    """Reuse a valid session-bound CSRF cookie or issue a fresh token."""
     if session_token is None:
-        session_token = request.cookies.get(config.session_cookie_name)
-    existing = request.cookies.get(config.csrf_cookie_name)
+        session_token = _single_request_cookie(request, config.session_cookie_name)
+    existing = _single_request_cookie(request, config.csrf_cookie_name)
     if existing and _csrf_token_is_valid(existing, config, session_token=session_token):
         return
     token = _build_csrf_token(config, session_token=session_token)
@@ -210,12 +233,14 @@ def ensure_csrf_cookie(
 
 
 def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
+    """Validate unsafe requests against origin policy and one matching cookie/header token pair."""
     if request.method in config.csrf_safe_methods:
         return True
     if config.csrf_check_origin and not _csrf_origin_is_valid(request, config):
         return False
-    cookie_token = request.cookies.get(config.csrf_cookie_name)
-    header_token = request.headers.get(config.csrf_header_name.lower())
+    cookie_token = _single_request_cookie(request, config.csrf_cookie_name)
+    header_values = request.header_values(config.csrf_header_name)
+    header_token = header_values[0] if len(header_values) == 1 else None
     if not cookie_token or not header_token:
         return False
     if not _constant_time_equal(cookie_token, header_token):
@@ -223,8 +248,14 @@ def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
     return _csrf_token_is_valid(
         cookie_token,
         config,
-        session_token=request.cookies.get(config.session_cookie_name),
+        session_token=_single_request_cookie(request, config.session_cookie_name),
     )
+
+
+def _single_request_cookie(request: Request, name: str) -> str | None:
+    """Return a cookie only when exactly one occurrence is present."""
+    values = request.cookie_values(name)
+    return values[0] if len(values) == 1 else None
 
 
 def _build_csrf_token(config: SecurityConfig, *, session_token: str | None) -> str:
@@ -269,12 +300,15 @@ def apply_security_headers(response: Response, config: SecurityConfig) -> None:
 
 
 def _csrf_origin_is_valid(request: Request, config: SecurityConfig) -> bool:
-    origin = request.headers.get("origin")
-    if origin:
-        return _origin_matches_request(origin, request, config)
-    referer = request.headers.get("referer")
-    if referer:
-        return _origin_matches_request(referer, request, config)
+    """Apply origin policy while rejecting duplicate Origin or Referer headers."""
+    origins = request.header_values("origin")
+    referers = request.header_values("referer")
+    if len(origins) > 1 or len(referers) > 1:
+        return False
+    if origins:
+        return _origin_matches_request(origins[0], request, config)
+    if referers:
+        return _origin_matches_request(referers[0], request, config)
     return not config.csrf_require_origin
 
 
