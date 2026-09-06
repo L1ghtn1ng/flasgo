@@ -459,3 +459,45 @@ def test_db_commands_delegate_to_alembic(tmp_path: Path, monkeypatch: pytest.Mon
         ("upgrade", str(config_path), "head", False),
         ("downgrade", str(config_path), "base", True),
     ]
+
+
+@pytest.mark.parametrize("option", ["-o", "--output"])
+def test_routes_output_is_valid_json_despite_app_import_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], option: str
+) -> None:
+    app_file = tmp_path / "noisy_app.py"
+    app_file.write_text("print('application startup')\nfrom flasgo import Flasgo\napp = Flasgo()\n")
+    output = tmp_path / "snapshots" / "policy.json"
+    assert cli_module.main(["routes", str(app_file), "--json", option, str(output)]) == 0
+    document = output.read_text()
+    assert json.loads(document)["schema_version"] == 1
+    assert document.endswith("\n")
+    assert capsys.readouterr().out == "application startup\n"
+    assert cli_module.main(["check", str(app_file), "--against", str(output), "--json"]) == 0
+
+
+@pytest.mark.parametrize("flags", [[], ["--policy"]])
+def test_routes_output_requires_json_before_loading_app(tmp_path: Path, flags: list[str]) -> None:
+    output = tmp_path / "policy.json"
+    output.write_text("existing")
+    with pytest.raises(SystemExit) as error:
+        cli_module.main(["routes", "does_not_exist.py", *flags, "--output", str(output)])
+    assert error.value.code == 2
+    assert output.read_text() == "existing"
+
+
+def test_routes_output_failure_preserves_baseline_and_removes_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "policy.json"
+    output.write_text("existing")
+    monkeypatch.setattr(cli_module, "load_app", lambda *args, **kwargs: Flasgo())
+
+    def fail_replace(*args: object) -> None:
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(cli_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replacement failed"):
+        cli_module.main(["routes", "unused", "--json", "--output", str(output)])
+    assert output.read_text() == "existing"
+    assert list(tmp_path.iterdir()) == [output]

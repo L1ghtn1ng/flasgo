@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_target_arguments(routes_parser)
     routes_parser.add_argument("--policy", action="store_true", help="Explain effective route security policies")
     routes_parser.add_argument("--json", action="store_true", help="Emit a versioned policy snapshot as JSON")
+    routes_parser.add_argument("-o", "--output", help="Write the JSON policy snapshot atomically to this file")
     routes_parser.set_defaults(handler=_routes_command)
 
     openapi_parser = subparsers.add_parser("openapi", help="Render the application's OpenAPI document")
@@ -102,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "routes" and args.output is not None and not args.json:
+        parser.error("routes --output requires --json")
     handler = args.handler
     return int(handler(args))
 
@@ -128,7 +131,11 @@ def _routes_command(args: argparse.Namespace) -> int:
     if args.json or args.policy:
         snapshot = app.policy_snapshot()
         if args.json:
-            print(json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False))
+            document = json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"
+            if args.output is None:
+                print(document, end="")
+            else:
+                _atomic_write(Path(args.output), document)
         else:
             print(snapshot["scope"])
             for route in snapshot["routes"]:
