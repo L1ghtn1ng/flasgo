@@ -145,8 +145,11 @@ async def _resolve_plan(
             elif binding.source == "dependency" and binding.dependency is not None:
                 marker = binding.marker
                 assert isinstance(marker, Depends)
-                context = request.scope["flasgo.dependencies"]
-                assert isinstance(context, DependencyContext)
+                context = request.scope.get("flasgo.dependencies")
+                if not isinstance(context, DependencyContext):
+                    raise RuntimeError(
+                        "Dependency resolution requires a DependencyContext in request.scope['flasgo.dependencies']."
+                    )
                 provider = context.overrides.get(marker.provider, marker.provider)
                 cache_key = (id(marker.provider), marker.scope)
                 if marker.use_cache and cache_key in cache:
