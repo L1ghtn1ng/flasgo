@@ -70,3 +70,8 @@ def redirect(
     """
 
     return Response.redirect(location, status_code=status_code, headers=headers)
+
+
+def url_for(endpoint: str, **values: Any) -> str:
+    """Build a relative URL using the active request's application."""
+    return _get_request().scope["flasgo.app"].url_for(endpoint, **values)

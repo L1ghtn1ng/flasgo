@@ -85,6 +85,7 @@ from .validation import RequestValidationError
 from .websockets import WebSocket, WebSocketDisconnect
 
 if TYPE_CHECKING:
+    from .blueprints import Blueprint
     from .testing import TestClient
 
 BeforeMiddleware = Callable[[Request], ResponseValue | Awaitable[ResponseValue] | None]
@@ -313,6 +314,7 @@ class Flasgo(RouteDecorators):
                         self._metrics.http_active.dec()
             return
         req = Request(scope, receive)
+        req.scope["flasgo.app"] = self
         req.scope["max_request_body_bytes"] = self.security.max_request_body_bytes
         req.scope["request_read_timeout_seconds"] = self.security.request_read_timeout_seconds
         req.scope["max_multipart_parts"] = self.security.max_multipart_parts
@@ -906,6 +908,44 @@ class Flasgo(RouteDecorators):
             self._has_cors_routes = True
         self._openapi_dirty = True
 
+    def register_blueprint(self, blueprint: Blueprint) -> None:
+        from .blueprints import Blueprint
+
+        if not isinstance(blueprint, Blueprint):
+            raise TypeError("Expected a Blueprint.")
+        routes = list(self._routes)
+        auth = dict(self._route_auth)
+        had_cors = self._has_cors_routes
+        try:
+            blueprint._register(self)
+            names = [route.name for route in self._routes if route.name]
+            keys = [(route.raw_path, method) for route in self._routes for method in route.methods]
+            if len(names) != len(set(names)) or len(keys) != len(set(keys)):
+                raise ValueError("Blueprint registration creates duplicate route names or HTTP routes.")
+        except Exception:
+            self._routes = routes
+            self._route_auth = auth
+            self._has_cors_routes = had_cors
+            raise
+
+    def url_for(self, endpoint: str, **values: Any) -> str:
+        from .blueprints import build_url
+
+        routes = [
+            route
+            for route in (*self._routes, *self._websocket_routes)
+            if (route.name or getattr(route.endpoint, "__name__", None)) == endpoint
+        ]
+        if len(routes) != 1:
+            raise ValueError("URL generation requires exactly one route with the requested name.")
+        result = build_url(routes[0].raw_path, values)
+        active = _request_ctx.get()
+        if active is not None and active.scope.get("flasgo.app") is self:
+            root = str(active.scope.get("root_path", "")).rstrip("/")
+            if root:
+                result = build_url(root, {}) + result
+        return result
+
     @contextmanager
     def override_dependencies(self, overrides: Mapping[Provider, Provider]):
         """Temporarily override providers in this execution context, including nested tests."""
@@ -956,7 +996,7 @@ class Flasgo(RouteDecorators):
     ) -> JinjaTemplates:
         self.templates = JinjaTemplates(
             template_dirs,
-            globals=globals,
+            globals={"url_for": self.url_for, **(globals or {})},
             filters=filters,
             tests=tests,
             enable_async=enable_async,
