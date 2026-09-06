@@ -9,7 +9,7 @@ from email.policy import default
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 from urllib.parse import parse_qs
 
-from .exceptions import HTTPException
+from .exceptions import HTTPException, _RequestRejection
 from .types import Receive, Scope
 
 if TYPE_CHECKING:
@@ -191,6 +191,7 @@ def _parse_multipart_form(
     max_parts: int,
     max_fields: int,
 ) -> FormData:
+    """Parse multipart fields and uploads while enforcing configured field, file, and part limits."""
     try:
         boundary_bytes = boundary.encode("ascii")
     except UnicodeEncodeError as exc:
@@ -200,7 +201,7 @@ def _parse_multipart_form(
     # The email parser has quadratic memory behavior on many tiny parts, so bound the
     # actual delimiter lines with a cheap raw scan before parsing.
     if _count_multipart_part_delimiters(body, boundary_bytes) > max_parts:
-        raise HTTPException(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.")
+        raise _RequestRejection(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.", "multipart_limit")
     message = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body)
     if not message.is_multipart():
         raise HTTPException(
@@ -215,7 +216,7 @@ def _parse_multipart_form(
     for part in message.iter_parts():
         parts_seen += 1
         if parts_seen > max_parts:
-            raise HTTPException(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.")
+            raise _RequestRejection(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.", "multipart_limit")
         if part.is_multipart():
             raise HTTPException(
                 400,
@@ -245,7 +246,7 @@ def _parse_multipart_form(
 
         fields_seen += 1
         if fields_seen > max_fields:
-            raise HTTPException(413, "Multipart form data exceeds MAX_FORM_FIELDS.")
+            raise _RequestRejection(413, "Multipart form data exceeds MAX_FORM_FIELDS.", "form_limit")
         charset = part.get_content_charset("utf-8") or "utf-8"
         value = _decode_form_value(
             payload,
@@ -292,11 +293,12 @@ class Request:
 
     @property
     def query_params(self) -> Mapping[str, list[str]]:
+        """Decode query parameters while enforcing the configured field-count limit."""
         max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
         try:
             return parse_qs(self.query_string, keep_blank_values=True, max_num_fields=max_fields)
         except ValueError as exc:
-            raise HTTPException(413, "Query string exceeds MAX_FORM_FIELDS.") from exc
+            raise _RequestRejection(413, "Query string exceeds MAX_FORM_FIELDS.", "form_limit") from exc
 
     @property
     def content_type(self) -> str:
@@ -339,6 +341,7 @@ class Request:
         return self.scope.get("user")
 
     async def body(self) -> bytes:
+        """Read and cache the request body within the configured byte and receive-time limits."""
         if self.scope.get("flasgo.websocket_upgrade"):
             raise RuntimeError("Request body is not available on a WebSocket upgrade view.")
         if self._body is not None:
@@ -362,14 +365,17 @@ class Request:
                     piece = bytes(message.get("body", b""))
                     seen += len(piece)
                     if body_limit is not None and seen > body_limit:
-                        raise HTTPException(413, f"Request body exceeds MAX_REQUEST_BODY_BYTES ({body_limit} bytes).")
+                        raise _RequestRejection(
+                            413, f"Request body exceeds MAX_REQUEST_BODY_BYTES ({body_limit} bytes).", "request_body_limit"
+                        )
                     chunks.append(piece)
                     if not message.get("more_body", False):
                         break
         except TimeoutError as exc:
-            raise HTTPException(
+            raise _RequestRejection(
                 408,
                 "Request body was not received before REQUEST_READ_TIMEOUT_SECONDS elapsed.",
+                "request_read_timeout",
             ) from exc
         self._body = b"".join(chunks)
         return self._body
@@ -392,6 +398,7 @@ class Request:
             raise HTTPException(400, _JSON_BODY_ERROR) from exc
 
     async def form(self) -> FormData:
+        """Parse supported form encodings while retaining bounded diagnostic rejection reasons."""
         if self._form_loaded:
             return self._form or FormData()
 
@@ -407,7 +414,7 @@ class Request:
             try:
                 parsed = parse_qs(decoded, keep_blank_values=True, max_num_fields=max_fields)
             except ValueError as exc:
-                raise HTTPException(413, "Form data exceeds MAX_FORM_FIELDS.") from exc
+                raise _RequestRejection(413, "Form data exceeds MAX_FORM_FIELDS.", "form_limit") from exc
             form = FormData(fields=parsed)
         elif content_type == "multipart/form-data":
             boundary = params.get("boundary")

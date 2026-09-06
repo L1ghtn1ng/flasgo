@@ -75,6 +75,7 @@ class StreamingResponse(Response):
         self._used = False
         self._closed = False
         self._source: AsyncIterator[Any] | None = None
+        self._metrics_outcome = "producer_failure"
         super().__init__(body=b"", status_code=status_code, headers=dict(headers or {}), content_type=content_type)
 
     def prepare(self) -> None:
@@ -105,8 +106,19 @@ class StreamingResponse(Response):
 
     async def _send_message(self, send: Send, message: dict[str, Any]) -> None:
         """Send an ASGI message within the configured send timeout."""
-        async with asyncio.timeout(self.send_timeout):
-            await send(message)
+        timeout = asyncio.timeout(self.send_timeout)
+        try:
+            async with timeout:
+                await send(message)
+        except TimeoutError:
+            self._metrics_outcome = "send_timeout" if timeout.expired() else "send_failure"
+            raise
+        except OSError:
+            self._metrics_outcome = "client_disconnect"
+            raise
+        except Exception:
+            self._metrics_outcome = "send_failure"
+            raise
 
     async def _pump(self, send: Send, head_only: bool) -> None:
         """Send the streaming response through ASGI.
@@ -128,8 +140,14 @@ class StreamingResponse(Response):
             if not head_only:
                 while True:
                     try:
-                        async with asyncio.timeout(self.idle_timeout):
-                            chunk = await anext(self.iterator)
+                        timeout = asyncio.timeout(self.idle_timeout)
+                        try:
+                            async with timeout:
+                                chunk = await anext(self.iterator)
+                        except TimeoutError:
+                            if timeout.expired():
+                                self._metrics_outcome = "idle_timeout"
+                            raise
                     except StopAsyncIteration:
                         break
                     if not isinstance(chunk, bytes | str):
@@ -171,18 +189,29 @@ class StreamingResponse(Response):
                 ConnectionError: If the client disconnects before streaming completes.
         """
         if self._used:
+            self._metrics_outcome = "producer_failure"
             raise RuntimeError("A streaming response can only be sent once.")
         self._used = True
         pump = asyncio.create_task(self._pump(send, head_only))
         disconnect = asyncio.create_task(self._disconnect())
+        timeout = asyncio.timeout(self.max_duration)
         try:
-            async with asyncio.timeout(self.max_duration):
+            async with timeout:
                 done, _ = await asyncio.wait({pump, disconnect}, return_when=asyncio.FIRST_COMPLETED)
                 if pump in done:
                     await pump
+                    self._metrics_outcome = "completed"
                 else:
                     await disconnect
+                    self._metrics_outcome = "client_disconnect"
                     raise ConnectionError("Streaming client disconnected.")
+        except TimeoutError:
+            if timeout.expired():
+                self._metrics_outcome = "max_duration"
+            raise
+        except asyncio.CancelledError:
+            self._metrics_outcome = "cancelled"
+            raise
         finally:
             pump.cancel()
             disconnect.cancel()

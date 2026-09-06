@@ -81,6 +81,7 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def check(self, rule: RateLimitRule, req: Request, *, endpoint_id: str) -> RateLimitDecision:
+        """Evaluate one rule using a monotonic window and mark any limiter-capacity denial."""
         now = time.monotonic()
         client_key = _rate_limit_key(rule, req)
         scope = rule.scope or endpoint_id
@@ -90,6 +91,7 @@ class RateLimiter:
             if bucket_key not in self._buckets and len(self._buckets) >= self.max_keys:
                 self._prune(now)
                 if len(self._buckets) >= self.max_keys:
+                    req.scope["flasgo.rate_limit_capacity"] = True
                     return self._capacity_decision(rule, now=now)
 
             request_times = self._buckets.setdefault(bucket_key, deque())
@@ -156,6 +158,7 @@ class RateLimiter:
                 self._prune(now)
                 missing_keys = {bucket_key for bucket_key, _rule in requested_entries if bucket_key not in self._buckets}
                 if len(self._buckets) + len(missing_keys) > self.max_keys:
+                    req.scope["flasgo.rate_limit_capacity"] = True
                     return [self._capacity_decision(rule, now=now) for _bucket_key, rule in requested_entries]
 
             entries = []

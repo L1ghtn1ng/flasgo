@@ -13,6 +13,10 @@ class StoreUnavailable(Exception):
     """Shared storage failed; callers must not fall back to uncoordinated state."""
 
 
+class _StoreCapacityExceeded(StoreUnavailable):
+    """A bounded local store could not admit a new entry."""
+
+
 class SessionStore(Protocol):
     async def get(self, key: str) -> bytes | None:
         """Retrieve the value associated with a key.
@@ -137,7 +141,7 @@ class MemoryStore:
                 for existing in tuple(self._values):
                     self._get(existing)
                 if len(self._values) >= self.max_keys:
-                    raise StoreUnavailable("Session store capacity reached.")
+                    raise _StoreCapacityExceeded("Session store capacity reached.")
             self._values[key] = (value, time.monotonic() + ttl)
             return True
 

@@ -122,6 +122,7 @@ class RedisRateLimiter:
             args.extend((rule.requests, math.ceil(rule.window_seconds * 1000)))
         rows = await self.store.evaluate(_LIMIT_SCRIPT, keys, args)
         if rows == []:
+            req.scope["flasgo.rate_limit_capacity"] = True
             return [RateLimitDecision(False, rule.requests, 0, 1, 1) for rule, _ in rules]
         if not isinstance(rows, list) or len(rows) != len(rules):
             raise StoreUnavailable("Shared limiter returned invalid accounting data.")
