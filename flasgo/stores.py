@@ -14,58 +14,63 @@ class StoreUnavailable(Exception):
 
 
 class SessionStore(Protocol):
-    async def get(self, key: str) -> bytes | None: """Retrieve the value associated with a key.
+    async def get(self, key: str) -> bytes | None:
+        """Retrieve the value associated with a key.
 
-Returns:
-    bytes | None: The unexpired value, or `None` if the key is absent or expired.
-"""
-...
-    async def create(self, key: str, value: bytes, ttl: int) -> bool: """
-Create a session entry only when the key is absent.
+        Returns:
+            bytes | None: The unexpired value, or `None` if the key is absent or expired.
+        """
+        ...
 
-Parameters:
-    key (str): Key identifying the session entry.
-    value (bytes): Session data to store.
-    ttl (int): Lifetime of the entry in seconds.
+    async def create(self, key: str, value: bytes, ttl: int) -> bool:
+        """Create a session entry only when the key is absent.
 
-Returns:
-    bool: `True` if the entry was created, `False` if the key already exists.
-"""
-...
-    async def replace(self, key: str, expected: bytes, value: bytes, ttl: int) -> bool: """
-Replace a stored value only when it matches the expected value.
+        Parameters:
+            key (str): Key identifying the session entry.
+            value (bytes): Session data to store.
+            ttl (int): Lifetime of the entry in seconds.
 
-Parameters:
-	key (str): The key identifying the stored value.
-	expected (bytes): The value that must currently be stored.
-	value (bytes): The replacement value.
-	ttl (int): The replacement value's lifetime in seconds.
+        Returns:
+            bool: `True` if the entry was created, `False` if the key already exists.
+        """
+        ...
 
-Returns:
-	bool: `true` if the value was replaced, `false` if the key was absent or its value differed from `expected`.
-"""
-...
-    async def rotate(self, key: str, expected: bytes, new_key: str, value: bytes, ttl: int) -> bool: """
-Atomically move a session value to a new key when the expected value matches.
+    async def replace(self, key: str, expected: bytes, value: bytes, ttl: int) -> bool:
+        """Replace a stored value only when it matches the expected value.
 
-Parameters:
-    key (str): The current session key.
-    expected (bytes): The value required at the current key.
-    new_key (str): The destination session key.
-    value (bytes): The value to store at the destination.
-    ttl (int): The lifetime of the destination value in seconds.
+        Parameters:
+            key (str): The key identifying the stored value.
+            expected (bytes): The value that must currently be stored.
+            value (bytes): The replacement value.
+            ttl (int): The replacement value's lifetime in seconds.
 
-Returns:
-    bool: `true` if the rotation succeeds, `false` otherwise.
-"""
-...
-    async def delete(self, key: str) -> None: """
-Delete the stored value for a key if it exists.
+        Returns:
+            bool: `true` if the value was replaced, `false` if the key was absent or its value differed from `expected`.
+        """
+        ...
 
-Parameters:
-	key (str): The key identifying the stored value.
-"""
-...
+    async def rotate(self, key: str, expected: bytes, new_key: str, value: bytes, ttl: int) -> bool:
+        """Atomically move a session value to a new key when the expected value matches.
+
+        Parameters:
+            key (str): The current session key.
+            expected (bytes): The value required at the current key.
+            new_key (str): The destination session key.
+            value (bytes): The value to store at the destination.
+            ttl (int): The lifetime of the destination value in seconds.
+
+        Returns:
+            bool: `true` if the rotation succeeds, `false` otherwise.
+        """
+        ...
+
+    async def delete(self, key: str) -> None:
+        """Delete the stored value for a key if it exists.
+
+        Parameters:
+            key (str): The key identifying the stored value.
+        """
+        ...
 
 
 class MemoryStore:
@@ -73,9 +78,9 @@ class MemoryStore:
 
     def __init__(self, *, max_keys: int = 10_000) -> None:
         """Initialize a bounded in-memory session store.
-        
+
         Parameters:
-        	max_keys (int): Maximum number of entries the store can contain.
+            max_keys (int): Maximum number of entries the store can contain.
         """
         if isinstance(max_keys, bool) or not isinstance(max_keys, int) or max_keys <= 0:
             raise ValueError("max_keys must be a positive integer.")
@@ -86,7 +91,7 @@ class MemoryStore:
     def _get(self, key: str) -> bytes | None:
         """
         Retrieve an unexpired value for a key.
-        
+
         Returns:
             bytes | None: The stored value, or `None` if the key is missing or expired.
         """
@@ -100,12 +105,12 @@ class MemoryStore:
 
     async def get(self, key: str) -> bytes | None:
         """Retrieve an unexpired value for a key.
-        
+
         Parameters:
-        	key (str): The key to retrieve.
-        
+            key (str): The key to retrieve.
+
         Returns:
-        	bytes | None: The stored value, or `None` if the key is absent or expired.
+            bytes | None: The stored value, or `None` if the key is absent or expired.
         """
         async with self._lock:
             return self._get(key)
@@ -113,15 +118,15 @@ class MemoryStore:
     async def create(self, key: str, value: bytes, ttl: int) -> bool:
         """
         Create a session entry if the key is unused and capacity is available.
-        
+
         Parameters:
             key (str): Key for the session entry.
             value (bytes): Session data to store.
             ttl (int): Lifetime of the entry in seconds.
-        
+
         Returns:
             bool: `true` if the entry was created, `false` if the key already exists.
-        
+
         Raises:
             StoreUnavailable: If the store remains at capacity after expired entries are removed.
         """
@@ -138,15 +143,15 @@ class MemoryStore:
 
     async def replace(self, key: str, expected: bytes, value: bytes, ttl: int) -> bool:
         """Replace a stored value when its current value matches the expected value.
-        
+
         Parameters:
-        	key (str): The key whose value should be replaced.
-        	expected (bytes): The value currently expected for the key.
-        	value (bytes): The replacement value.
-        	ttl (int): The replacement value's time-to-live in seconds.
-        
+            key (str): The key whose value should be replaced.
+            expected (bytes): The value currently expected for the key.
+            value (bytes): The replacement value.
+            ttl (int): The replacement value's time-to-live in seconds.
+
         Returns:
-        	bool: `True` if the value was replaced, `False` if the current value differs from `expected`.
+            bool: `True` if the value was replaced, `False` if the current value differs from `expected`.
         """
         async with self._lock:
             if self._get(key) != expected:
@@ -156,11 +161,11 @@ class MemoryStore:
 
     async def rotate(self, key: str, expected: bytes, new_key: str, value: bytes, ttl: int) -> bool:
         """Atomically move a value to a new key when the expected value matches.
-        
+
         Parameters:
             expected (bytes): The value that must currently be stored under `key`.
             new_key (str): The destination key.
-        
+
         Returns:
             bool: `true` if the value was moved, `false` if the expected value did not match or the destination key was already in use.
         """
@@ -184,19 +189,17 @@ class RedisStore:
     All keys share a cluster hash slot so compare-and-swap and rotation are atomic.
     """
 
-    def __init__(
-        self, client: Any, *, namespace: str = "flasgo", timeout: float = 2, max_value_bytes: int = 65_536
-    ) -> None:
+    def __init__(self, client: Any, *, namespace: str = "flasgo", timeout: float = 2, max_value_bytes: int = 65_536) -> None:
         """
         Configure a Redis-backed session store.
-        
+
         Parameters:
-        	namespace (str): Namespace used to prefix stored keys.
-        	timeout (float): Maximum duration in seconds for Redis operations.
-        	max_value_bytes (int): Maximum permitted size of a stored value in bytes.
-        
+            namespace (str): Namespace used to prefix stored keys.
+            timeout (float): Maximum duration in seconds for Redis operations.
+            max_value_bytes (int): Maximum permitted size of a stored value in bytes.
+
         Raises:
-        	ValueError: If the namespace, timeout, or maximum value size is invalid.
+            ValueError: If the namespace, timeout, or maximum value size is invalid.
         """
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", namespace):
             raise ValueError("Store namespace must contain 1-64 ASCII letters, digits, underscores or hyphens.")
@@ -213,15 +216,15 @@ class RedisStore:
     @classmethod
     def from_url(cls, url: str, *, namespace: str = "flasgo", timeout: float = 2) -> RedisStore:
         """Create a Redis-backed session store from a connection URL.
-        
+
         Parameters:
             url (str): Redis connection URL.
             namespace (str): Namespace used to isolate stored keys.
             timeout (float): Connection and operation timeout in seconds.
-        
+
         Returns:
             RedisStore: A store configured with a client created from the URL.
-        
+
         Raises:
             ImportError: If the Redis optional dependency is not installed.
         """
@@ -242,25 +245,25 @@ class RedisStore:
     def key(self, value: str) -> str:
         """
         Create a namespaced storage key from a string value.
-        
+
         Parameters:
-        	value (str): The value to transform into a storage key.
-        
+            value (str): The value to transform into a storage key.
+
         Returns:
-        	str: The namespaced SHA-256 hexadecimal key.
+            str: The namespaced SHA-256 hexadecimal key.
         """
         return self.prefix + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     async def evaluate(self, script: str, keys: list[str], args: list[Any]) -> Any:
         """Execute a storage script and raise StoreUnavailable if it cannot be completed.
-        
+
         Parameters:
-        	script (str): The script to execute.
-        	keys (list[str]): Keys passed to the script.
-        	args (list[Any]): Additional arguments passed to the script.
-        
+            script (str): The script to execute.
+            keys (list[str]): Keys passed to the script.
+            args (list[Any]): Additional arguments passed to the script.
+
         Returns:
-        	Any: The result produced by the script.
+            Any: The result produced by the script.
         """
         try:
             async with asyncio.timeout(self.timeout):
@@ -271,13 +274,13 @@ class RedisStore:
     def _value(self, value: bytes) -> bytes:
         """
         Validate a stored value against the configured type and size limits.
-        
+
         Parameters:
             value (bytes): Value to validate.
-        
+
         Returns:
             bytes: The validated value.
-        
+
         Raises:
             ValueError: If the value is not bytes or exceeds the maximum size.
         """
@@ -287,10 +290,10 @@ class RedisStore:
 
     async def get(self, key: str) -> bytes | None:
         """Retrieve a session value from shared storage.
-        
+
         Parameters:
             key (str): The session key to retrieve.
-        
+
         Returns:
             bytes | None: The stored value as bytes, or `None` if the key is absent.
         """
@@ -311,14 +314,14 @@ class RedisStore:
     async def create(self, key: str, value: bytes, ttl: int) -> bool:
         """
         Atomically create a session entry if the key is unused.
-        
+
         Parameters:
-        	key (str): The session key.
-        	value (bytes): The value to store.
-        	ttl (int): The lifetime of the entry in seconds.
-        
+            key (str): The session key.
+            value (bytes): The value to store.
+            ttl (int): The lifetime of the entry in seconds.
+
         Returns:
-        	bool: `true` if the entry was created, `false` if the key already exists.
+            bool: `true` if the entry was created, `false` if the key already exists.
         """
         return bool(
             await self.evaluate(
@@ -331,15 +334,15 @@ class RedisStore:
     async def replace(self, key: str, expected: bytes, value: bytes, ttl: int) -> bool:
         """
         Atomically replace a stored value when it matches the expected value.
-        
+
         Parameters:
-        	key (str): Key identifying the stored value.
-        	expected (bytes): Current value required for replacement.
-        	value (bytes): New value to store.
-        	ttl (int): Lifetime of the new value in seconds.
-        
+            key (str): Key identifying the stored value.
+            expected (bytes): Current value required for replacement.
+            value (bytes): New value to store.
+            ttl (int): Lifetime of the new value in seconds.
+
         Returns:
-        	bool: `True` if the value was replaced, `False` if the stored value did not match `expected`.
+            bool: `True` if the value was replaced, `False` if the stored value did not match `expected`.
         """
         return bool(
             await self.evaluate(
@@ -352,16 +355,16 @@ class RedisStore:
 
     async def rotate(self, key: str, expected: bytes, new_key: str, value: bytes, ttl: int) -> bool:
         """Atomically move a session value to a new key when its expected value matches and the destination is unused.
-        
+
         Parameters:
-        	key (str): The existing session key.
-        	expected (bytes): The value that must currently be stored under `key`.
-        	new_key (str): The destination session key.
-        	value (bytes): The value to store under `new_key`.
-        	ttl (int): The lifetime of the new value in seconds.
-        
+            key (str): The existing session key.
+            expected (bytes): The value that must currently be stored under `key`.
+            new_key (str): The destination session key.
+            value (bytes): The value to store under `new_key`.
+            ttl (int): The lifetime of the new value in seconds.
+
         Returns:
-        	bool: `True` if the value was moved, `False` if the expected value did not match or the destination key was already in use.
+            bool: `True` if the value was moved, `False` if the expected value did not match or the destination key was already in use.
         """
         return bool(
             await self.evaluate(
