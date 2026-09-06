@@ -154,6 +154,7 @@ class _CountingSend:
         route: str = "<unmatched>",
         streaming: bool = False,
     ) -> None:
+        """Configure response timing and optional incremental stream byte observations."""
         self._send = send
         self.body_bytes = 0
         self._metrics = metrics
@@ -163,6 +164,7 @@ class _CountingSend:
         self._stream_bytes = metrics.stream_bytes.labels(route=route) if metrics is not None and streaming else None
 
     async def __call__(self, message: dict[str, Any]) -> None:
+        """Record timing and payload size only after ASGI accepts each message."""
         await self._send(message)
         if self._metrics is not None and message.get("type") == "http.response.start":
             self._metrics.http_response_start.labels(**self._labels).observe(time.perf_counter() - self._started)
@@ -346,6 +348,7 @@ class Flasgo(RouteDecorators):
         return self._metrics.registry if self._metrics is not None else None
 
     def _backend_operation(self, req: Request, component: str, operation: str) -> AbstractContextManager[None]:
+        """Time a logical backend call unless metrics are disabled or this request is a scrape."""
         if self._metrics is None or req.path == self.settings.METRICS_PATH:
             return nullcontext()
         return self._metrics.backend_operation(component, operation)
@@ -575,6 +578,7 @@ class Flasgo(RouteDecorators):
             self._log_security_event(logging.ERROR, "dependency-cleanup-failed", req=req)
 
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Keep sampler cleanup bound to the lifetime of this ASGI lifespan invocation."""
         with ExitStack() as cleanup:
             await self._run_lifespan(scope, receive, send, cleanup)
 
@@ -1429,6 +1433,7 @@ class Flasgo(RouteDecorators):
         response.prepare()
 
     async def _handle_metrics_request(self, req: Request) -> Response | None:
+        """Authenticate a metrics scrape before collecting and encoding it in a worker thread."""
         if self._metrics is None or req.path != self.settings.METRICS_PATH:
             return None
         if req.method not in {"GET", "HEAD"}:
@@ -1511,6 +1516,7 @@ class Flasgo(RouteDecorators):
         )
 
     async def _authorize_docs_request(self, req: Request) -> Response | None:
+        """Apply configured documentation authentication, permissions, and failure throttling."""
         backend_name = self.settings.DOCS_AUTH_BACKEND
         if backend_name is None:
             return None
@@ -1561,6 +1567,7 @@ class Flasgo(RouteDecorators):
         return spec
 
     def _validate_security_config(self) -> None:
+        """Reject invalid security settings before the application serves requests."""
         if not self.security.secret_key:
             raise ValueError("SECRET_KEY must be configured. Set it to a long random value before starting Flasgo.")
         if self.security.secret_key == _INSECURE_SENTINEL:
@@ -2113,6 +2120,7 @@ class Flasgo(RouteDecorators):
         return _permission_denied_response(denial.user, challenge=denial.challenge)
 
     def _register_security_failure(self, req: Request) -> bool:
+        """Register a security failure and observe any resulting throttle decision."""
         limit = self.security.security_failure_rate_limit
         if limit <= 0:
             return False
@@ -2138,6 +2146,7 @@ class Flasgo(RouteDecorators):
         return False
 
     def _security_failure_is_limited(self, req: Request) -> bool:
+        """Check existing failure state and observe a throttle decision without incrementing failures."""
         limit = self.security.security_failure_rate_limit
         if limit <= 0:
             return False
@@ -2157,6 +2166,7 @@ class Flasgo(RouteDecorators):
         return False
 
     def _log_security_event(self, level: int, event: str, *, req: Request) -> None:
+        """Record bounded security metrics independently of whether event logging is enabled."""
         if self._metrics is not None:
             if event in {"metrics-auth-failed", "metrics-auth-throttled"}:
                 reason = "throttled" if event == "metrics-auth-throttled" else "invalid_credentials"
@@ -2186,6 +2196,7 @@ class Flasgo(RouteDecorators):
         )
 
     def _observe_rejection(self, req: Request, reason: str) -> None:
+        """Count each rejection reason once per HTTP request, excluding scrapes and WebSocket upgrades."""
         if self._metrics is None or req.path == self.settings.METRICS_PATH or req.scope.get("flasgo.websocket_upgrade"):
             return
         observed = req.scope.setdefault("flasgo.metric_rejections", set())
@@ -2194,6 +2205,7 @@ class Flasgo(RouteDecorators):
             self._metrics.http_rejections.labels(route=str(req.scope.get("route_template", "<unmatched>")), reason=reason).inc()
 
     def _observe_rejection_exception(self, req: Request, exc: Exception) -> None:
+        """Classify known framework exceptions without exporting their messages or request data."""
         if isinstance(exc, _RequestRejection):
             self._observe_rejection(req, exc.reason)
         elif isinstance(exc, RequestValidationError):

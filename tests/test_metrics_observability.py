@@ -25,16 +25,19 @@ _TOKEN = "observability-test-" + "m" * 32
 
 
 def _app(**settings: Any) -> Flasgo:
+    """Build a metrics-enabled app with overridable security and sampler settings."""
     return Flasgo(settings={"METRICS_ENABLED": True, "METRICS_BEARER_TOKEN": _TOKEN, "CSRF_ENABLED": False, **settings})
 
 
 def _sample(app: Flasgo, name: str, **labels: str) -> float | None:
+    """Read one labelled framework sample from the app-local registry."""
     registry = app.metrics_registry
     assert registry is not None
     return registry.get_sample_value("flasgo_" + name, labels)
 
 
 def _scope(path: str = "/", method: str = "GET") -> dict[str, Any]:
+    """Create a minimal HTTP scope with a trusted Host and stable client identity."""
     return {
         "type": "http",
         "asgi": {"version": "3.0"},
@@ -51,13 +54,15 @@ def _scope(path: str = "/", method: str = "GET") -> dict[str, Any]:
 
 
 async def _send(message: dict[str, Any]) -> None:
-    pass
+    """Accept response messages without retaining payloads."""
 
 
 def _receive():
+    """Create a receive callable that supplies one empty request body."""
     received = False
 
     async def receive() -> dict[str, Any]:
+        """Deliver the request body once, then keep the connection open."""
         nonlocal received
         if not received:
             received = True
@@ -69,6 +74,7 @@ def _receive():
 
 
 def test_public_registry_is_optional_isolated_and_rejects_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify custom metric isolation, format support, collisions, and optional imports."""
     first, second = _app(), _app()
     registry = first.metrics_registry
     assert registry is not None
@@ -88,6 +94,7 @@ def test_public_registry_is_optional_isolated_and_rejects_duplicates(monkeypatch
     original_import = builtins.__import__
 
     def restricted_import(name, *args, **kwargs):
+        """Simulate an environment without the optional Prometheus dependency."""
         if name.startswith("prometheus_client"):
             raise ImportError("metrics extra unavailable")
         return original_import(name, *args, **kwargs)
@@ -101,10 +108,12 @@ def test_public_registry_is_optional_isolated_and_rejects_duplicates(monkeypatch
 
 
 def test_metrics_auth_is_counted_without_request_instrumentation_or_collector_access() -> None:
+    """Reject unauthenticated scrapes before collecting or counting ordinary HTTP work."""
     app = _app(LOG_SECURITY_EVENTS=False, SECURITY_FAILURE_RATE_LIMIT=1)
 
     class Collector:
         def collect(self):
+            """Fail if an unauthenticated scrape reaches a custom collector."""
             raise AssertionError("Unauthenticated requests must not collect")
 
     registry = app.metrics_registry
@@ -123,25 +132,30 @@ def test_metrics_auth_is_counted_without_request_instrumentation_or_collector_ac
 
 @pytest.mark.parametrize("interval", [0, -1, True, 0.001, 61, float("nan"), float("inf"), "0.1"])
 def test_sampler_interval_is_bounded(interval: Any) -> None:
+    """Reject sampler intervals outside the finite supported range."""
     with pytest.raises(ValueError, match="METRICS_EVENT_LOOP_INTERVAL_SECONDS"):
         _app(METRICS_EVENT_LOOP_INTERVAL_SECONDS=interval)
 
 
 @pytest.mark.parametrize("finish", ["shutdown", "cancel", "shutdown_failure"])
 def test_event_loop_sampler_follows_lifespan_and_stops_on_failure(finish: str) -> None:
+    """Verify sampler ownership and cleanup across normal, failed, and cancelled shutdown."""
     app = _app(METRICS_EVENT_LOOP_INTERVAL_SECONDS=0.01)
 
     @app.lifespan
     async def lifespan(app: Flasgo):
+        """Allow startup and optionally fail when shutdown resumes the generator."""
         yield
         if finish == "shutdown_failure":
             raise RuntimeError("shutdown failure")
 
     async def run() -> None:
+        """Drive lifespan messages and verify sampling stops when lifespan exits."""
         queue = asyncio.Queue()
         ready = asyncio.Event()
 
         async def send(message):
+            """Signal that application startup has completed."""
             if message["type"] == "lifespan.startup.complete":
                 ready.set()
 
@@ -169,6 +183,7 @@ def test_event_loop_sampler_follows_lifespan_and_stops_on_failure(finish: str) -
 
 
 def test_sampler_can_be_disabled_and_startup_failure_does_not_start_it() -> None:
+    """Keep sampling inactive when disabled or when application startup fails."""
     app = _app(METRICS_EVENT_LOOP_ENABLED=False)
     with app.test_client():
         assert _sample(app, "event_loop_sampler_running") == 0
@@ -177,6 +192,7 @@ def test_sampler_can_be_disabled_and_startup_failure_does_not_start_it() -> None
 
     @failed.lifespan
     async def lifespan(app: Flasgo):
+        """Fail before startup completes while retaining the lifespan generator contract."""
         raise RuntimeError("startup failure")
         yield
 
@@ -202,13 +218,17 @@ def test_sampler_can_be_disabled_and_startup_failure_does_not_start_it() -> None
     ],
 )
 def test_stream_outcomes_and_partial_bytes(outcome: str) -> None:
+    """Distinguish stream termination causes while preserving partial bytes and cleanup."""
     app = _app()
     closed = []
     first = asyncio.Event()
 
     @app.get("/events/<int:item_id>")
     async def endpoint(item_id: int) -> StreamingResponse:
+        """Construct a stream with the selected producer or transport failure scenario."""
+
         async def chunks() -> AsyncIterator[bytes]:
+            """Yield partial content, inject the selected failure, and record iterator cleanup."""
             try:
                 yield b""
                 yield b"first"
@@ -232,9 +252,11 @@ def test_stream_outcomes_and_partial_bytes(outcome: str) -> None:
         )
 
     async def run():
+        """Drive the stream through ASGI, including disconnection and external cancellation."""
         body_received = False
 
         async def streaming_receive():
+            """Supply the request body and optionally disconnect after the first payload."""
             nonlocal body_received
             if not body_received:
                 body_received = True
@@ -246,6 +268,7 @@ def test_stream_outcomes_and_partial_bytes(outcome: str) -> None:
             raise AssertionError("unreachable")
 
         async def send(message):
+            """Observe the first payload and inject failures on the final data chunk."""
             if message.get("body") == b"first":
                 first.set()
             if message.get("body") == b"last":
@@ -277,11 +300,15 @@ def test_stream_outcomes_and_partial_bytes(outcome: str) -> None:
 
 
 def test_sse_is_observable_while_open_and_empty_bodies_have_no_first_body_sample() -> None:
+    """Expose live SSE heartbeat metrics without inventing samples for empty bodies."""
     app = _app()
 
     @app.get("/sse")
     async def sse() -> EventSourceResponse:
+        """Return an SSE stream that sends only heartbeat comments."""
+
         async def events():
+            """Keep event production idle so heartbeats provide the first response bytes."""
             await asyncio.Event().wait()
             yield "never"
 
@@ -289,9 +316,11 @@ def test_sse_is_observable_while_open_and_empty_bodies_have_no_first_body_sample
 
     @app.get("/empty")
     def empty() -> str:
+        """Return an empty body for GET and HEAD timing checks."""
         return ""
 
     async def run():
+        """Inspect SSE gauges and byte counters before the stream closes."""
         async with app.test_client().astream("GET", "/sse") as response:
             assert b": ping" in await anext(response.iter_bytes())
             assert _sample(app, "http_streams_active", route="/sse") == 1
@@ -308,18 +337,22 @@ def test_sse_is_observable_while_open_and_empty_bodies_have_no_first_body_sample
 
 @pytest.mark.parametrize("cancel", [True, False])
 def test_background_counts_separate_response_delivery_from_execution(cancel: bool) -> None:
+    """Separate response completion from running, pending, failed, and cancelled tasks."""
     app = _app()
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def slow():
+        """Pause background execution so its active and pending gauges can be inspected."""
         entered.set()
         await release.wait()
 
     async def failure():
+        """Raise a background failure after the paused task completes."""
         raise RuntimeError("task failure")
 
     @app.get("/")
     def endpoint() -> Response:
+        """Attach a paused task, a failing task, and a successful synchronous task."""
         response = Response.text("ok")
         response.add_task(slow)
         response.add_task(failure)
@@ -327,6 +360,7 @@ def test_background_counts_separate_response_delivery_from_execution(cancel: boo
         return response
 
     async def run():
+        """Check gauges after delivery, then cancel or release background execution."""
         task = asyncio.create_task(app(_scope(), _receive(), _send))
         await asyncio.wait_for(entered.wait(), 1)
         assert _sample(app, "http_requests_active") == 1
@@ -357,11 +391,13 @@ def test_background_counts_separate_response_delivery_from_execution(cancel: boo
 
 @pytest.mark.parametrize("mode", ["send_failure", "prepare_failure", "replaced"])
 def test_undelivered_response_background_work_is_skipped(mode: str) -> None:
+    """Release pending work when response preparation, replacement, or delivery prevents execution."""
     app = _app()
     executed = []
 
     @app.get("/")
     def endpoint() -> Response:
+        """Attach observable work and optionally create invalid response headers."""
         response = Response.text("original")
         response.add_task(executed.append, True)
         if mode == "prepare_failure":
@@ -372,9 +408,11 @@ def test_undelivered_response_background_work_is_skipped(mode: str) -> None:
 
         @app.after_request
         def replace(req, response):
+            """Replace the response without carrying its background work forward."""
             return Response.text("replacement")
 
     async def send(message):
+        """Optionally simulate a connection failure during response delivery."""
         if mode == "send_failure":
             raise ConnectionError("disconnected")
 
@@ -385,15 +423,18 @@ def test_undelivered_response_background_work_is_skipped(mode: str) -> None:
 
 
 def test_cleanup_failure_is_counted_after_successful_response() -> None:
+    """Count dependency cleanup failures even after a successful response with logging disabled."""
     app = _app(LOG_SECURITY_EVENTS=False)
 
     async def dependency():
+        """Verify response delivery has ended, then raise during dependency cleanup."""
         yield "ok"
         assert _sample(app, "http_responses_in_flight") == 0
         raise RuntimeError("private cleanup error")
 
     @app.get("/")
     async def endpoint(value: Annotated[str, Depends(dependency)]) -> str:
+        """Return the dependency value before its teardown fails."""
         return value
 
     assert app.test_client().get("/").status_code == 200
@@ -401,6 +442,7 @@ def test_cleanup_failure_is_counted_after_successful_response() -> None:
 
 
 def test_backend_success_timeout_cancellation_and_capacity_are_distinct() -> None:
+    """Distinguish backend execution outcomes from session-store capacity rejections."""
     metrics = Metrics()
     for exception, outcome in (
         (None, "success"),
@@ -428,6 +470,7 @@ def test_backend_success_timeout_cancellation_and_capacity_are_distinct() -> Non
 
     @app.get("/")
     def endpoint() -> str:
+        """Modify the session so each fresh client requires a storage save."""
         from flasgo import session
 
         session["value"] = "sensitive-value"
@@ -441,10 +484,12 @@ def test_backend_success_timeout_cancellation_and_capacity_are_distinct() -> Non
 
 
 def test_rejections_are_specific_bounded_and_independent_of_security_logging() -> None:
+    """Use bounded rejection labels without exposing paths or bodies when logging is disabled."""
     app = _app(LOG_SECURITY_EVENTS=False, MAX_REQUEST_BODY_BYTES=1)
 
     @app.post("/items/<int:item_id>")
     async def endpoint(item_id: int, request: Request) -> str:
+        """Read the body to trigger the configured request-size rejection."""
         await request.body()
         return "ok"
 
@@ -459,6 +504,7 @@ def test_rejections_are_specific_bounded_and_independent_of_security_logging() -
 
 
 def test_rate_limit_capacity_is_separate_from_quota() -> None:
+    """Count storage-capacity denials separately from exhausted request quotas."""
     app = Flasgo(
         settings={"METRICS_ENABLED": True, "METRICS_BEARER_TOKEN": _TOKEN, "CSRF_ENABLED": False}, rate_limiter=RateLimiter(max_keys=1)
     )
@@ -466,6 +512,7 @@ def test_rate_limit_capacity_is_separate_from_quota() -> None:
     @app.get("/")
     @app.ratelimit(1, per=60)
     def endpoint() -> str:
+        """Serve the route whose quota and limiter capacity are exercised."""
         return "ok"
 
     assert app.test_client().get("/").status_code == 200
@@ -479,12 +526,14 @@ def test_rate_limit_capacity_is_separate_from_quota() -> None:
 
 
 def test_concurrent_response_reuse_keeps_background_metrics_isolated() -> None:
+    """Keep per-response task accounting isolated across concurrent requests and app registries."""
     first, second = _app(), _app()
     response = Response.text("shared response")
     started = asyncio.Queue()
     release = asyncio.Event()
 
     async def work():
+        """Signal execution and wait until concurrent observations have been inspected."""
         await started.put(True)
         await release.wait()
 
@@ -494,6 +543,7 @@ def test_concurrent_response_reuse_keeps_background_metrics_isolated() -> None:
     second.get("/")(lambda: response)
 
     async def run():
+        """Reuse one response concurrently in two apps and verify independent gauges."""
         tasks = [asyncio.create_task(app(_scope(), _receive(), _send)) for app in (first, first, second)]
         for _ in tasks:
             await asyncio.wait_for(started.get(), 1)
@@ -514,18 +564,22 @@ def test_concurrent_response_reuse_keeps_background_metrics_isolated() -> None:
 
 @pytest.mark.parametrize("synchronous", [False, True])
 def test_background_tasks_added_during_execution_are_tracked(synchronous: bool) -> None:
+    """Observe tasks added by either synchronous or asynchronous background execution."""
     app = _app()
     response = Response.text("ok")
     finished = []
 
     async def added():
+        """Record execution of a task added after background processing starts."""
         finished.append(True)
 
     def add_more():
+        """Append new work and verify it immediately contributes to pending tasks."""
         response.add_task(added)
         assert _sample(app, "background_tasks_pending") == 1
 
     async def original():
+        """Add more work from an asynchronous background task."""
         add_more()
 
     response.add_task(add_more if synchronous else original)
@@ -538,11 +592,13 @@ def test_background_tasks_added_during_execution_are_tracked(synchronous: bool) 
 
 @pytest.mark.parametrize("outcome", ["anonymous", "authenticated", "failure", "timeout", "forbidden"])
 def test_authentication_execution_is_separate_from_rejection(outcome: str) -> None:
+    """Separate backend execution success from credential and permission denials."""
     from flasgo import IsAuthenticated, User
 
     app = _app(LOG_SECURITY_EVENTS=False)
 
     async def backend(req):
+        """Return the selected identity or raise the selected backend failure."""
         if outcome == "failure":
             raise RuntimeError("private backend detail")
         if outcome == "timeout":
@@ -557,6 +613,7 @@ def test_authentication_execution_is_separate_from_rejection(outcome: str) -> No
     @app.get("/private")
     @app.authorize(*permissions, backend="private-backend-name")
     def endpoint() -> str:
+        """Serve content only when the configured authentication and permissions allow it."""
         return "ok"
 
     response = app.test_client().get("/private")
@@ -575,14 +632,17 @@ def test_authentication_execution_is_separate_from_rejection(outcome: str) -> No
 
 
 def test_validation_and_request_read_timeout_are_observed_at_their_source() -> None:
+    """Record validation and body-read timeouts using their original rejection reasons."""
     app = _app(REQUEST_READ_TIMEOUT_SECONDS=0.01)
 
     @app.get("/validate")
     def validate(value: int) -> str:
+        """Require an integer query value to exercise request validation."""
         return str(value)
 
     @app.post("/body")
     async def body(request: Request) -> str:
+        """Read the body so a stalled receive triggers the framework deadline."""
         await request.body()
         return "ok"
 
@@ -590,6 +650,7 @@ def test_validation_and_request_read_timeout_are_observed_at_their_source() -> N
     assert _sample(app, "http_rejections_total", route="/validate", reason="validation") == 1
 
     async def no_body():
+        """Withhold all request data until the framework times out."""
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -599,16 +660,19 @@ def test_validation_and_request_read_timeout_are_observed_at_their_source() -> N
 
 
 def test_cancellation_before_response_sending_releases_in_flight_gauges() -> None:
+    """Release request gauges when cancellation happens before response sending begins."""
     app = _app()
     entered = asyncio.Event()
 
     @app.get("/")
     async def endpoint() -> str:
+        """Signal dispatch entry and wait for external cancellation."""
         entered.set()
         await asyncio.Event().wait()
         return "unreachable"
 
     async def run():
+        """Cancel an active handler and check both request gauges return to zero."""
         task = asyncio.create_task(app(_scope(), _receive(), _send))
         await asyncio.wait_for(entered.wait(), 1)
         assert _sample(app, "http_responses_in_flight") == 1
@@ -622,14 +686,17 @@ def test_cancellation_before_response_sending_releases_in_flight_gauges() -> Non
 
 
 def test_rejected_duplicate_lifespan_does_not_stop_the_active_sampler() -> None:
+    """Prevent a rejected second lifespan from cancelling the first lifespan sampler."""
     app = _app()
 
     async def run():
+        """Start two lifespans, reject the duplicate, and shut down the original owner."""
         first, second = asyncio.Queue(), asyncio.Queue()
         ready = asyncio.Event()
         messages = []
 
         async def send(message):
+            """Capture lifecycle outcomes and signal the original startup completion."""
             messages.append(message["type"])
             if message["type"] == "lifespan.startup.complete":
                 ready.set()
@@ -650,6 +717,7 @@ def test_rejected_duplicate_lifespan_does_not_stop_the_active_sampler() -> None:
 
 
 def test_authenticated_collectors_run_off_the_event_loop() -> None:
+    """Keep the event loop responsive while an authenticated custom collector blocks."""
     import threading
 
     app = _app()
@@ -659,6 +727,7 @@ def test_authenticated_collectors_run_off_the_event_loop() -> None:
 
     class Collector:
         def collect(self):
+            """Record the worker thread and block until the event loop releases collection."""
             collector_threads.append(threading.get_ident())
             assert loop is not None
             loop.call_soon_threadsafe(started.set)
@@ -671,6 +740,7 @@ def test_authenticated_collectors_run_off_the_event_loop() -> None:
     registry.register(Collector())
 
     async def run():
+        """Start a scrape and verify its collector runs on a separate thread."""
         nonlocal loop
         loop = asyncio.get_running_loop()
         scope = _scope("/metrics")
@@ -689,9 +759,11 @@ def test_authenticated_collectors_run_off_the_event_loop() -> None:
 
 
 def test_reused_stream_is_not_reported_as_another_completion() -> None:
+    """Count a second send attempt on a used stream as failure rather than completion."""
     app = _app()
 
     async def chunks():
+        """Provide a finite payload for the initial successful stream send."""
         yield b"done"
 
     response = StreamingResponse(chunks())
@@ -704,6 +776,7 @@ def test_reused_stream_is_not_reported_as_another_completion() -> None:
 
 
 def test_request_limit_exceptions_preserve_http_exception_handler_contract() -> None:
+    """Preserve public HTTPException arguments while adding private rejection classification."""
     from flasgo import HTTPException
 
     app = _app(MAX_REQUEST_BODY_BYTES=1)
@@ -711,11 +784,13 @@ def test_request_limit_exceptions_preserve_http_exception_handler_contract() -> 
 
     @app.errorhandler(HTTPException)
     def handle(req, exc):
+        """Capture exception arguments through a user-registered HTTPException handler."""
         arguments.append(exc.args)
         return Response.text(exc.detail, status_code=exc.status_code)
 
     @app.post("/")
     async def endpoint(request: Request) -> str:
+        """Read an oversized body to exercise the custom error handler."""
         await request.body()
         return "ok"
 
@@ -727,11 +802,13 @@ def test_request_limit_exceptions_preserve_http_exception_handler_contract() -> 
 @pytest.mark.parametrize("existing_container", [False, True])
 @pytest.mark.parametrize("send_failure", [False, True])
 def test_background_tasks_attached_during_dependency_cleanup_are_observed(existing_container: bool, send_failure: bool) -> None:
+    """Track tasks first attached during teardown, including skipped work after send failure."""
     app = _app()
     response = Response.text("ok")
     executions = []
 
     async def work():
+        """Record execution while checking the background active gauge."""
         assert _sample(app, "background_tasks_active") == 1
         executions.append(True)
 
@@ -739,6 +816,7 @@ def test_background_tasks_attached_during_dependency_cleanup_are_observed(existi
         response.add_task(work)
 
     async def dependency():
+        """Attach background work during dependency teardown on both success and failure."""
         try:
             yield "ready"
         finally:
@@ -746,9 +824,11 @@ def test_background_tasks_attached_during_dependency_cleanup_are_observed(existi
 
     @app.get("/")
     async def endpoint(value: Annotated[str, Depends(dependency)]) -> Response:
+        """Return the response that dependency teardown will later modify."""
         return response
 
     async def send(message):
+        """Optionally fail delivery before dependency teardown attaches background work."""
         if send_failure:
             raise ConnectionError("response send failed")
 
@@ -765,6 +845,7 @@ def test_background_tasks_attached_during_dependency_cleanup_are_observed(existi
 @pytest.mark.parametrize("security_logging", [False, True])
 @pytest.mark.parametrize("rejection", ["host", "csrf", "authentication"])
 def test_security_throttling_counts_registration_and_precheck_decisions(rejection: str, security_logging: bool) -> None:
+    """Count security throttling at both registration and precheck decisions without log dependence."""
     from flasgo import IsAuthenticated
 
     app = _app(CSRF_ENABLED=True, LOG_SECURITY_EVENTS=security_logging, SECURITY_FAILURE_RATE_LIMIT=1)
@@ -772,6 +853,7 @@ def test_security_throttling_counts_registration_and_precheck_decisions(rejectio
     @app.get("/private")
     @app.authorize(IsAuthenticated())
     def private() -> str:
+        """Require authentication so repeated anonymous requests exercise the precheck."""
         return "ok"
 
     client = app.test_client()

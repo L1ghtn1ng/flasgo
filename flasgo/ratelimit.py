@@ -81,6 +81,7 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def check(self, rule: RateLimitRule, req: Request, *, endpoint_id: str) -> RateLimitDecision:
+        """Evaluate one rule using a monotonic window and mark any limiter-capacity denial."""
         now = time.monotonic()
         client_key = _rate_limit_key(rule, req)
         scope = rule.scope or endpoint_id

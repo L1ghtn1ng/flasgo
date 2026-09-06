@@ -16,6 +16,7 @@ class _RequestRejection(HTTPException):
     """Framework rejection with a fixed diagnostic reason, independent of status."""
 
     def __init__(self, status_code: int, detail: str, reason: str) -> None:
+        """Add a bounded internal reason while preserving the public HTTPException argument tuple."""
         super().__init__(status_code, detail)
         self.args = (status_code, detail)
         self.reason = reason
