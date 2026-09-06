@@ -105,9 +105,7 @@ _HTTP_METHOD_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 # Stable HTTP server span known methods (RFC 9110 + PATCH + QUERY).
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
-_OTEL_HTTP_METHODS = frozenset(
-    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"}
-)
+_OTEL_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 _INSECURE_SENTINEL = "dev-insecure-secret-change-this"
 _SWAGGER_UI_VERSION = "5.32.12"
 _SWAGGER_UI_CSS_INTEGRITY = "sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT"
@@ -176,12 +174,12 @@ def session() -> Session:
 def user() -> User:
     """
     Get the active user for the current HTTP request.
-    
+
     Returns:
-    	User: The user associated with the active request.
-    
+        User: The user associated with the active request.
+
     Raises:
-    	RuntimeError: If accessed outside an active HTTP request.
+        RuntimeError: If accessed outside an active HTTP request.
     """
 
     current = _user_ctx.get()
@@ -209,7 +207,7 @@ class Flasgo(RouteDecorators):
     ) -> None:
         """
         Initialize the application with its security, routing, middleware, session, and optional integration configuration.
-        
+
         Parameters:
             settings (SettingsInput | None): Application settings used to configure default behavior.
             security (SecurityConfig | None): Security configuration; derived from settings when omitted.
@@ -221,7 +219,7 @@ class Flasgo(RouteDecorators):
             cors (CORSConfig | None): Cross-origin resource sharing configuration.
             rate_limiter (RateLimitBackend | None): Optional custom rate-limiting backend.
             session_backend (ServerSideSessions | None): Optional server-side session backend.
-        
+
         Raises:
             TypeError: If `cors` is not a `CORSConfig` instance or `None`.
         """
@@ -315,11 +313,11 @@ class Flasgo(RouteDecorators):
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         """
         Handle an HTTP request through dispatch, response preparation, sending, cleanup, and metrics recording.
-        
+
         Parameters:
-        	scope (Scope): The ASGI HTTP connection scope.
-        	receive (Receive): Callable that receives ASGI events.
-        	send (Send): Callable that sends ASGI events.
+                scope (Scope): The ASGI HTTP connection scope.
+                receive (Receive): Callable that receives ASGI events.
+                send (Send): Callable that sends ASGI events.
         """
         started = time.perf_counter()
         if _request_head_size(scope) > self.security.max_request_head_bytes:
@@ -476,8 +474,9 @@ class Flasgo(RouteDecorators):
 
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Handle ASGI lifespan startup and shutdown events for the application.
-        
-        Initializes the registered lifespan handler during startup, finalizes it during shutdown, and reports lifecycle completion or failure through ASGI messages.
+
+        Initializes the registered lifespan handler during startup, finalizes it during shutdown, and reports lifecycle completion or
+        failure through ASGI messages.
         """
         state = scope.get("state")
         if isinstance(state, dict):
@@ -558,7 +557,9 @@ class Flasgo(RouteDecorators):
                 raise RuntimeError(f"Unexpected lifespan event: {message_type!r}")
 
     async def _handle_websocket(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Handle a WebSocket connection from upgrade through completion, including routing, security checks, authorization, rate limiting, endpoint execution, and cleanup."""
+        """Handle a WebSocket connection from upgrade through completion, including routing, security checks, authorization, rate
+        limiting, endpoint execution, and cleanup.
+        """
         started = time.perf_counter()
         websocket = WebSocket(
             scope,
@@ -811,10 +812,10 @@ class Flasgo(RouteDecorators):
     def _otel_scope_headers(self, scope: Scope) -> list[tuple[bytes, bytes]]:
         """
         Return telemetry headers with an invalid or disallowed host header removed.
-        
+
         Parameters:
             scope (Scope): The ASGI connection scope containing request headers.
-        
+
         Returns:
             list[tuple[bytes, bytes]]: The request headers, excluding the host header when allowed-host enforcement rejects it.
         """
@@ -835,15 +836,16 @@ class Flasgo(RouteDecorators):
     ) -> Callable[[WebSocketEndpoint], WebSocketEndpoint]:
         """
         Create a decorator that registers a WebSocket endpoint at the specified path.
-        
+
         Parameters:
-        	path (str): The URL path for the WebSocket route
-        	name (str | None): An optional unique name for the route
-        	public (bool): Whether the route can be accessed without authentication
-        
+                path (str): The URL path for the WebSocket route
+                name (str | None): An optional unique name for the route
+                public (bool): Whether the route can be accessed without authentication
+
         Returns:
-        	Callable[[WebSocketEndpoint], WebSocketEndpoint]: A decorator that registers and returns the WebSocket endpoint
+                Callable[[WebSocketEndpoint], WebSocketEndpoint]: A decorator that registers and returns the WebSocket endpoint
         """
+
         def decorator(func: WebSocketEndpoint) -> WebSocketEndpoint:
             self.add_websocket_route(path, func, name=name, public=public)
             return func
@@ -860,15 +862,15 @@ class Flasgo(RouteDecorators):
     ) -> None:
         """
         Register a WebSocket endpoint for the specified path.
-        
+
         Parameters:
-        	path (str): The path pattern for the WebSocket route.
-        	endpoint (WebSocketEndpoint): The callable that handles matching connections.
-        	name (str | None): An optional unique name for URL generation.
-        	public (bool): Whether the route permits unauthenticated access.
-        
+                path (str): The path pattern for the WebSocket route.
+                endpoint (WebSocketEndpoint): The callable that handles matching connections.
+                name (str | None): An optional unique name for URL generation.
+                public (bool): Whether the route permits unauthenticated access.
+
         Raises:
-        	TypeError: If `public` is not a boolean.
+                TypeError: If `public` is not a boolean.
         """
         if not isinstance(public, bool):
             raise TypeError("public must be a bool.")
@@ -877,16 +879,16 @@ class Flasgo(RouteDecorators):
     def lifespan(self, fn: LifespanHandler) -> LifespanHandler:
         """
         Register the application's lifespan handler.
-        
+
         Parameters:
-        	fn (LifespanHandler): An async generator that yields exactly once.
-        
+                fn (LifespanHandler): An async generator that yields exactly once.
+
         Returns:
-        	LifespanHandler: The registered handler.
-        
+                LifespanHandler: The registered handler.
+
         Raises:
-        	RuntimeError: If a lifespan handler is already registered.
-        	TypeError: If `fn` is not an async generator function.
+                RuntimeError: If a lifespan handler is already registered.
+                TypeError: If `fn` is not an async generator function.
         """
         if self._lifespan_handler is not None:
             raise RuntimeError("Only one Flasgo lifespan handler may be registered.")
@@ -973,17 +975,18 @@ class Flasgo(RouteDecorators):
     ) -> None:
         """
         Register an HTTP route with its endpoint, methods, access policy, and response configuration.
-        
+
         Parameters:
             path (str): URL path for the route.
             endpoint (Endpoint): Callable that handles matching requests.
             methods (Iterable[str]): HTTP methods accepted by the route.
             name (str | None): Optional unique name used for URL generation.
-            cors (CORSConfig | Literal[False] | None): CORS configuration, disabled explicitly with `False`, or inherited from the application with `None`.
+            cors (CORSConfig | Literal[False] | None): CORS configuration, disabled explicitly with `False`, or inherited from the
+                application with `None`.
             public (bool): Whether the route can be accessed without authentication.
             response_model (object): Optional model used to validate endpoint responses.
             dependencies (Sequence[Depends]): Dependencies resolved for the endpoint.
-        
+
         Raises:
             TypeError: If `public` or `cors` has an invalid type.
             ValueError: If a method, path, or response model configuration is invalid.
@@ -1032,13 +1035,13 @@ class Flasgo(RouteDecorators):
     def register_blueprint(self, blueprint: Blueprint) -> None:
         """
         Register a blueprint's routes and authorization configuration atomically.
-        
+
         Parameters:
-        	blueprint (Blueprint): The blueprint whose routes should be registered.
-        
+                blueprint (Blueprint): The blueprint whose routes should be registered.
+
         Raises:
-        	TypeError: If `blueprint` is not a `Blueprint` instance.
-        	ValueError: If registration creates duplicate route names or HTTP routes.
+                TypeError: If `blueprint` is not a `Blueprint` instance.
+                ValueError: If registration creates duplicate route names or HTTP routes.
         """
         from .blueprints import Blueprint
 
@@ -1062,16 +1065,16 @@ class Flasgo(RouteDecorators):
     def url_for(self, endpoint: str, **values: Any) -> str:
         """
         Generate a URL for a uniquely identified HTTP or WebSocket route.
-        
+
         Parameters:
-        	endpoint (str): The route name or endpoint function name.
-        	**values (Any): Values used to populate the route parameters.
-        
+                endpoint (str): The route name or endpoint function name.
+                **values (Any): Values used to populate the route parameters.
+
         Returns:
-        	str: The generated URL, including the active application's root path when applicable.
-        
+                str: The generated URL, including the active application's root path when applicable.
+
         Raises:
-        	ValueError: If the endpoint does not identify exactly one route.
+                ValueError: If the endpoint does not identify exactly one route.
         """
         from .blueprints import build_url
 
@@ -1094,11 +1097,11 @@ class Flasgo(RouteDecorators):
     def override_dependencies(self, overrides: Mapping[Provider, Provider]):
         """
         Temporarily override dependency providers within the current execution context.
-        
+
         Parameters:
             overrides (Mapping[Provider, Provider]): A mapping from original callable
                 providers to replacement callable providers.
-        
+
         Raises:
             TypeError: If any key or value in `overrides` is not callable.
         """
@@ -1112,9 +1115,9 @@ class Flasgo(RouteDecorators):
 
     def policy_snapshot(self) -> dict[str, Any]:
         """Return a snapshot of the application's authorization policy.
-        
+
         Returns:
-        	dict[str, Any]: The current authorization policy snapshot.
+                dict[str, Any]: The current authorization policy snapshot.
         """
         from .policy import policy_snapshot
 
@@ -1130,12 +1133,13 @@ class Flasgo(RouteDecorators):
     ) -> None:
         """
         Start the development server for the application.
-        
+
         Parameters:
-        	host (str): Host address on which to listen.
-        	port (int): Port on which to listen.
-        	reload (bool | None): Whether to reload the server when source files change; defaults to the debug setting when omitted.
-        	reload_dirs (Sequence[str | Path] | None): Directories to monitor for reload-triggering changes.
+                host (str): Host address on which to listen.
+                port (int): Port on which to listen.
+                reload (bool | None): Whether to reload the server when source files change; defaults to the debug setting when
+                    omitted.
+                reload_dirs (Sequence[str | Path] | None): Directories to monitor for reload-triggering changes.
         """
         configure_logging(format=self.settings.LOG_FORMAT, level=self.settings.LOG_LEVEL)
         asyncio.run(
@@ -1163,7 +1167,7 @@ class Flasgo(RouteDecorators):
     ) -> JinjaTemplates:
         """
         Configure Jinja template loading and return the initialized template environment.
-        
+
         Parameters:
             template_dirs: A template directory or sequence of template directories.
             globals: Optional template-global values.
@@ -1171,7 +1175,7 @@ class Flasgo(RouteDecorators):
             tests: Optional custom template tests.
             enable_async: Whether to enable asynchronous template rendering.
             max_template_bytes: Maximum permitted template size in bytes.
-        
+
         Returns:
             The configured Jinja template environment.
         """
@@ -1187,9 +1191,7 @@ class Flasgo(RouteDecorators):
 
     def render_template(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
         if self.templates is None:
-            raise RuntimeError(
-                "Templates are not configured. Call app.configure_templates(...) or pass templates=... first."
-            )
+            raise RuntimeError("Templates are not configured. Call app.configure_templates(...) or pass templates=... first.")
         return self.templates.render(template_name, context)
 
     def configure_static(
@@ -1200,11 +1202,11 @@ class Flasgo(RouteDecorators):
         cache_max_age: int = 3600,
     ) -> None:
         """Configure a static-file directory and register its public route.
-        
+
         Parameters:
-        	directory (str | Path): The directory containing files to serve.
-        	url_path (str): The URL path prefix for the static files.
-        	cache_max_age (int): The maximum cache lifetime in seconds.
+                directory (str | Path): The directory containing files to serve.
+                url_path (str): The URL path prefix for the static files.
+                cache_max_age (int): The maximum cache lifetime in seconds.
         """
         static_directory = resolve_static_directory(
             directory,
@@ -1222,7 +1224,7 @@ class Flasgo(RouteDecorators):
 
     def test_client(self) -> TestClient:
         """Create a test client for the application.
-        
+
         Returns:
             TestClient: A client configured to send requests to this application.
         """
@@ -1253,12 +1255,12 @@ class Flasgo(RouteDecorators):
     def _request_id_for_scope(self, scope: Scope) -> str:
         """
         Return a trusted incoming request ID or generate a new one for the scope.
-        
+
         Parameters:
-        	scope (Scope): The ASGI scope containing optional request headers.
-        
+                scope (Scope): The ASGI scope containing optional request headers.
+
         Returns:
-        	str: The accepted request ID or a newly generated identifier.
+                str: The accepted request ID or a newly generated identifier.
         """
         if self.settings.TRUST_INCOMING_REQUEST_ID:
             for key, value in scope.get("headers", []):
@@ -1275,10 +1277,10 @@ class Flasgo(RouteDecorators):
 
     def _track_stream(self, req: Request, response: Response) -> None:
         """Registers a streaming response for cleanup when the request ends.
-        
+
         Parameters:
-        	req (Request): The current request.
-        	response (Response): The response to track.
+                req (Request): The current request.
+                response (Response): The response to track.
         """
         if not isinstance(response, StreamingResponse):
             return
@@ -1514,17 +1516,14 @@ class Flasgo(RouteDecorators):
             raise ValueError("SERVER_LIMIT_CONCURRENCY must be greater than 0.")
         for origin in self.settings.WEBSOCKET_ALLOWED_ORIGINS:
             if not _valid_websocket_origin(origin):
-                raise ValueError(
-                    "WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths."
-                )
+                raise ValueError("WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths.")
         if not self.settings.METRICS_PATH.startswith("/"):
             raise ValueError("METRICS_PATH must start with '/'.")
         if self.settings.METRICS_ENABLED:
             token = self.settings.METRICS_BEARER_TOKEN
             if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
                 raise ValueError(
-                    "METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters "
-                    "when metrics are enabled."
+                    "METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled."
                 )
             if self.settings.METRICS_PATH in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}:
                 raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
@@ -1532,12 +1531,12 @@ class Flasgo(RouteDecorators):
     async def _dispatch(self, req: Request) -> Response:
         """
         Dispatch an HTTP request through security checks, middleware, routing, authorization, rate limiting, and response processing.
-        
+
         Parameters:
-        	req (Request): The incoming HTTP request.
-        
+                req (Request): The incoming HTTP request.
+
         Returns:
-        	Response: The response generated for the request.
+                Response: The response generated for the request.
         """
         host_values = _scope_header_values(req.scope, b"host")
         if self.security.enforce_allowed_hosts and (
@@ -1673,11 +1672,11 @@ class Flasgo(RouteDecorators):
     ) -> dict[str, str] | Response:
         """
         Check the applicable rate limits for a request endpoint.
-        
+
         Parameters:
             phase (str): Rate-limit phase to evaluate: ``"all"``, ``"pre_auth"``, or
                 ``"post_auth"``.
-        
+
         Returns:
             dict[str, str] | Response: Rate-limit headers when all applicable limits
                 allow the request, or a denial response when a limit is exceeded.
@@ -1699,9 +1698,7 @@ class Flasgo(RouteDecorators):
         rules_with_ids = [
             (
                 rule,
-                f"{id(endpoint)}:{index}"
-                if isinstance(self._rate_limiter, RateLimiter)
-                else f"{protocol}:{stable_id}:{index}",
+                f"{id(endpoint)}:{index}" if isinstance(self._rate_limiter, RateLimiter) else f"{protocol}:{stable_id}:{index}",
             )
             for index, rule in indexed_rules
         ]
@@ -1725,13 +1722,13 @@ class Flasgo(RouteDecorators):
     async def _run_after_middleware(self, req: Request, response: Response) -> Response:
         """
         Apply registered after-request middleware to a response.
-        
+
         Parameters:
-        	req (Request): The request associated with the response.
-        	response (Response): The initial response to process.
-        
+                req (Request): The request associated with the response.
+                response (Response): The initial response to process.
+
         Returns:
-        	Response: The response produced by the after-request middleware chain.
+                Response: The response produced by the after-request middleware chain.
         """
         current = response
         self._track_stream(req, current)
@@ -1743,13 +1740,13 @@ class Flasgo(RouteDecorators):
     async def _call_endpoint(self, req: Request, match: MatchResult) -> ResponseValue:
         """
         Invoke the matched endpoint with resolved request arguments.
-        
+
         Parameters:
-        	req (Request): The current request.
-        	match (MatchResult): The matched route and endpoint information.
-        
+                req (Request): The current request.
+                match (MatchResult): The matched route and endpoint information.
+
         Returns:
-        	ResponseValue: The endpoint's response value.
+                ResponseValue: The endpoint's response value.
         """
         arguments = await resolve_endpoint_arguments(match.endpoint_plan, req, match.params)
         value = match.endpoint(**arguments)
@@ -1777,12 +1774,12 @@ class Flasgo(RouteDecorators):
     def _otel_route_template(self, path: str) -> str | None:
         """
         Finds the route template matching a request path for telemetry.
-        
+
         Parameters:
-        	path (str): The request path to match.
-        
+                path (str): The request path to match.
+
         Returns:
-        	str | None: The matching route template, or `None` when no route matches.
+                str | None: The matching route template, or `None` when no route matches.
         """
         fallback: str | None = None
         for route in self._routes:
@@ -1795,11 +1792,11 @@ class Flasgo(RouteDecorators):
     async def _handle_error(self, req: Request, exc: Exception) -> Response:
         """
         Map an exception to an appropriate HTTP response.
-        
+
         Parameters:
             req (Request): The request associated with the exception.
             exc (Exception): The exception to handle.
-        
+
         Returns:
             Response: The HTTP response representing the exception.
         """
@@ -1845,12 +1842,12 @@ class Flasgo(RouteDecorators):
 
     def _find_error_handler(self, exc: Exception) -> ErrorHandler | None:
         """Find the registered error handler for an exception.
-        
+
         Parameters:
-        	exc (Exception): The exception whose handler should be found.
-        
+                exc (Exception): The exception whose handler should be found.
+
         Returns:
-        	ErrorHandler | None: The matching error handler, or `None` if no handler is registered.
+                ErrorHandler | None: The matching error handler, or `None` if no handler is registered.
         """
         for klass in type(exc).__mro__:
             handler = self._error_handlers.get(klass)
@@ -1861,11 +1858,12 @@ class Flasgo(RouteDecorators):
     async def _load_session(self, req: Request) -> Session:
         """
         Load the session associated with a request.
-        
-        An empty session is returned when no session cookie is present, the cookie is invalid, or the request host is disallowed. Server-side sessions are loaded through the configured session backend; otherwise, the signed session cookie is used.
-        
+
+        An empty session is returned when no session cookie is present, the cookie is invalid, or the request host is disallowed.
+        Server-side sessions are loaded through the configured session backend; otherwise, the signed session cookie is used.
+
         Returns:
-        	Session: The request's session data.
+                Session: The request's session data.
         """
         if self._session_backend is not None:
             hosts = _scope_header_values(req.scope, b"host")
@@ -1884,13 +1882,14 @@ class Flasgo(RouteDecorators):
     async def _persist_session(self, req: Request, response: Response) -> str | None:
         """
         Persist the modified session and update the response session cookie.
-        
+
         Parameters:
-        	req (Request): Request containing the session and existing session cookie.
-        	response (Response): Response to receive the updated or cleared session cookie.
-        
+                req (Request): Request containing the session and existing session cookie.
+                response (Response): Response to receive the updated or cleared session cookie.
+
         Returns:
-        	str | None: The session token, an empty string when the session is cleared, or the existing cookie value when no persistence is needed.
+                str | None: The session token, an empty string when the session is cleared, or the existing cookie value when no
+                persistence is needed.
         """
         current = req.scope.get("session")
         if not isinstance(current, Session) or not current.modified:
@@ -1982,8 +1981,7 @@ class Flasgo(RouteDecorators):
             return None
         if denial.reason == "backend-missing":
             return Response.text(
-                f"Authentication backend {denial.backend_name!r} is not configured. "
-                "Register it with app.register_auth_backend(...).",
+                f"Authentication backend {denial.backend_name!r} is not configured. Register it with app.register_auth_backend(...).",
                 status_code=500,
             )
         if denial.reason == "rate-limited":
@@ -2008,9 +2006,7 @@ class Flasgo(RouteDecorators):
         now = time.monotonic()
         if len(self._security_failures) > 10_000:
             cutoff = now - window
-            self._security_failures = {
-                key: value for key, value in self._security_failures.items() if value[0] >= cutoff
-            }
+            self._security_failures = {key: value for key, value in self._security_failures.items() if value[0] >= cutoff}
         start, count = self._security_failures.get(client, (now, 0))
         if now - start >= window:
             start = now

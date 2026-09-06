@@ -40,9 +40,9 @@ class _DependencyStack(AsyncExitStack):
     ) -> bool:
         """
         Prevent dependency providers from suppressing application exceptions.
-        
+
         Returns:
-        	bool: Always `False`; raises `RuntimeError` if an exception was suppressed by a dependency provider.
+                bool: Always `False`; raises `RuntimeError` if an exception was suppressed by a dependency provider.
         """
         if await super().__aexit__(exc_type, exc, traceback):
             raise RuntimeError("Dependency providers must not suppress application exceptions.")
@@ -55,9 +55,9 @@ class DependencyContext:
     def __init__(self, overrides: Mapping[Provider, Provider] | None = None) -> None:
         """
         Initialize dependency resource stacks, provider overrides, and resolution tracking.
-        
+
         Parameters:
-        	overrides (Mapping[Provider, Provider] | None): Optional provider replacements used during dependency resolution.
+                overrides (Mapping[Provider, Provider] | None): Optional provider replacements used during dependency resolution.
         """
         self.function_stack = _DependencyStack()
         self.request_stack = _DependencyStack()
@@ -67,11 +67,11 @@ class DependencyContext:
     async def enter(self, result: Any, marker: Depends) -> Any:
         """
         Register a dependency result with the appropriate resource scope.
-        
+
         Parameters:
             result (Any): The dependency result, which may be a synchronous or asynchronous generator, awaitable, or regular value.
             marker (Depends): Dependency metadata specifying the resource scope.
-        
+
         Returns:
             Any: The resolved dependency value.
         """
@@ -94,10 +94,10 @@ async def resolve_endpoint_arguments(
 ) -> dict[str, Any]:
     """
     Resolve the arguments required to invoke an endpoint.
-    
+
     Parameters:
         path_params (dict[str, Any]): Values captured from the request path.
-    
+
     Returns:
         dict[str, Any]: Resolved endpoint argument values.
     """
@@ -129,7 +129,7 @@ async def _resolve_plan(
 ) -> dict[str, Any]:
     """
     Resolve dependencies and request-bound values for an endpoint plan.
-    
+
     Parameters:
         plan (EndpointPlan): Endpoint dependency and parameter bindings to resolve.
         request (Request): Incoming request providing bound values and dependency context.
@@ -137,10 +137,10 @@ async def _resolve_plan(
         cache (dict[tuple[int, str], object]): Cache for scoped dependency results.
         body_cache (dict[str, object]): Cache for parsed request body and form data.
         budget (ValidationBudget): Limits for collecting validation issues.
-    
+
     Returns:
         dict[str, Any]: Resolved values for the endpoint's non-dependency bindings.
-    
+
     Raises:
         RequestValidationError: If request or dependency values fail validation.
         FormValidationError: If form data is invalid.
@@ -166,9 +166,7 @@ async def _resolve_plan(
                     if not binding.required:
                         value = binding.default
                     else:
-                        raise RequestValidationError(
-                            (ValidationIssue(("query", key), "missing", "Field is required."),)
-                        )
+                        raise RequestValidationError((ValidationIssue(("query", key), "missing", "Field is required."),))
                 else:
                     value = validate_text_values(binding.annotation, values, location=("query", key), budget=budget)
             elif binding.source == "header":
@@ -185,9 +183,7 @@ async def _resolve_plan(
                 key = binding_wire_name(binding)
                 values = request.cookie_values(key)
                 if len(values) > 1:
-                    raise RequestValidationError(
-                        (ValidationIssue(("cookie", key), "multiple_values", "Expected one cookie value."),)
-                    )
+                    raise RequestValidationError((ValidationIssue(("cookie", key), "multiple_values", "Expected one cookie value."),))
                 value = _resolve_text_binding(binding, values, location=("cookie", key), budget=budget)
             elif binding.source == "body":
                 value = await _resolve_body(binding, request, body_cache, budget)
@@ -198,9 +194,7 @@ async def _resolve_plan(
                 assert isinstance(marker, Depends)
                 context = request.scope.get("flasgo.dependencies")
                 if not isinstance(context, DependencyContext):
-                    raise RuntimeError(
-                        "Dependency resolution requires a DependencyContext in request.scope['flasgo.dependencies']."
-                    )
+                    raise RuntimeError("Dependency resolution requires a DependencyContext in request.scope['flasgo.dependencies'].")
                 provider = context.overrides.get(marker.provider, marker.provider)
                 cache_key = (id(marker.provider), marker.scope)
                 if marker.use_cache and cache_key in cache:
@@ -212,9 +206,7 @@ async def _resolve_plan(
                     try:
                         dependency = binding.dependency
                         if provider is not marker.provider:
-                            dependency = compile_endpoint_plan(
-                                provider, request.scope.get("route_template", request.path)
-                            )
+                            dependency = compile_endpoint_plan(provider, request.scope.get("route_template", request.path))
                             _validate_dependency_scopes(dependency, parent_scope=marker.scope)
                         arguments = await _resolve_plan(
                             dependency,

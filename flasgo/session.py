@@ -40,7 +40,7 @@ class Session:
     @property
     def session_id(self) -> str | None:
         """Expose the session's identifier.
-        
+
         Returns:
             str | None: The session identifier, or `None` if the session has no identifier.
         """
@@ -53,12 +53,12 @@ class Session:
 
     def __getitem__(self, key: str) -> Any:
         """Retrieve a value from the session by key.
-        
+
         Parameters:
-        	key (str): The key associated with the value.
-        
+                key (str): The key associated with the value.
+
         Returns:
-        	Any: The value stored for the key.
+                Any: The value stored for the key.
         """
         return self.data[key]
 

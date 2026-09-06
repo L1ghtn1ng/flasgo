@@ -174,9 +174,7 @@ def _normalize_allowed_origins(values: Collection[str]) -> frozenset[str]:
             continue
         origin = _canonical_origin(value)
         if origin is None:
-            raise ValueError(
-                "CORS allow_origins entries must be exact ASCII http:// or https:// origins without paths."
-            )
+            raise ValueError("CORS allow_origins entries must be exact ASCII http:// or https:// origins without paths.")
         normalized.add(origin)
     if not normalized:
         raise ValueError("CORS allow_origins must contain at least one exact origin or '*'.")

@@ -70,13 +70,13 @@ class RedisRateLimiter:
 
     def __init__(self, store: RedisStore, *, max_keys: int = 10_000) -> None:
         """Initialize a Redis-backed rate limiter with a positive active-key capacity limit.
-        
+
         Parameters:
-        	store (RedisStore): Redis or Valkey backend used for rate-limit state.
-        	max_keys (int): Maximum number of active keys the limiter may track.
-        
+                store (RedisStore): Redis or Valkey backend used for rate-limit state.
+                max_keys (int): Maximum number of active keys the limiter may track.
+
         Raises:
-        	ValueError: If `max_keys` is not a positive integer.
+                ValueError: If `max_keys` is not a positive integer.
         """
         if isinstance(max_keys, bool) or not isinstance(max_keys, int) or max_keys <= 0:
             raise ValueError("max_keys must be a positive integer.")
@@ -85,10 +85,10 @@ class RedisRateLimiter:
 
     async def check(self, rule: RateLimitRule, req: Request, *, endpoint_id: str) -> RateLimitDecision:
         """Evaluate a rate limit rule for a request at the specified endpoint.
-        
+
         Parameters:
             endpoint_id (str): Identifier of the endpoint associated with the rule.
-        
+
         Returns:
             RateLimitDecision: The rate-limit decision for the request.
         """
@@ -97,17 +97,17 @@ class RedisRateLimiter:
     async def check_batch(self, rules: list[tuple[RateLimitRule, str]], req: Request) -> list[RateLimitDecision]:
         """
         Evaluate multiple rate-limit rules for a request as one shared phase.
-        
+
         Parameters:
-        	rules (list[tuple[RateLimitRule, str]]): Rate-limit rules paired with their endpoint identifiers.
-        	req (Request): Request whose identity is evaluated against the rules.
-        
+                rules (list[tuple[RateLimitRule, str]]): Rate-limit rules paired with their endpoint identifiers.
+                req (Request): Request whose identity is evaluated against the rules.
+
         Returns:
-        	list[RateLimitDecision]: Decisions for each rule, or an empty list when no rules are provided.
-        
+                list[RateLimitDecision]: Decisions for each rule, or an empty list when no rules are provided.
+
         Raises:
-        	ValueError: If more than 64 rules are provided.
-        	StoreUnavailable: If the shared limiter returns invalid accounting data.
+                ValueError: If more than 64 rules are provided.
+                StoreUnavailable: If the shared limiter returns invalid accounting data.
         """
         if not rules:
             return []

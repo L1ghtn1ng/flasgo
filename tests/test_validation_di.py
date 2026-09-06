@@ -286,9 +286,7 @@ def test_openapi_uses_models_dependencies_forms_and_validation_contract() -> Non
             "schema": {"type": "integer"},
         }
     ]
-    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/CreateWidget"
-    }
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/CreateWidget"}
     assert operation["responses"]["422"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/RequestValidationError"
     }
@@ -396,18 +394,14 @@ def test_fixed_tuple_validation_and_schema_are_positional() -> None:
     assert client.post("/fixed-tuple", json=[1]).status_code == 422
     assert client.post("/variable-tuple", json=[1, 2]).json() == [1, 2]
 
-    fixed_schema = app.openapi_spec()["paths"]["/fixed-tuple"]["post"]["requestBody"]["content"]["application/json"][
-        "schema"
-    ]
+    fixed_schema = app.openapi_spec()["paths"]["/fixed-tuple"]["post"]["requestBody"]["content"]["application/json"]["schema"]
     assert fixed_schema == {
         "type": "array",
         "prefixItems": [{"type": "integer"}, {"type": "string"}],
         "minItems": 2,
         "maxItems": 2,
     }
-    variable_schema = app.openapi_spec()["paths"]["/variable-tuple"]["post"]["requestBody"]["content"][
-        "application/json"
-    ]["schema"]
+    variable_schema = app.openapi_spec()["paths"]["/variable-tuple"]["post"]["requestBody"]["content"]["application/json"]["schema"]
     assert variable_schema == {"type": "array", "items": {"type": "integer"}}
 
 
@@ -434,9 +428,7 @@ def test_init_false_dataclass_fields_are_not_request_inputs() -> None:
     spec = app.openapi_spec()
     operation = spec["paths"]["/computed"]["post"]
     request_component = operation["requestBody"]["content"]["application/json"]["schema"]["$ref"].rsplit("/", 1)[1]
-    response_component = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].rsplit("/", 1)[
-        1
-    ]
+    response_component = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].rsplit("/", 1)[1]
     request_schema = spec["components"]["schemas"][request_component]
     assert request_schema["properties"] == {"value": {"type": "integer"}}
     assert request_schema["required"] == ["value"]
@@ -450,9 +442,7 @@ def test_init_false_dataclass_fields_are_not_request_inputs() -> None:
     supplied_form_computed = client.post("/computed-form", data={"value": "5", "doubled": "99"})
     assert supplied_form_computed.status_code == 422
     form_payload = cast(dict[str, Any], supplied_form_computed.json())
-    assert form_payload["errors"] == [
-        {"location": ["form", "doubled"], "code": "unknown_field", "message": "Unknown field."}
-    ]
+    assert form_payload["errors"] == [{"location": ["form", "doubled"], "code": "unknown_field", "message": "Unknown field."}]
 
 
 def test_numeric_and_boolean_literals_are_converted_from_query_and_form_text() -> None:

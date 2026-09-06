@@ -25,15 +25,15 @@ from flasgo.request import Request
 def redis_url(tmp_path_factory: pytest.TempPathFactory):
     """
     Provide a Redis connection URL for integration tests.
-    
+
     Parameters:
-    	tmp_path_factory (pytest.TempPathFactory): Factory used to create isolated temporary Redis server storage.
-    
+        tmp_path_factory (pytest.TempPathFactory): Factory used to create isolated temporary Redis server storage.
+
     Yields:
-    	str: The configured Redis URL or a URL for a temporary Unix-socket Redis server.
-    
+        str: The configured Redis URL or a URL for a temporary Unix-socket Redis server.
+
     Raises:
-    	pytest.skip.Exception: If no Redis or Valkey server executable is available.
+        pytest.skip.Exception: If no Redis or Valkey server executable is available.
     """
     configured = os.environ.get("FLASGO_TEST_REDIS_URL")
     if configured:
@@ -78,13 +78,14 @@ def redis_url(tmp_path_factory: pytest.TempPathFactory):
 def request_for(identity: str = "127.0.0.1") -> Request:
     """
     Create a minimal GET request for the specified client identity.
-    
+
     Parameters:
-    	identity (str): Client address to associate with the request.
-    
+        identity (str): Client address to associate with the request.
+
     Returns:
-    	Request: A GET request targeting the root path.
+        Request: A GET request targeting the root path.
     """
+
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}
 
@@ -135,9 +136,9 @@ def test_session_backend_integrates_cookies_csrf_and_logout() -> None:
     def login() -> str:
         """
         Authenticate Alice by storing her identity in the session and regenerating the session identifier.
-        
+
         Returns:
-        	str: The string "ok".
+                str: The string "ok".
         """
         session["user"] = "alice"
         session.regenerate()
@@ -147,9 +148,9 @@ def test_session_backend_integrates_cookies_csrf_and_logout() -> None:
     def logout() -> str:
         """
         Clear the current session and confirm the logout operation.
-        
+
         Returns:
-        	str: The confirmation string "ok".
+                str: The confirmation string "ok".
         """
         session.clear()
         return "ok"
@@ -171,12 +172,12 @@ def test_storage_outage_fails_closed_without_exposing_backend_details() -> None:
         async def get(self, key: str) -> bytes | None:
             """
             Retrieve the value associated with a key from storage.
-            
+
             Returns:
-            	bytes | None: The stored value, or `None` when the key does not exist.
-            
+                bytes | None: The stored value, or `None` when the key does not exist.
+
             Raises:
-            	StoreUnavailable: If the storage backend cannot be accessed.
+                StoreUnavailable: If the storage backend cannot be accessed.
             """
             raise StoreUnavailable("redis://password@private.example")
 
@@ -216,6 +217,7 @@ def test_redis_quota_is_shared_across_app_instances_and_atomic(redis_url: str) -
     """
     Verifies shared Redis rate-limit quotas and atomic enforcement across application instances.
     """
+
     async def run() -> None:
         namespace = "test-" + uuid4().hex
         first = RedisStore.from_url(redis_url, namespace=namespace)
@@ -282,7 +284,7 @@ def test_storage_write_failure_replaces_success_before_headers() -> None:
     class Unavailable(MemoryStore):
         async def create(self, key: str, value: bytes, ttl: int) -> bool:
             """Rejects attempts to create a stored value.
-            
+
             Raises:
                 StoreUnavailable: Always, with a message indicating unavailable credentials.
             """
@@ -294,9 +296,9 @@ def test_storage_write_failure_replaces_success_before_headers() -> None:
     def endpoint() -> str:
         """
         Store the user identity in the session and report successful processing.
-        
+
         Returns:
-        	str: The literal value `"success"`.
+                str: The literal value `"success"`.
         """
         session["user"] = "alice"
         return "success"
@@ -318,9 +320,9 @@ def test_redis_separate_methods_have_separate_default_quotas(redis_url: str) -> 
             def get() -> str:
                 """
                 Identify the HTTP method as GET.
-                
+
                 Returns:
-                	str: The string "get".
+                        str: The string "get".
                 """
                 return "get"
 
@@ -328,9 +330,9 @@ def test_redis_separate_methods_have_separate_default_quotas(redis_url: str) -> 
             @app.ratelimit(1, per=60)
             def post() -> str:
                 """Return the string identifying a POST request.
-                
+
                 Returns:
-                	str: The string ``"post"``.
+                        str: The string ``"post"``.
                 """
                 return "post"
 
@@ -353,9 +355,7 @@ def test_redis_concurrent_session_writes_and_revocation_are_atomic(redis_url: st
             first, second = await asyncio.gather(backend.load(token), backend.load(token))
             first["value"] = 1
             second["value"] = 2
-            results = await asyncio.gather(
-                backend.save(first, max_age=60), backend.save(second, max_age=60), return_exceptions=True
-            )
+            results = await asyncio.gather(backend.save(first, max_age=60), backend.save(second, max_age=60), return_exceptions=True)
             assert sum(isinstance(result, HTTPException) for result in results) == 1
             loaded = await backend.load(token)
             assert loaded.session_id is not None

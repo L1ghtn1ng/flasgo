@@ -73,10 +73,7 @@ def _encode_multipart(
         content_type = rest[0] if rest else "application/octet-stream"
         body.extend(f"--{boundary}\r\n".encode("ascii"))
         body.extend(
-            (
-                f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n"
-            ).encode()
+            (f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n').encode()
         )
         file_bytes = payload.encode() if isinstance(payload, str) else bytes(payload)
         body.extend(file_bytes)
@@ -462,13 +459,13 @@ class TestClient:
     ) -> TestResponse:
         """
         Send an asynchronous request and optionally follow redirects.
-        
+
         Parameters:
             follow_redirects (bool): Whether to follow up to ten redirects.
-        
+
         Returns:
             TestResponse: The final response, including redirect history when redirects are followed.
-        
+
         Raises:
             RuntimeError: If more than ten redirects are encountered.
         """
@@ -535,14 +532,14 @@ class TestClient:
     ):
         """
         Stream an ASGI response incrementally within an asynchronous test context.
-        
+
         Parameters:
             json (object | None): JSON data to encode as the request body. Cannot be combined with ``body``.
             scheme (str): URL scheme used to construct the request scope.
-        
+
         Yields:
             AsyncTestStream: The response stream, which is closed when the context exits.
-        
+
         Raises:
             RuntimeError: If used with a synchronous lifespan context.
         """
@@ -584,7 +581,7 @@ class TestClient:
     ) -> TestResponse:
         """
         Send an HTTP request through the ASGI application and collect its response.
-        
+
         Parameters:
             method (str): HTTP method to use.
             path (str): Request path and optional query string.
@@ -595,10 +592,10 @@ class TestClient:
             files (Mapping[str, FileValue] | None): Files to include in multipart form data.
             scheme (str): Request URL scheme.
             stream (AsyncTestStream | None): Stream that receives response messages as they are sent.
-        
+
         Returns:
             TestResponse: The application's response.
-        
+
         Raises:
             RuntimeError: If the application does not send an HTTP response start message.
         """
@@ -649,7 +646,7 @@ class TestClient:
         async def receive() -> Message:
             """
             Provide the next queued message, or an HTTP disconnect message when the stream disconnects.
-            
+
             Returns:
                 Message: The next queued message or an HTTP disconnect message.
             """
@@ -664,9 +661,9 @@ class TestClient:
         async def send(message: Message) -> None:
             """
             Process an ASGI response message and forward or collect it for the response.
-            
+
             Parameters:
-            	message (Message): ASGI response message to process.
+                message (Message): ASGI response message to process.
             """
             nonlocal start_message
             if stream is not None:

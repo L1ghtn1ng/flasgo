@@ -64,12 +64,12 @@ def redirect(
 ) -> Response:
     """
     Create a redirect response for the specified location.
-    
+
     Parameters:
         location (str): The redirect target.
         status_code (int): The HTTP status code for the redirect.
         headers (dict[str, str] | None): Optional response headers.
-    
+
     Returns:
         Response: A redirect response targeting `location`.
     """
@@ -80,11 +80,11 @@ def redirect(
 def url_for(endpoint: str, **values: Any) -> str:
     """
     Build a relative URL for an application endpoint.
-    
+
     Parameters:
         endpoint (str): The endpoint name.
         values (Any): Values used to construct the URL.
-    
+
     Returns:
         str: The generated relative URL.
     """

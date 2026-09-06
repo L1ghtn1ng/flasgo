@@ -50,9 +50,7 @@ def test_response_contract_cannot_be_bypassed_with_raw_response() -> None:
 
 def test_contract_keeps_tuple_status_and_headers_and_untyped_behavior() -> None:
     app = Flasgo(settings={"CSRF_ENABLED": False})
-    app.post("/", response_model=PublicUser)(
-        lambda: ({"id": 1, "display_name": "A", "secret": True}, 201, {"x-result": "created"})
-    )
+    app.post("/", response_model=PublicUser)(lambda: ({"id": 1, "display_name": "A", "secret": True}, 201, {"x-result": "created"}))
     response = app.test_client().post("/")
     assert response.status_code == 201
     assert response.headers["x-result"] == "created"

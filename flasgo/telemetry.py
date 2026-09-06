@@ -30,9 +30,7 @@ class Telemetry:
             from opentelemetry import trace
             from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
         except ImportError as exc:
-            raise RuntimeError(
-                "OpenTelemetry tracing requires the optional dependency. Install Flasgo with `flasgo[otel]`."
-            ) from exc
+            raise RuntimeError("OpenTelemetry tracing requires the optional dependency. Install Flasgo with `flasgo[otel]`.") from exc
 
         self._excluded_paths = frozenset((*settings.OTEL_EXCLUDED_PATHS, settings.METRICS_PATH))
         self._app = app

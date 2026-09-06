@@ -210,9 +210,7 @@ def _validate_oauth_flows(value: object) -> None:
 
 
 def _reject_unknown_fields(value: Mapping[str, object], *, allowed: set[str], context: str) -> None:
-    invalid_keys = sorted(
-        str(key) for key in value if not isinstance(key, str) or (key not in allowed and not key.startswith("x-"))
-    )
+    invalid_keys = sorted(str(key) for key in value if not isinstance(key, str) or (key not in allowed and not key.startswith("x-")))
     if invalid_keys:
         raise ValueError(f"{context} contains unsupported fields: {', '.join(invalid_keys)}.")
 

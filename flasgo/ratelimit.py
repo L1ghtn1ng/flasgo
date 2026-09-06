@@ -26,7 +26,7 @@ class RateLimitRule:
     def __post_init__(self) -> None:
         """
         Validate rate-limit configuration values.
-        
+
         Raises:
             ValueError: If the request count or window duration is invalid, or if the
                 scope is blank.
@@ -51,17 +51,17 @@ class RateLimitDecision:
 
 
 class RateLimitBackend(Protocol):
-    async def check_batch(self, rules: list[tuple[RateLimitRule, str]], req: Request) -> list[RateLimitDecision]: """
-Evaluate multiple rate-limit rules atomically for a request.
+    async def check_batch(self, rules: list[tuple[RateLimitRule, str]], req: Request) -> list[RateLimitDecision]:
+        """
+        Evaluate multiple rate-limit rules atomically for a request.
 
-Parameters:
-	rules (list[tuple[RateLimitRule, str]]): Rate-limit rules paired with their client keys.
-	req (Request): The incoming request.
+        Parameters:
+                rules (list[tuple[RateLimitRule, str]]): Rate-limit rules paired with their client keys.
+                req (Request): The incoming request.
 
-Returns:
-	list[RateLimitDecision]: One decision for each supplied rule.
-"""
-...
+        Returns:
+                list[RateLimitDecision]: One decision for each supplied rule.
+        """
 
 
 class RateLimiter:
@@ -154,9 +154,7 @@ class RateLimiter:
             missing_keys = {bucket_key for bucket_key, _rule in requested_entries if bucket_key not in self._buckets}
             if len(self._buckets) + len(missing_keys) > self.max_keys:
                 self._prune(now)
-                missing_keys = {
-                    bucket_key for bucket_key, _rule in requested_entries if bucket_key not in self._buckets
-                }
+                missing_keys = {bucket_key for bucket_key, _rule in requested_entries if bucket_key not in self._buckets}
                 if len(self._buckets) + len(missing_keys) > self.max_keys:
                     return [self._capacity_decision(rule, now=now) for _bucket_key, rule in requested_entries]
 

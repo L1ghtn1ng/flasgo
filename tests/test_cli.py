@@ -15,9 +15,7 @@ def test_load_app_from_python_file(tmp_path: Path) -> None:
     (tmp_path / "helpers.py").write_text("TITLE = 'sibling import'\n", encoding="utf-8")
     app_file = tmp_path / "app.py"
     app_file.write_text(
-        "from helpers import TITLE\n"
-        "from flasgo import Flasgo\n"
-        "app = Flasgo(settings={'API_TITLE': TITLE, 'CSRF_ENABLED': False})\n",
+        "from helpers import TITLE\nfrom flasgo import Flasgo\napp = Flasgo(settings={'API_TITLE': TITLE, 'CSRF_ENABLED': False})\n",
         encoding="utf-8",
     )
 
@@ -486,9 +484,7 @@ def test_routes_output_requires_json_before_loading_app(tmp_path: Path, flags: l
     assert output.read_text() == "existing"
 
 
-def test_routes_output_failure_preserves_baseline_and_removes_temporary_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_routes_output_failure_preserves_baseline_and_removes_temporary_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output = tmp_path / "policy.json"
     output.write_text("existing")
     monkeypatch.setattr(cli_module, "load_app", lambda *args, **kwargs: Flasgo())

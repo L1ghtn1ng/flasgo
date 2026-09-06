@@ -102,9 +102,7 @@ def _parse_content_type(header_value: str | None) -> tuple[str, dict[str, str]]:
     message = BytesParser(policy=default).parsebytes(f"Content-Type: {header_value}\r\n\r\n".encode("latin-1"))
     content_type = message.get_content_type().lower()
     params = {
-        key.lower(): value
-        for key, value in message.get_params(header="content-type", failobj=[])
-        if key.lower() != content_type
+        key.lower(): value for key, value in message.get_params(header="content-type", failobj=[]) if key.lower() != content_type
     }
     params.pop("", None)
     return content_type, params
@@ -317,9 +315,7 @@ class Request:
         """Return every wire-level value for a case-insensitive header name."""
 
         normalized = name.lower().encode("latin-1")
-        return tuple(
-            value.decode("latin-1") for key, value in self.scope.get("headers", []) if key.lower() == normalized
-        )
+        return tuple(value.decode("latin-1") for key, value in self.scope.get("headers", []) if key.lower() == normalized)
 
     def cookie_values(self, name: str) -> tuple[str, ...]:
         """Return every value for an exact, case-sensitive cookie name."""

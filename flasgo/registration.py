@@ -25,7 +25,7 @@ class RouteDecorators:
     ) -> None:
         """
         Register an HTTP endpoint with the configured application or blueprint.
-        
+
         Parameters:
             path: The URL path for the endpoint.
             endpoint: The callable that handles matching requests.
@@ -35,7 +35,7 @@ class RouteDecorators:
             public: Whether the endpoint is accessible without authentication.
             response_model: Optional model used to describe or validate responses.
             dependencies: Dependencies applied to the endpoint.
-        
+
         Raises:
             NotImplementedError: When the method has not been implemented by a subclass.
         """
@@ -54,19 +54,20 @@ class RouteDecorators:
     ) -> Callable[[Endpoint], Endpoint]:
         """
         Create a decorator that registers an endpoint for the specified route.
-        
+
         Parameters:
-        	path (str): URL path for the route
-        	methods (Iterable[str]): HTTP methods accepted by the route
-        	name (str | None): Optional route name
-        	cors (CORSConfig | Literal[False] | None): CORS configuration, or `False` to disable CORS
-        	public (bool): Whether the route is publicly accessible
-        	response_model (object): Optional model used to describe or validate the response
-        	dependencies (Sequence[Depends]): Dependencies applied to the route
-        
+                path (str): URL path for the route
+                methods (Iterable[str]): HTTP methods accepted by the route
+                name (str | None): Optional route name
+                cors (CORSConfig | Literal[False] | None): CORS configuration, or `False` to disable CORS
+                public (bool): Whether the route is publicly accessible
+                response_model (object): Optional model used to describe or validate the response
+                dependencies (Sequence[Depends]): Dependencies applied to the route
+
         Returns:
-        	Callable[[Endpoint], Endpoint]: A decorator that registers an endpoint and returns it unchanged
+                Callable[[Endpoint], Endpoint]: A decorator that registers an endpoint and returns it unchanged
         """
+
         def decorator(func: Endpoint) -> Endpoint:
             self.add_route(
                 path,
@@ -94,7 +95,7 @@ class RouteDecorators:
     ) -> Callable[[Endpoint], Endpoint]:
         """
         Create a decorator that registers an endpoint for HTTP GET requests.
-        
+
         Parameters:
             path (str): URL path for the route.
             name (str | None): Optional route name.
@@ -102,7 +103,7 @@ class RouteDecorators:
             public (bool): Whether the route is publicly accessible.
             response_model (object): Optional model used to serialize responses.
             dependencies (Sequence[Depends]): Dependencies applied to the route.
-        
+
         Returns:
             Callable[[Endpoint], Endpoint]: A decorator for registering the endpoint.
         """
@@ -128,7 +129,7 @@ class RouteDecorators:
     ) -> Callable[[Endpoint], Endpoint]:
         """
         Create a decorator that registers an endpoint for POST requests.
-        
+
         Parameters:
             path (str): The URL path for the endpoint.
             name (str | None): An optional route name.
@@ -136,7 +137,7 @@ class RouteDecorators:
             public (bool): Whether the route is publicly accessible.
             response_model (object): The model used to serialize the response.
             dependencies (Sequence[Depends]): Dependencies required by the route.
-        
+
         Returns:
             Callable[[Endpoint], Endpoint]: A decorator that registers the endpoint and returns it.
         """
@@ -162,7 +163,7 @@ class RouteDecorators:
     ) -> Callable[[Endpoint], Endpoint]:
         """
         Create a decorator that registers an endpoint for a PUT route.
-        
+
         Parameters:
             path (str): The route path.
             name (str | None): The optional route name.
@@ -170,7 +171,7 @@ class RouteDecorators:
             public (bool): Whether the route is publicly accessible.
             response_model (object): The model used to serialize the response.
             dependencies (Sequence[Depends]): Dependencies applied to the route.
-        
+
         Returns:
             Callable[[Endpoint], Endpoint]: A decorator that registers an endpoint for the PUT route.
         """
@@ -196,7 +197,7 @@ class RouteDecorators:
     ) -> Callable[[Endpoint], Endpoint]:
         """
         Create a decorator that registers an endpoint for PATCH requests.
-        
+
         Parameters:
             path (str): URL path for the endpoint.
             name (str | None): Optional route name.
@@ -204,7 +205,7 @@ class RouteDecorators:
             public (bool): Whether the route is publicly accessible.
             response_model (object): Optional response model.
             dependencies (Sequence[Depends]): Dependencies applied to the route.
-        
+
         Returns:
             Callable[[Endpoint], Endpoint]: A decorator that registers and returns the endpoint.
         """
@@ -230,17 +231,17 @@ class RouteDecorators:
     ) -> Callable[[Endpoint], Endpoint]:
         """
         Create a decorator that registers an endpoint for DELETE requests.
-        
+
         Parameters:
-        	path (str): URL path for the route.
-        	name (str | None): Optional route name.
-        	cors (CORSConfig | Literal[False] | None): CORS configuration for the route.
-        	public (bool): Whether the route is publicly accessible.
-        	response_model (object): Optional model used to describe or validate responses.
-        	dependencies (Sequence[Depends]): Dependencies applied to the route.
-        
+                path (str): URL path for the route.
+                name (str | None): Optional route name.
+                cors (CORSConfig | Literal[False] | None): CORS configuration for the route.
+                public (bool): Whether the route is publicly accessible.
+                response_model (object): Optional model used to describe or validate responses.
+                dependencies (Sequence[Depends]): Dependencies applied to the route.
+
         Returns:
-        	Callable[[Endpoint], Endpoint]: A decorator that registers and returns the endpoint.
+                Callable[[Endpoint], Endpoint]: A decorator that registers and returns the endpoint.
         """
         return self.route(
             path,

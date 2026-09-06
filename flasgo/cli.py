@@ -70,9 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Validate routes and application configuration")
     _add_target_arguments(check_parser)
-    check_parser.add_argument(
-        "--deploy", action="store_true", help="Check production security settings and declared access"
-    )
+    check_parser.add_argument("--deploy", action="store_true", help="Check production security settings and declared access")
     check_parser.add_argument("--json", action="store_true", help="Emit structured issues and policy changes")
     check_parser.add_argument("--against", help="Compare with a routes --json policy snapshot; fail on any change")
     check_parser.set_defaults(handler=_check_command)
@@ -129,7 +127,7 @@ def _add_target_arguments(parser: argparse.ArgumentParser) -> None:
 def _routes_command(args: argparse.Namespace) -> int:
     """
     List the application's registered HTTP and WebSocket routes or emit its policy snapshot.
-    
+
     Returns:
         int: Zero after successfully displaying or writing the route information.
     """
@@ -168,12 +166,12 @@ def _openapi_command(args: argparse.Namespace) -> int:
 
 def _check_command(args: argparse.Namespace) -> int:
     """Validate registered routes, authentication configuration, internal endpoint conflicts, deployment settings, and policy changes.
-    
+
     Parameters:
-    	args (argparse.Namespace): Command-line options specifying the application target and enabled checks.
-    
+        args (argparse.Namespace): Command-line options specifying the application target and enabled checks.
+
     Returns:
-    	int: 1 if validation issues or policy changes are found, otherwise 0.
+        int: 1 if validation issues or policy changes are found, otherwise 0.
     """
     app = load_app(args.target, app_name=args.app)
     errors: list[str] = []
@@ -249,7 +247,7 @@ def _check_command(args: argparse.Namespace) -> int:
 def _atomic_write(path: Path, value: str) -> None:
     """
     Atomically write text content to a file.
-    
+
     Parameters:
         path (Path): Destination file path.
         value (str): Text content to write.
@@ -316,9 +314,7 @@ def _load_app_target(target: str, *, app_name: str) -> tuple[Flasgo, _ResolvedTa
     try:
         module = _import_target(resolved)
     except ModuleNotFoundError as exc:
-        if exc.name is not None and (
-            resolved.module_name == exc.name or resolved.module_name.startswith(f"{exc.name}.")
-        ):
+        if exc.name is not None and (resolved.module_name == exc.name or resolved.module_name.startswith(f"{exc.name}.")):
             raise SystemExit(
                 f"Could not import target module '{resolved.module_name}' from import root "
                 f"'{resolved.import_root}'. Check the target name and path."
@@ -442,18 +438,14 @@ def _import_target(target: _ResolvedTarget) -> ModuleType:
     if cached_namespace is not None and not _namespace_matches_target(cached_namespace, target):
         _clear_namespace(namespace)
     evicted_modules = (
-        _evict_cli_owned_modules(previous_root)
-        if previous_root is not None and previous_root != target.import_root
-        else {}
+        _evict_cli_owned_modules(previous_root) if previous_root is not None and previous_root != target.import_root else {}
     )
 
     try:
         module = importlib.import_module(target.module_name)
         if not _module_matches_source(module, target.source):
             location = _module_location(module)
-            raise ImportError(
-                f"resolved to '{location or 'an unknown location'}' instead of the requested '{target.source}'"
-            )
+            raise ImportError(f"resolved to '{location or 'an unknown location'}' instead of the requested '{target.source}'")
     except BaseException:
         _restore_namespace(namespace, snapshot)
         sys.modules.update(evicted_modules)

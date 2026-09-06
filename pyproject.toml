@@ -69,9 +69,13 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 120
+line-length = 135
+indent-width = 4
 target-version = "py314"
 src = ["flasgo", "tests"]
+
+[tool.ruff.format]
+indent-style = "space"
 
 [tool.ruff.lint]
 select = ["E",

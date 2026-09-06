@@ -20,21 +20,21 @@ class PolicyIssue:
     def to_dict(self) -> dict[str, str]:
         """
         Convert the policy issue to a dictionary.
-        
+
         Returns:
-        	dict[str, str]: The issue code, message, and severity.
+                dict[str, str]: The issue code, message, and severity.
         """
         return asdict(self)
 
 
 def _permission(permission: object) -> dict[str, Any]:
     """Serialize a permission declaration for inclusion in a policy snapshot.
-    
+
     Parameters:
-    	permission (object): Permission declaration to serialize.
-    
+        permission (object): Permission declaration to serialize.
+
     Returns:
-    	dict[str, Any]: Serialized permission metadata, including its kind and any applicable configuration.
+        dict[str, Any]: Serialized permission metadata, including its kind and any applicable configuration.
     """
     if type(permission) is HasScope:
         return {"kind": "scope", "scope": permission.scope}
@@ -50,12 +50,12 @@ def _permission(permission: object) -> dict[str, Any]:
 def _response_schema(model: object) -> dict[str, Any] | None:
     """
     Build a response schema representation for a configured model.
-    
+
     Parameters:
-    	model (object): The model used to generate the response schema.
-    
+        model (object): The model used to generate the response schema.
+
     Returns:
-    	dict[str, Any] | None: A dictionary containing the schema and registered components, or `None` when no model is configured.
+        dict[str, Any] | None: A dictionary containing the schema and registered components, or `None` when no model is configured.
     """
     if model is None:
         return None
@@ -67,9 +67,11 @@ def _response_schema(model: object) -> dict[str, Any] | None:
 def policy_snapshot(app: Flasgo) -> dict[str, Any]:
     """
     Create a deterministic, schema-versioned snapshot of the application's framework security configuration.
-    
-    The snapshot includes global controls, internal endpoint settings, HTTP and WebSocket routes, authentication and permission declarations, CSRF and CORS settings, rate limits, and response contracts. Secret values are excluded; custom authorization and middleware require application review.
-    
+
+    The snapshot includes global controls, internal endpoint settings, HTTP and WebSocket routes, authentication and permission
+    declarations, CSRF and CORS settings, rate limits, and response contracts. Secret values are excluded; custom authorization and
+    middleware require application review.
+
     Returns:
         dict[str, Any]: A policy snapshot containing the schema version, security controls,
         internal endpoints, and indexed route configuration.
@@ -173,12 +175,12 @@ def policy_snapshot(app: Flasgo) -> dict[str, Any]:
 def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
     """
     Identify deployment configuration issues and routes with inconsistent access declarations.
-    
+
     Parameters:
-    	app (Flasgo): The application whose security and route configuration is evaluated.
-    
+        app (Flasgo): The application whose security and route configuration is evaluated.
+
     Returns:
-    	list[PolicyIssue]: Detected deployment and route access policy issues.
+        list[PolicyIssue]: Detected deployment and route access policy issues.
     """
     security = app.security
     checks = (
@@ -211,8 +213,7 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
         ),
         (not security.log_security_events, "FG007", "Security event logging is disabled."),
         (
-            bool(app._websocket_routes)
-            and (not app.settings.WEBSOCKET_ENFORCE_ORIGIN or app.settings.WEBSOCKET_ALLOW_MISSING_ORIGIN),
+            bool(app._websocket_routes) and (not app.settings.WEBSOCKET_ENFORCE_ORIGIN or app.settings.WEBSOCKET_ALLOW_MISSING_ORIGIN),
             "FG008",
             "WebSocket browser origin protections have been relaxed.",
         ),
@@ -222,14 +223,10 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
     for route in (*app._routes, *app._websocket_routes):
         auth = app._route_auth.get(route.endpoint)
         if route.public and auth is not None:
-            issues.append(
-                PolicyIssue("FG010", f"Route {route.raw_path} declares public access and authorization.", "error")
-            )
+            issues.append(PolicyIssue("FG010", f"Route {route.raw_path} declares public access and authorization.", "error"))
         elif not route.public and auth is None:
             issues.append(
-                PolicyIssue(
-                    "FG011", f"Route {route.raw_path} has no declared access policy; use public=True or authorize()."
-                )
+                PolicyIssue("FG011", f"Route {route.raw_path} has no declared access policy; use public=True or authorize().")
             )
     return issues
 
@@ -237,16 +234,16 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
 def compare_policy(before: object, after: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Compare two version-1 policy snapshots and identify changes to controls, internal endpoints, and routes.
-    
+
     Parameters:
-    	before (object): The earlier policy snapshot to validate and compare.
-    	after (dict[str, Any]): The later policy snapshot.
-    
+        before (object): The earlier policy snapshot to validate and compare.
+        after (dict[str, Any]): The later policy snapshot.
+
     Returns:
-    	list[dict[str, Any]]: Change records containing the affected section and its values before and after the change.
-    
+        list[dict[str, Any]]: Change records containing the affected section and its values before and after the change.
+
     Raises:
-    	ValueError: If the earlier snapshot is not a version-1 policy snapshot or the snapshot structure is invalid.
+        ValueError: If the earlier snapshot is not a version-1 policy snapshot or the snapshot structure is invalid.
     """
     if not isinstance(before, dict) or type(before.get("schema_version")) is not int or before["schema_version"] != 1:
         raise ValueError("Expected a Flasgo policy snapshot with schema_version=1.")
@@ -270,29 +267,23 @@ def compare_policy(before: object, after: dict[str, Any]) -> list[dict[str, Any]
 def _index_routes(routes: list[Any]) -> dict[str, dict[str, Any]]:
     """
     Validate and index policy snapshot routes by protocol, path, and methods.
-    
+
     Parameters:
-    	routes (list[Any]): Route entries from a policy snapshot.
-    
+        routes (list[Any]): Route entries from a policy snapshot.
+
     Returns:
-    	dict[str, dict[str, Any]]: Routes indexed by a serialized protocol, path, and sorted-methods key.
-    
+        dict[str, dict[str, Any]]: Routes indexed by a serialized protocol, path, and sorted-methods key.
+
     Raises:
-    	ValueError: If a route is malformed, uses an unsupported protocol or non-string method, or duplicates another route.
+        ValueError: If a route is malformed, uses an unsupported protocol or non-string method, or duplicates another route.
     """
     import json
 
     indexed = {}
     for route in routes:
-        if (
-            not isinstance(route, dict)
-            or not isinstance(route.get("path"), str)
-            or not isinstance(route.get("methods"), list)
-        ):
+        if not isinstance(route, dict) or not isinstance(route.get("path"), str) or not isinstance(route.get("methods"), list):
             raise ValueError("Policy snapshot contains an invalid route.")
-        if route.get("protocol") not in {"http", "websocket"} or not all(
-            isinstance(method, str) for method in route["methods"]
-        ):
+        if route.get("protocol") not in {"http", "websocket"} or not all(isinstance(method, str) for method in route["methods"]):
             raise ValueError("Policy snapshot contains an invalid route protocol or method.")
         key = json.dumps([route["protocol"], route["path"], sorted(route["methods"])])
         if key in indexed:

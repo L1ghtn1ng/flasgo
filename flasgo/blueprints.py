@@ -50,24 +50,23 @@ class Blueprint(RouteDecorators):
     ) -> None:
         """
         Initialize a reusable group of HTTP routes with shared configuration.
-        
+
         Parameters:
-        	name (str): A valid Python identifier used to name the blueprint.
-        	url_prefix (str): A literal path prefix applied to the blueprint's routes.
-        	permissions (Sequence[PermissionLike]): Permissions inherited by routes in the blueprint.
-        	backend (str): Authentication backend used for protected routes.
-        	dependencies (Sequence[Depends]): Dependencies inherited by routes in the blueprint.
-        	rate_limits (Sequence[RateLimitRule]): Rate-limit rules inherited by routes in the blueprint.
-        	cors (CORSConfig | Literal[False] | None): CORS configuration inherited by routes, or `False` to disable inherited CORS.
+                name (str): A valid Python identifier used to name the blueprint.
+                url_prefix (str): A literal path prefix applied to the blueprint's routes.
+                permissions (Sequence[PermissionLike]): Permissions inherited by routes in the blueprint.
+                backend (str): Authentication backend used for protected routes.
+                dependencies (Sequence[Depends]): Dependencies inherited by routes in the blueprint.
+                rate_limits (Sequence[RateLimitRule]): Rate-limit rules inherited by routes in the blueprint.
+                cors (CORSConfig | Literal[False] | None): CORS configuration inherited by routes, or `False` to disable inherited
+                    CORS.
         """
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError("Blueprint names must be Python identifiers without dots.")
         if url_prefix:
             _validate_route(url_prefix, None)
             if url_prefix.endswith("/") or "<" in url_prefix or "?" in url_prefix or "#" in url_prefix:
-                raise ValueError(
-                    "Blueprint prefixes must be literal paths without a trailing slash, query or fragment."
-                )
+                raise ValueError("Blueprint prefixes must be literal paths without a trailing slash, query or fragment.")
         if not backend.strip():
             raise ValueError("Blueprint backend must not be empty.")
         if cors is not None and cors is not False and not isinstance(cors, CORSConfig):
@@ -99,7 +98,7 @@ class Blueprint(RouteDecorators):
     ) -> None:
         """
         Register an endpoint route with the blueprint.
-        
+
         Parameters:
             path (str): The route path.
             endpoint (Endpoint): The callable that handles the route.
@@ -130,9 +129,9 @@ class Blueprint(RouteDecorators):
     def register_blueprint(self, blueprint: Blueprint) -> None:
         """
         Register a nested blueprint.
-        
+
         Parameters:
-        	blueprint (Blueprint): The blueprint to register.
+                blueprint (Blueprint): The blueprint to register.
         """
         if not isinstance(blueprint, Blueprint):
             raise TypeError("Expected a Blueprint.")
@@ -142,16 +141,14 @@ class Blueprint(RouteDecorators):
 
     def _contains(self, target: Blueprint) -> bool:
         """Determine whether this blueprint contains the target blueprint, directly or through nested registrations.
-        
+
         Parameters:
-        	target (Blueprint): The blueprint to search for.
-        
+                target (Blueprint): The blueprint to search for.
+
         Returns:
-        	bool: `true` if the target is this blueprint or a nested blueprint, `false` otherwise.
+                bool: `true` if the target is this blueprint or a nested blueprint, `false` otherwise.
         """
-        return self is target or any(
-            item._contains(target) for item in self._registrations if isinstance(item, Blueprint)
-        )
+        return self is target or any(item._contains(target) for item in self._registrations if isinstance(item, Blueprint))
 
     def _register(
         self,
@@ -167,16 +164,16 @@ class Blueprint(RouteDecorators):
     ) -> None:
         """
         Register this blueprint and its nested blueprints with an application.
-        
+
         Parameters:
-        	app (Flasgo): The application receiving the routes.
-        	prefix (str): URL prefix inherited from parent blueprints.
-        	namespace (str): Route-name namespace inherited from parent blueprints.
-        	permissions (tuple[PermissionLike, ...]): Permissions inherited from parent blueprints.
-        	backend (str | None): Authentication backend inherited from parent blueprints.
-        	dependencies (tuple[Depends, ...]): Dependencies inherited from parent blueprints.
-        	rate_limits (tuple[RateLimitRule, ...]): Rate-limit rules inherited from parent blueprints.
-        	cors (CORSConfig | Literal[False] | None): CORS configuration inherited from parent blueprints.
+                app (Flasgo): The application receiving the routes.
+                prefix (str): URL prefix inherited from parent blueprints.
+                namespace (str): Route-name namespace inherited from parent blueprints.
+                permissions (tuple[PermissionLike, ...]): Permissions inherited from parent blueprints.
+                backend (str | None): Authentication backend inherited from parent blueprints.
+                dependencies (tuple[Depends, ...]): Dependencies inherited from parent blueprints.
+                rate_limits (tuple[RateLimitRule, ...]): Rate-limit rules inherited from parent blueprints.
+                cors (CORSConfig | Literal[False] | None): CORS configuration inherited from parent blueprints.
         """
         if permissions and self.permissions and backend != self.backend:
             raise ValueError("Nested protected blueprints must use the same authentication backend.")
@@ -230,13 +227,14 @@ class Blueprint(RouteDecorators):
 def _copy_endpoint(endpoint: Endpoint) -> Endpoint:
     """
     Create a callable wrapper that preserves an endpoint's metadata while forwarding keyword arguments to it.
-    
+
     Parameters:
-    	endpoint (Endpoint): The endpoint to wrap.
-    
+        endpoint (Endpoint): The endpoint to wrap.
+
     Returns:
-    	Endpoint: A wrapped endpoint retaining the original endpoint's metadata.
+        Endpoint: A wrapped endpoint retaining the original endpoint's metadata.
     """
+
     @wraps(endpoint, updated=())
     def registered(**kwargs: Any) -> Any:
         return endpoint(**kwargs)
@@ -247,29 +245,29 @@ def _copy_endpoint(endpoint: Endpoint) -> Endpoint:
 def build_url(path: str, values: dict[str, Any]) -> str:
     """
     Build a safe relative URL by substituting validated route parameters and encoding remaining values as query parameters.
-    
+
     Parameters:
-    	path (str): Route path containing optional parameter placeholders.
-    	values (dict[str, Any]): Values for route parameters and query parameters.
-    
+        path (str): Route path containing optional parameter placeholders.
+        values (dict[str, Any]): Values for route parameters and query parameters.
+
     Returns:
-    	str: The resulting relative URL.
-    
+        str: The resulting relative URL.
+
     Raises:
-    	ValueError: If a required parameter is missing, invalid, or unsafe, or if the resulting URL is not a safe relative URL.
+        ValueError: If a required parameter is missing, invalid, or unsafe, or if the resulting URL is not a safe relative URL.
     """
     values = dict(values)
 
     def substitute(match: re.Match[str]) -> str:
         """
         Substitute a validated URL parameter in a route path.
-        
+
         Parameters:
             match (re.Match[str]): The matched route parameter.
-        
+
         Returns:
             str: The URL-encoded parameter value.
-        
+
         Raises:
             ValueError: If the parameter is missing, invalid, or contains unsafe path components.
         """

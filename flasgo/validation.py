@@ -139,9 +139,7 @@ def validate_form_model(
 ) -> object:
     active_budget = budget or ValidationBudget()
     if not is_dataclass(annotation) or not isinstance(annotation, type):
-        raise RequestValidationError(
-            (ValidationIssue(("form",), "model_required", "Form() requires a dataclass model."),)
-        )
+        raise RequestValidationError((ValidationIssue(("form",), "model_required", "Form() requires a dataclass model."),))
     values: dict[str, object] = {}
     issues: list[ValidationIssue] = []
     hints = _model_hints(annotation)
@@ -238,11 +236,7 @@ def contains_uploaded_file(annotation: object, *, _seen: set[type[Any]] | None =
             return False
         seen.add(annotation)
         hints = _model_hints(annotation)
-        return any(
-            contains_uploaded_file(hints.get(item.name, item.type), _seen=seen)
-            for item in fields(annotation)
-            if item.init
-        )
+        return any(contains_uploaded_file(hints.get(item.name, item.type), _seen=seen) for item in fields(annotation) if item.init)
     return any(contains_uploaded_file(item, _seen=_seen) for item in get_args(annotation))
 
 
@@ -321,13 +315,13 @@ class SchemaRegistry:
 
     def _dataclass_schema(self, model: type[Any], *, input_model: bool) -> dict[str, Any]:
         """Build a reusable object schema for a dataclass model.
-        
+
         Parameters:
-        	model (type[Any]): The dataclass type to represent.
-        	input_model (bool): Whether to generate an input schema that excludes non-initializable fields.
-        
+                model (type[Any]): The dataclass type to represent.
+                input_model (bool): Whether to generate an input schema that excludes non-initializable fields.
+
         Returns:
-        	dict[str, Any]: A reference to the generated schema component.
+                dict[str, Any]: A reference to the generated schema component.
         """
         key = (model, input_model)
         name = self._component_name(model, input_model=input_model)

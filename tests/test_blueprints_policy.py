@@ -27,12 +27,12 @@ def test_nested_blueprints_preserve_auth_dependencies_and_url_generation() -> No
     @reports.get("/<int:report_id>", name="detail")
     def report(report_id: int) -> dict:
         """Return a report object containing the specified identifier.
-        
+
         Parameters:
-        	report_id (int): The report identifier
-        
+                report_id (int): The report identifier
+
         Returns:
-        	dict: A mapping containing the report identifier
+                dict: A mapping containing the report identifier
         """
         return {"id": report_id}
 
@@ -56,7 +56,7 @@ def test_blueprint_registration_is_atomic_and_does_not_modify_original_endpoint(
     @group.get("/first")
     def first() -> str:
         """Provide the string "first".
-        
+
         Returns:
             str: The string "first".
         """
@@ -100,7 +100,7 @@ def test_url_for_rejects_ambiguous_path_values(value: str) -> None:
 def test_policy_omits_secrets_and_detects_permission_change() -> None:
     """
     Verify that policy snapshots omit secrets and detect authorization changes.
-    
+
     The test also confirms that unsupported policy snapshot schemas raise a `ValueError`.
     """
     app = Flasgo(settings={"SECRET_KEY": "do-not-export-this-secret-value-123456789"})
@@ -110,9 +110,9 @@ def test_policy_omits_secrets_and_detects_permission_change() -> None:
     def private() -> str:
         """
         Provide the private route response.
-        
+
         Returns:
-        	str: The string "ok".
+                str: The string "ok".
         """
         return "ok"
 

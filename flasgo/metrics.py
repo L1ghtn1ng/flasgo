@@ -5,9 +5,7 @@ from importlib.metadata import PackageNotFoundError, version
 _HTTP_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10)
 _HTTP_RESPONSE_SIZE_BUCKETS = (64, 256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576, 4_194_304)
 _WEBSOCKET_DURATION_BUCKETS = (1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200, 21_600, 43_200, 86_400)
-_KNOWN_HTTP_METHODS = frozenset(
-    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"}
-)
+_KNOWN_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 
 
 def _framework_version() -> str:
@@ -56,9 +54,7 @@ class Metrics:
                 ProcessCollector,
             )
         except ImportError as exc:
-            raise RuntimeError(
-                "Metrics require the optional dependency. Install Flasgo with `flasgo[metrics]`."
-            ) from exc
+            raise RuntimeError("Metrics require the optional dependency. Install Flasgo with `flasgo[metrics]`.") from exc
 
         self.registry = CollectorRegistry()
         # A private registry avoids collisions between multiple Flasgo apps, but it

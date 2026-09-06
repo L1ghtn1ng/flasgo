@@ -71,7 +71,7 @@ class Depends:
 
     def __post_init__(self) -> None:
         """Validate the dependency provider, scope, and cache configuration.
-        
+
         Raises:
             TypeError: If the provider is not callable or `use_cache` is not a boolean.
             ValueError: If the scope is not `"function"` or `"request"`.
@@ -116,14 +116,14 @@ def compile_endpoint_plan(
     dependencies: Sequence[Depends] = (),
 ) -> EndpointPlan:
     """Compile an endpoint and its dependency graph into a stable parameter-binding plan.
-    
+
     Parameters:
-    	endpoint (Endpoint): The endpoint callable to compile.
-    	route_path (str): The route pattern used to identify path parameters.
-    	dependencies (Sequence[Depends]): Route-level dependency markers to include in the plan.
-    
+        endpoint (Endpoint): The endpoint callable to compile.
+        route_path (str): The route pattern used to identify path parameters.
+        dependencies (Sequence[Depends]): Route-level dependency markers to include in the plan.
+
     Returns:
-    	EndpointPlan: The compiled endpoint plan.
+        EndpointPlan: The compiled endpoint plan.
     """
 
     path_names = {match.group("name") for match in _PATH_PARAM_PATTERN.finditer(route_path)}
@@ -162,15 +162,15 @@ def _compile_callable(
 ) -> EndpointPlan:
     """
     Compile a callable into an endpoint plan with validated parameter bindings and dependencies.
-    
+
     Parameters:
         endpoint (Provider): Callable whose signature and annotations are compiled.
         path_names (set[str]): Route parameter names that must be bound from the path.
         stack (tuple[Provider, ...]): Providers currently being compiled for cycle detection.
-    
+
     Returns:
         EndpointPlan: The compiled endpoint plan, including parameter bindings and return annotation.
-    
+
     Raises:
         TypeError: If the callable has unsupported parameters, invalid annotations or markers,
             an invalid dependency, or a dependency cycle.
@@ -191,9 +191,7 @@ def _compile_callable(
     bindings: list[ParameterBinding] = []
     for parameter in signature.parameters.values():
         if parameter.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL}:
-            raise TypeError(
-                f"Endpoint parameter {parameter.name!r} on {_callable_name(endpoint)!r} must be keyword-compatible."
-            )
+            raise TypeError(f"Endpoint parameter {parameter.name!r} on {_callable_name(endpoint)!r} must be keyword-compatible.")
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             continue
         if isinstance(parameter.default, (Body, Query, Header, Cookie, Form, Depends)):
@@ -206,8 +204,7 @@ def _compile_callable(
         annotation, marker = _split_marker(annotation, endpoint=endpoint, parameter=parameter.name)
         if marker is not None and _contains_forward_ref(annotation):
             raise TypeError(
-                f"Could not resolve the marked annotation for parameter {parameter.name!r} "
-                f"on {_callable_name(endpoint)!r}."
+                f"Could not resolve the marked annotation for parameter {parameter.name!r} on {_callable_name(endpoint)!r}."
             )
         default = parameter.default
 
@@ -255,9 +252,7 @@ def _compile_callable(
             continue
         if isinstance(marker, Form):
             if not is_dataclass(annotation) or not isinstance(annotation, type):
-                raise TypeError(
-                    f"Form parameter {parameter.name!r} on {_callable_name(endpoint)!r} must use a dataclass model."
-                )
+                raise TypeError(f"Form parameter {parameter.name!r} on {_callable_name(endpoint)!r} must use a dataclass model.")
             bindings.append(ParameterBinding(parameter.name, annotation, "form", default, marker=marker))
             continue
 
@@ -288,13 +283,13 @@ def _contains_forward_ref(annotation: object) -> bool:
 def _body_sources(plan: EndpointPlan, *, seen: set[int]) -> set[tuple[int, str, str]]:
     """
     Collect body and form parameter sources from an endpoint plan and its dependencies.
-    
+
     Parameters:
-    	plan (EndpointPlan): The endpoint plan to inspect.
-    	seen (set[int]): Endpoint identifiers already visited during traversal.
-    
+        plan (EndpointPlan): The endpoint plan to inspect.
+        seen (set[int]): Endpoint identifiers already visited during traversal.
+
     Returns:
-    	set[tuple[int, str, str]]: Body and form sources identified by endpoint, source type, and parameter name.
+        set[tuple[int, str, str]]: Body and form sources identified by endpoint, source type, and parameter name.
     """
     endpoint_id = id(plan.endpoint)
     if endpoint_id in seen:
@@ -374,11 +369,11 @@ def _validate_dependency_scopes(
 ) -> None:
     """
     Validate dependency scope nesting throughout an endpoint plan.
-    
+
     Parameters:
         plan (EndpointPlan): The dependency plan to validate.
         parent_scope (str | None): Scope inherited from the parent dependency.
-    
+
     Raises:
         TypeError: If a request-scoped dependency depends on a function-scoped dependency.
     """
