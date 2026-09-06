@@ -406,7 +406,10 @@ def test_atomic_write_replaces_symlink_entry_without_following_target(tmp_path: 
     assert output.read_text(encoding="utf-8") == "generated"
 
 
-def test_check_reports_duplicate_routes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_check_fails_when_app_registration_rejects_duplicate_routes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     app_file = tmp_path / "bad_app.py"
     app_file.write_text(
         "\n".join(
@@ -423,7 +426,7 @@ def test_check_reports_duplicate_routes(tmp_path: Path, capsys: pytest.CaptureFi
     )
 
     assert cli_module.main(["check", str(app_file)]) == 1
-    assert "duplicate HTTP route" in capsys.readouterr().err
+    assert "conflicts with an existing route pattern" in capsys.readouterr().err
 
 
 def test_db_commands_delegate_to_alembic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -102,6 +102,8 @@ Flasgo ships with security features enabled by default, but deployment still mat
   `MAX_FORM_FIELDS`, and the validation depth, work, and issue budgets enabled. Mirror appropriate limits at the
   production server and network edge. Treat `UploadedFile.filename` as client metadata even though Flasgo removes
   path components, control characters, surrounding whitespace, and dot prefixes or suffixes.
+- Keep finite stream send, idle, duration, and cleanup timeouts. Cleanup deadlines bound request teardown when an
+  application producer suppresses cancellation; application code remains responsible for stopping its detached work.
 - Trust incoming request IDs only when a trusted proxy replaces client-supplied values.
 - For `flasgo[jwt]`, use a dedicated random secret of at least 32 bytes, rotate it through a controlled deployment,
   validate a service-specific issuer and audience, keep tokens short-lived, and transmit them only in the

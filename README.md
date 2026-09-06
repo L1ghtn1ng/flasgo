@@ -5,7 +5,7 @@ Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
 - Django security defaults: CSRF protection, host validation, secure headers, signed sessions.
 
-The current framework release is `0.9.0`.
+The current framework release is `0.9.1`.
 
 ## Project goals
 
@@ -123,7 +123,8 @@ uv run uvicorn app:app --reload --host 127.0.0.1 --port 8000
 `app.run(...)` and `flasgo run` use Uvicorn's H11 implementation with proxy-header trust disabled, bounded HTTP
 request heads and WebSocket queues/messages, lifespan enabled, and per-message compression disabled. Flasgo also
 enforces `MAX_REQUEST_BODY_BYTES`, `MAX_REQUEST_HEAD_BYTES`, and `REQUEST_READ_TIMEOUT_SECONDS` inside the app so
-those limits remain active under another ASGI server. The built-in runner is intended for local development;
+those limits remain active under another ASGI server. HTTP requests and WebSocket upgrades exceeding the head limit
+are rejected before telemetry, routing, or session storage. The built-in runner is intended for local development;
 configure a production ASGI process explicitly for deployment.
 
 ## WebSockets, lifespan, and background tasks
@@ -131,8 +132,8 @@ configure a production ASGI process explicitly for deployment.
 WebSocket routes use the same path converters, authorization decorators, and `@app.ratelimit(...)` rules as HTTP
 routes. Flasgo checks the `Host` and exact `Origin` before acceptance, rejects missing origins by default, limits
 messages to 64 KiB and 120 messages per minute per connection, and never writes modified sessions back through a
-WebSocket handshake. Authentication failures and default per-IP route limits are enforced before an authentication
-backend runs.
+WebSocket handshake. Host, Origin, and default per-IP route limits are enforced before session storage or an
+authentication backend is accessed.
 
 ```python
 from collections.abc import AsyncGenerator
@@ -389,6 +390,9 @@ at route registration or stream construction.
 The same per-route endpoint plan drives runtime binding and OpenAPI generation, so request models, aliases, validation
 responses, and dependency-provided query fields stay aligned. Duplicate wire parameters merge requiredness when their
 schemas agree; conflicting schemas are rejected instead of producing an inaccurate contract.
+Literal routes and narrower converters take precedence over broader matches; equally specific protected routes take
+precedence over public ones. Equivalent patterns must reuse parameter names across disjoint methods, and overlapping
+methods are rejected at registration so runtime dispatch, authorization, and OpenAPI cannot disagree.
 
 ## Developer commands
 
@@ -592,7 +596,8 @@ The current development branch adds the following opt-in APIs. The website guide
 - `response_model=` and `ResponseValidationError`: opt-in response validation and recursive public-field filtering
   using dataclasses; existing untyped responses keep their behavior.
 - `StreamingResponse`, `EventSourceResponse`, `ServerSentEvent`, and `NDJSONResponse`: bounded async streaming,
-  safe JSON event framing, disconnect cleanup, and incremental tests through `TestClient.astream`.
+  safe JSON event framing, deadline-bounded disconnect and producer cleanup, and incremental tests through
+  `TestClient.astream`.
 - `RedisStore`, `RedisRateLimiter`, `ServerSideSessions`, `MemoryStore`, and `StoreUnavailable`: optional shared
   route quotas and revocable server-side sessions, with atomic updates and explicit failure behavior.
   Install `flasgo[redis]` for the Redis/Valkey client adapter. Signed-cookie sessions remain the default.

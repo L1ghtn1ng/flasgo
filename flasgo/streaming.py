@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import threading
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,10 @@ from .contracts import project_response, validate_response_model
 from .response import Response
 from .types import Receive, Send
 from .validation import ValidationBudget
+
+_MAX_ACTIVE_CLEANUPS = 128
+_active_cleanups = 0
+_active_cleanups_lock = threading.Lock()
 
 
 def _positive_timeout(value: float, name: str) -> None:
@@ -41,6 +46,7 @@ class StreamingResponse(Response):
         send_timeout: float = 10,
         idle_timeout: float = 60,
         max_duration: float = 3600,
+        cleanup_timeout: float = 10,
     ) -> None:
         """
         Initialize a streaming response with chunk and lifecycle limits.
@@ -51,6 +57,7 @@ class StreamingResponse(Response):
                 send_timeout (float): Maximum time allowed for sending a message.
                 idle_timeout (float): Maximum time allowed while waiting for the next chunk.
                 max_duration (float): Maximum total streaming duration.
+                cleanup_timeout (float): Maximum time to await producer and iterator cleanup.
 
         Raises:
                 TypeError: If `content` is not an asynchronous iterable.
@@ -64,6 +71,7 @@ class StreamingResponse(Response):
             ("send_timeout", send_timeout),
             ("idle_timeout", idle_timeout),
             ("max_duration", max_duration),
+            ("cleanup_timeout", cleanup_timeout),
         ):
             _positive_timeout(value, name)
         self.iterator = aiter(content)
@@ -71,6 +79,7 @@ class StreamingResponse(Response):
         self.send_timeout = send_timeout
         self.idle_timeout = idle_timeout
         self.max_duration = max_duration
+        self.cleanup_timeout = cleanup_timeout
         self.receive: Receive | None = None
         self._used = False
         self._closed = False
@@ -95,14 +104,42 @@ class StreamingResponse(Response):
         if self._closed:
             return
         self._closed = True
+
+        async def close_iterators() -> None:
+            try:
+                close = getattr(self.iterator, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                source_close = getattr(self._source, "aclose", None)
+                if source_close is not None:
+                    await source_close()
+
+        if not _reserve_cleanup_slot():
+            self._metrics_outcome = "cleanup_timeout"
+            return
         try:
-            close = getattr(self.iterator, "aclose", None)
-            if close is not None:
-                await close()
-        finally:
-            source_close = getattr(self._source, "aclose", None)
-            if source_close is not None:
-                await source_close()
+            cleanup = asyncio.create_task(close_iterators())
+        except BaseException:
+            _release_cleanup_slot()
+            raise
+        cleanup.add_done_callback(_cleanup_slot_done)
+        await self._await_cleanup(cleanup)
+
+    async def _await_cleanup(self, task: asyncio.Future[Any]) -> None:
+        """Await application cleanup for a bounded interval and safely detach resistant work."""
+        try:
+            done, _ = await asyncio.wait({task}, timeout=self.cleanup_timeout)
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(_consume_detached_cleanup_task)
+            raise
+        if task in done:
+            await task
+            return
+        self._metrics_outcome = "cleanup_timeout"
+        task.cancel()
+        task.add_done_callback(_consume_detached_cleanup_task)
 
     async def _send_message(self, send: Send, message: dict[str, Any]) -> None:
         """Send an ASGI message within the configured send timeout."""
@@ -215,7 +252,35 @@ class StreamingResponse(Response):
         finally:
             pump.cancel()
             disconnect.cancel()
-            await asyncio.gather(pump, disconnect, return_exceptions=True)
+            await self._await_cleanup(asyncio.gather(pump, disconnect, return_exceptions=True))
+
+
+def _consume_detached_cleanup_task(task: asyncio.Future[Any]) -> None:
+    """Consume the result when cancellation-resistant cleanup eventually finishes."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _reserve_cleanup_slot() -> bool:
+    """Reserve bounded process-wide capacity for application cleanup."""
+    global _active_cleanups
+    with _active_cleanups_lock:
+        if _active_cleanups >= _MAX_ACTIVE_CLEANUPS:
+            return False
+        _active_cleanups += 1
+        return True
+
+
+def _release_cleanup_slot() -> None:
+    """Release one application-cleanup capacity slot."""
+    global _active_cleanups
+    with _active_cleanups_lock:
+        _active_cleanups -= 1
+
+
+def _cleanup_slot_done(task: asyncio.Future[Any]) -> None:
+    """Release cleanup capacity after the task finishes."""
+    _release_cleanup_slot()
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +335,7 @@ class EventSourceResponse(StreamingResponse):
         send_timeout: float = 10,
         idle_timeout: float = 60,
         max_duration: float = 3600,
+        cleanup_timeout: float = 10,
         max_chunk_bytes: int = 65_536,
     ) -> None:
         """
@@ -283,6 +349,7 @@ class EventSourceResponse(StreamingResponse):
             send_timeout (float): Maximum time allowed for sending each ASGI message.
             idle_timeout (float): Maximum time allowed while waiting for streamed data.
             max_duration (float): Maximum response lifetime in seconds.
+            cleanup_timeout (float): Maximum time to await producer cleanup.
             max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
         """
         _positive_timeout(heartbeat, "heartbeat")
@@ -326,6 +393,7 @@ class EventSourceResponse(StreamingResponse):
             send_timeout=send_timeout,
             idle_timeout=idle_timeout,
             max_duration=max_duration,
+            cleanup_timeout=cleanup_timeout,
             max_chunk_bytes=max_chunk_bytes,
         )
         self._source = source
@@ -341,6 +409,7 @@ class NDJSONResponse(StreamingResponse):
         send_timeout: float = 10,
         idle_timeout: float = 60,
         max_duration: float = 3600,
+        cleanup_timeout: float = 10,
         max_chunk_bytes: int = 65_536,
     ) -> None:
         """
@@ -353,6 +422,7 @@ class NDJSONResponse(StreamingResponse):
             send_timeout (float): Maximum time allowed for sending each chunk.
             idle_timeout (float): Maximum time allowed between source items.
             max_duration (float): Maximum response streaming duration.
+            cleanup_timeout (float): Maximum time to await producer cleanup.
             max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
         """
         validate_response_model(item_model)
@@ -375,6 +445,7 @@ class NDJSONResponse(StreamingResponse):
             send_timeout=send_timeout,
             idle_timeout=idle_timeout,
             max_duration=max_duration,
+            cleanup_timeout=cleanup_timeout,
             max_chunk_bytes=max_chunk_bytes,
         )
         self._source = source

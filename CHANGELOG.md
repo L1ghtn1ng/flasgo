@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-06
+
 ### Added
 
 - Metrics for event-loop responsiveness, backend operation latency/outcomes, rejection reasons, internal failures,
@@ -10,6 +12,27 @@
   outcomes. Existing HTTP and background success/failure metric contracts remain intact.
 - Public `app.metrics_registry` access, authenticated collection/encoding in a worker thread, a detailed metrics
   reference, and a repeatable local overhead benchmark.
+
+### Changed
+
+- HTTP and WebSocket request-head limits now run at shared ASGI ingress before telemetry, routing, and session
+  storage. WebSocket Host, Origin, and client-IP route limits also run before session loading.
+- Route registration now rejects ambiguous duplicates and converter overlaps, keeps parameter names consistent across
+  methods, orders specific routes before broad routes, and prefers protected routes for equal-specificity matches.
+- Streaming responses now apply a separate cleanup deadline and a hard process-wide limit for cancellation-resistant
+  application cleanup.
+
+### Fixed
+
+- Boolean settings and security controls reject wrong-typed values during construction, loading, and later assignment.
+- Signed and server-side sessions, CSRF cookies, CSRF headers, Origin, and Referer processing reject ambiguous duplicate
+  wire values.
+- Failed handlers no longer commit their session mutations. Successful error handlers receive the pre-dispatch session
+  snapshot and may deliberately commit changes such as logout or revocation.
+- Response validation completes before session storage writes, preventing malformed responses from committing state.
+- Security-failure throttling uses bounded, amortized state and fails closed at capacity without evicting active
+  clients.
+- Routes with multiple greedy `path` converters are rejected before they can create expensive backtracking matches.
 
 ## [0.9.0] - 2026-09-06
 

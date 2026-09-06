@@ -225,10 +225,6 @@ def test_opentelemetry_does_not_export_rejected_host_values() -> None:
 def test_opentelemetry_excludes_route_templates_for_method_not_allowed_requests() -> None:
     app, exporter = _tracing_app(excluded_paths={"/reset/<token>"})
 
-    @app.get("/reset/<value>")
-    def generic_reset(value: str) -> str:
-        return value
-
     @app.get("/reset/<token>")
     def reset(token: str) -> str:
         return token

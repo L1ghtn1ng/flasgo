@@ -4,6 +4,7 @@ import ipaddress
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import get_type_hints
 from urllib.parse import urlsplit
 
 from .request import Request
@@ -129,6 +130,23 @@ class SecurityConfig:
 
     secret_key: str = field(default_factory=_default_secret_key)
 
+    def __setattr__(self, name: str, value: object) -> None:
+        """Reject wrong-typed boolean assignments throughout the configuration lifetime."""
+        annotation = type(self).__annotations__.get(name)
+        if annotation in {bool, "bool"} and not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool.")
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self) -> None:
+        """Reject wrong-typed booleans before they can disable a security control."""
+        self._validate_boolean_fields()
+
+    def _validate_boolean_fields(self) -> None:
+        """Validate boolean fields, including after a caller mutates an existing instance."""
+        for name, annotation in get_type_hints(type(self)).items():
+            if annotation is bool and not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool.")
+
 
 def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
     hostname = _host_header_hostname(host)
@@ -193,8 +211,8 @@ def ensure_csrf_cookie(
     session_token: str | None = None,
 ) -> None:
     if session_token is None:
-        session_token = request.cookies.get(config.session_cookie_name)
-    existing = request.cookies.get(config.csrf_cookie_name)
+        session_token = _single_request_cookie(request, config.session_cookie_name)
+    existing = _single_request_cookie(request, config.csrf_cookie_name)
     if existing and _csrf_token_is_valid(existing, config, session_token=session_token):
         return
     token = _build_csrf_token(config, session_token=session_token)
@@ -214,8 +232,9 @@ def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
         return True
     if config.csrf_check_origin and not _csrf_origin_is_valid(request, config):
         return False
-    cookie_token = request.cookies.get(config.csrf_cookie_name)
-    header_token = request.headers.get(config.csrf_header_name.lower())
+    cookie_token = _single_request_cookie(request, config.csrf_cookie_name)
+    header_values = request.header_values(config.csrf_header_name)
+    header_token = header_values[0] if len(header_values) == 1 else None
     if not cookie_token or not header_token:
         return False
     if not _constant_time_equal(cookie_token, header_token):
@@ -223,8 +242,13 @@ def csrf_is_valid(request: Request, config: SecurityConfig) -> bool:
     return _csrf_token_is_valid(
         cookie_token,
         config,
-        session_token=request.cookies.get(config.session_cookie_name),
+        session_token=_single_request_cookie(request, config.session_cookie_name),
     )
+
+
+def _single_request_cookie(request: Request, name: str) -> str | None:
+    values = request.cookie_values(name)
+    return values[0] if len(values) == 1 else None
 
 
 def _build_csrf_token(config: SecurityConfig, *, session_token: str | None) -> str:
@@ -269,12 +293,14 @@ def apply_security_headers(response: Response, config: SecurityConfig) -> None:
 
 
 def _csrf_origin_is_valid(request: Request, config: SecurityConfig) -> bool:
-    origin = request.headers.get("origin")
-    if origin:
-        return _origin_matches_request(origin, request, config)
-    referer = request.headers.get("referer")
-    if referer:
-        return _origin_matches_request(referer, request, config)
+    origins = request.header_values("origin")
+    referers = request.header_values("referer")
+    if len(origins) > 1 or len(referers) > 1:
+        return False
+    if origins:
+        return _origin_matches_request(origins[0], request, config)
+    if referers:
+        return _origin_matches_request(referers[0], request, config)
     return not config.csrf_require_origin
 
 

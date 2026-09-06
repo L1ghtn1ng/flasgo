@@ -173,7 +173,11 @@ def _check_command(args: argparse.Namespace) -> int:
     Returns:
         int: 1 if validation issues or policy changes are found, otherwise 0.
     """
-    app = load_app(args.target, app_name=args.app)
+    try:
+        app = load_app(args.target, app_name=args.app)
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     errors: list[str] = []
     seen_http: set[tuple[str, str]] = set()
     seen_ws: set[str] = set()
