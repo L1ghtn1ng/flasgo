@@ -320,6 +320,15 @@ class SchemaRegistry:
         return {}
 
     def _dataclass_schema(self, model: type[Any], *, input_model: bool) -> dict[str, Any]:
+        """Build a reusable object schema for a dataclass model.
+        
+        Parameters:
+        	model (type[Any]): The dataclass type to represent.
+        	input_model (bool): Whether to generate an input schema that excludes non-initializable fields.
+        
+        Returns:
+        	dict[str, Any]: A reference to the generated schema component.
+        """
         key = (model, input_model)
         name = self._component_name(model, input_model=input_model)
         if key in self._building or name in self.schemas:

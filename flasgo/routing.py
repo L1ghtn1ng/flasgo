@@ -62,6 +62,16 @@ class Route:
         self._regex, self._casts = _compile_path(self.raw_path)
 
     def match(self, path: str, method: str) -> MatchResult | None:
+        """
+        Match an HTTP request path and method to this route.
+        
+        Parameters:
+            path (str): The request path to match.
+            method (str): The HTTP method to match.
+        
+        Returns:
+            MatchResult | None: Route metadata and converted path parameters when matched; `None` otherwise.
+        """
         if method.upper() not in self.methods:
             return None
         params = _match_path(path, self._regex, self._casts)
@@ -81,6 +91,14 @@ class Route:
     def path_matches(self, path: str) -> bool:
         # Cast-aware: a value the converter cannot cast (for example an integer above
         # the interpreter digit limit) does not match the route at all.
+        """Determine whether a path matches the route and its parameter converters.
+        
+        Parameters:
+        	path (str): The path to check.
+        
+        Returns:
+        	bool: `True` if the path matches and all parameters can be converted, `False` otherwise.
+        """
         return _match_path(path, self._regex, self._casts) is not None
 
 

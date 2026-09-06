@@ -38,6 +38,12 @@ class _DependencyStack(AsyncExitStack):
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> bool:
+        """
+        Prevent dependency providers from suppressing application exceptions.
+        
+        Returns:
+        	bool: Always `False`; raises `RuntimeError` if an exception was suppressed by a dependency provider.
+        """
         if await super().__aexit__(exc_type, exc, traceback):
             raise RuntimeError("Dependency providers must not suppress application exceptions.")
         return False
@@ -47,12 +53,28 @@ class DependencyContext:
     """Own request resources and a snapshot of context-local testing overrides."""
 
     def __init__(self, overrides: Mapping[Provider, Provider] | None = None) -> None:
+        """
+        Initialize dependency resource stacks, provider overrides, and resolution tracking.
+        
+        Parameters:
+        	overrides (Mapping[Provider, Provider] | None): Optional provider replacements used during dependency resolution.
+        """
         self.function_stack = _DependencyStack()
         self.request_stack = _DependencyStack()
         self.overrides = dict(overrides or {})
         self.resolving: set[tuple[int, str]] = set()
 
     async def enter(self, result: Any, marker: Depends) -> Any:
+        """
+        Register a dependency result with the appropriate resource scope.
+        
+        Parameters:
+            result (Any): The dependency result, which may be a synchronous or asynchronous generator, awaitable, or regular value.
+            marker (Depends): Dependency metadata specifying the resource scope.
+        
+        Returns:
+            Any: The resolved dependency value.
+        """
         stack = self.function_stack if marker.scope == "function" else self.request_stack
         if inspect.isasyncgen(result):
             return await stack.enter_async_context(asynccontextmanager(lambda: result)())
@@ -61,6 +83,7 @@ class DependencyContext:
         return await result if inspect.isawaitable(result) else result
 
     async def close_request(self, exc: BaseException | None = None) -> None:
+        """Close all request-scoped dependency resources."""
         await self.request_stack.__aexit__(type(exc) if exc else None, exc, exc.__traceback__ if exc else None)
 
 
@@ -69,6 +92,15 @@ async def resolve_endpoint_arguments(
     request: Request,
     path_params: dict[str, Any],
 ) -> dict[str, Any]:
+    """
+    Resolve the arguments required to invoke an endpoint.
+    
+    Parameters:
+        path_params (dict[str, Any]): Values captured from the request path.
+    
+    Returns:
+        dict[str, Any]: Resolved endpoint argument values.
+    """
     cache: dict[tuple[int, str], object] = {}
     body_cache: dict[str, object] = {}
     budget = ValidationBudget(
@@ -95,6 +127,25 @@ async def _resolve_plan(
     body_cache: dict[str, object],
     budget: ValidationBudget,
 ) -> dict[str, Any]:
+    """
+    Resolve dependencies and request-bound values for an endpoint plan.
+    
+    Parameters:
+        plan (EndpointPlan): Endpoint dependency and parameter bindings to resolve.
+        request (Request): Incoming request providing bound values and dependency context.
+        path_params (dict[str, Any]): Values captured from the request path.
+        cache (dict[tuple[int, str], object]): Cache for scoped dependency results.
+        body_cache (dict[str, object]): Cache for parsed request body and form data.
+        budget (ValidationBudget): Limits for collecting validation issues.
+    
+    Returns:
+        dict[str, Any]: Resolved values for the endpoint's non-dependency bindings.
+    
+    Raises:
+        RequestValidationError: If request or dependency values fail validation.
+        FormValidationError: If form data is invalid.
+        RuntimeError: If dependency resolution lacks a context, encounters a cycle, or uses an unknown binding source.
+    """
     resolved: dict[str, Any] = {}
     issues: list[ValidationIssue] = []
     for index, binding in enumerate((*plan.dependencies, *plan.bindings)):

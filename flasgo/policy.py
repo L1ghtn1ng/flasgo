@@ -18,10 +18,24 @@ class PolicyIssue:
     severity: str = "warning"
 
     def to_dict(self) -> dict[str, str]:
+        """
+        Convert the policy issue to a dictionary.
+        
+        Returns:
+        	dict[str, str]: The issue code, message, and severity.
+        """
         return asdict(self)
 
 
 def _permission(permission: object) -> dict[str, Any]:
+    """Serialize a permission declaration for inclusion in a policy snapshot.
+    
+    Parameters:
+    	permission (object): Permission declaration to serialize.
+    
+    Returns:
+    	dict[str, Any]: Serialized permission metadata, including its kind and any applicable configuration.
+    """
     if type(permission) is HasScope:
         return {"kind": "scope", "scope": permission.scope}
     if type(permission) is IsAuthenticated:
@@ -34,6 +48,15 @@ def _permission(permission: object) -> dict[str, Any]:
 
 
 def _response_schema(model: object) -> dict[str, Any] | None:
+    """
+    Build a response schema representation for a configured model.
+    
+    Parameters:
+    	model (object): The model used to generate the response schema.
+    
+    Returns:
+    	dict[str, Any] | None: A dictionary containing the schema and registered components, or `None` when no model is configured.
+    """
     if model is None:
         return None
     registry = SchemaRegistry()
@@ -42,7 +65,15 @@ def _response_schema(model: object) -> dict[str, Any] | None:
 
 
 def policy_snapshot(app: Flasgo) -> dict[str, Any]:
-    """Describe configured framework controls without exporting secret values."""
+    """
+    Create a deterministic, schema-versioned snapshot of the application's framework security configuration.
+    
+    The snapshot includes global controls, internal endpoint settings, HTTP and WebSocket routes, authentication and permission declarations, CSRF and CORS settings, rate limits, and response contracts. Secret values are excluded; custom authorization and middleware require application review.
+    
+    Returns:
+        dict[str, Any]: A policy snapshot containing the schema version, security controls,
+        internal endpoints, and indexed route configuration.
+    """
     security = app.security
     routes = []
     for protocol, collection in (("http", app._routes), ("websocket", app._websocket_routes)):
@@ -140,6 +171,15 @@ def policy_snapshot(app: Flasgo) -> dict[str, Any]:
 
 
 def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
+    """
+    Identify deployment configuration issues and routes with inconsistent access declarations.
+    
+    Parameters:
+    	app (Flasgo): The application whose security and route configuration is evaluated.
+    
+    Returns:
+    	list[PolicyIssue]: Detected deployment and route access policy issues.
+    """
     security = app.security
     checks = (
         (app.settings.DEBUG, "FG001", "DEBUG is enabled."),
@@ -195,6 +235,19 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
 
 
 def compare_policy(before: object, after: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Compare two version-1 policy snapshots and identify changes to controls, internal endpoints, and routes.
+    
+    Parameters:
+    	before (object): The earlier policy snapshot to validate and compare.
+    	after (dict[str, Any]): The later policy snapshot.
+    
+    Returns:
+    	list[dict[str, Any]]: Change records containing the affected section and its values before and after the change.
+    
+    Raises:
+    	ValueError: If the earlier snapshot is not a version-1 policy snapshot or the snapshot structure is invalid.
+    """
     if not isinstance(before, dict) or type(before.get("schema_version")) is not int or before["schema_version"] != 1:
         raise ValueError("Expected a Flasgo policy snapshot with schema_version=1.")
     if set(before) != set(after) or not isinstance(before.get("routes"), list):
@@ -215,6 +268,18 @@ def compare_policy(before: object, after: dict[str, Any]) -> list[dict[str, Any]
 
 
 def _index_routes(routes: list[Any]) -> dict[str, dict[str, Any]]:
+    """
+    Validate and index policy snapshot routes by protocol, path, and methods.
+    
+    Parameters:
+    	routes (list[Any]): Route entries from a policy snapshot.
+    
+    Returns:
+    	dict[str, dict[str, Any]]: Routes indexed by a serialized protocol, path, and sorted-methods key.
+    
+    Raises:
+    	ValueError: If a route is malformed, uses an unsupported protocol or non-string method, or duplicates another route.
+    """
     import json
 
     indexed = {}

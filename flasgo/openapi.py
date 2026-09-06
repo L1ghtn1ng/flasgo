@@ -90,6 +90,23 @@ def _build_operation(
     csrf_enabled: bool,
     csrf_safe_methods: Collection[str],
 ) -> tuple[dict[str, Any], str | None]:
+    """
+    Build an OpenAPI operation definition for a route and HTTP method.
+    
+    Parameters:
+    	route (Route): Route whose operation is being described.
+    	plan (EndpointPlan): Endpoint plan containing request bindings and response annotations.
+    	method (str): HTTP method for the operation.
+    	known_operation_ids (set[str]): Operation IDs already assigned, used to ensure uniqueness.
+    	registry (SchemaRegistry): Schema registry used to generate component references.
+    	route_auth (Mapping[object, object]): Authentication configuration associated with routes.
+    	auth_schemes (Mapping[str, dict[str, Any]]): Available OpenAPI security schemes.
+    	csrf_enabled (bool): Whether CSRF responses should be included for unsafe methods.
+    	csrf_safe_methods (Collection[str]): Methods exempt from CSRF protection.
+    
+    Returns:
+    	tuple[dict[str, Any], str | None]: The operation definition and the name of its security scheme, if authentication applies.
+    """
     parameters = _path_parameters(route.raw_path)
     bindings = walk_bindings(plan)
     parameters.extend(_bound_parameters(bindings, registry=registry))
@@ -195,6 +212,16 @@ def _request_body(binding: ParameterBinding, *, registry: SchemaRegistry) -> dic
 
 
 def _response_content(annotation: object, *, registry: SchemaRegistry) -> dict[str, Any]:
+    """
+    Map a response annotation to its OpenAPI content definition.
+    
+    Parameters:
+    	annotation (object): The response annotation to convert.
+    	registry (SchemaRegistry): The schema registry used for annotations requiring generated schemas.
+    
+    Returns:
+    	dict[str, Any]: An OpenAPI content mapping with the appropriate media type and schema.
+    """
     annotation = _strip_response_tuple(annotation)
     stream_types: dict[object, str] = {
         StreamingResponse: "application/octet-stream",

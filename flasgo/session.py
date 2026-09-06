@@ -39,14 +39,27 @@ class Session:
 
     @property
     def session_id(self) -> str | None:
+        """Expose the session's identifier.
+        
+        Returns:
+            str | None: The session identifier, or `None` if the session has no identifier.
+        """
         return self._session_id
 
     def regenerate(self) -> None:
-        """Rotate a server-side session ID on save, for example after login."""
+        """Marks the session for server-side ID rotation when it is saved."""
         self._rotate = True
         self.modified = True
 
     def __getitem__(self, key: str) -> Any:
+        """Retrieve a value from the session by key.
+        
+        Parameters:
+        	key (str): The key associated with the value.
+        
+        Returns:
+        	Any: The value stored for the key.
+        """
         return self.data[key]
 
     def __setitem__(self, key: str, value: Any) -> None:

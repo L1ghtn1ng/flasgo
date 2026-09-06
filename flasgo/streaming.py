@@ -14,6 +14,15 @@ from .validation import ValidationBudget
 
 
 def _positive_timeout(value: float, name: str) -> None:
+    """Validate that a timeout is finite, non-boolean, and greater than zero.
+    
+    Parameters:
+    	value (float): Timeout value to validate.
+    	name (str): Name used in the validation error message.
+    
+    Raises:
+    	ValueError: If the value is a boolean, non-finite, or less than or equal to zero.
+    """
     if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be finite and greater than zero.")
 
@@ -33,6 +42,20 @@ class StreamingResponse(Response):
         idle_timeout: float = 60,
         max_duration: float = 3600,
     ) -> None:
+        """
+        Initialize a streaming response with chunk and lifecycle limits.
+        
+        Parameters:
+        	content (AsyncIterable[bytes | str]): Source of byte or text chunks.
+        	max_chunk_bytes (int): Maximum allowed size of each chunk.
+        	send_timeout (float): Maximum time allowed for sending a message.
+        	idle_timeout (float): Maximum time allowed while waiting for the next chunk.
+        	max_duration (float): Maximum total streaming duration.
+        
+        Raises:
+        	TypeError: If `content` is not an asynchronous iterable.
+        	ValueError: If a chunk limit or timeout is invalid.
+        """
         if not isinstance(content, AsyncIterable):
             raise TypeError("StreamingResponse content must be an async iterable.")
         if isinstance(max_chunk_bytes, bool) or not isinstance(max_chunk_bytes, int) or max_chunk_bytes <= 0:
@@ -55,6 +78,7 @@ class StreamingResponse(Response):
         super().__init__(body=b"", status_code=status_code, headers=dict(headers or {}), content_type=content_type)
 
     def prepare(self) -> None:
+        """Prepare the streaming response headers and validate that the status permits a response body."""
         super().prepare()
         if self.status_code < 200 or self.status_code in {204, 304}:
             raise ValueError("Streaming responses require a status that permits a response body.")
@@ -62,6 +86,10 @@ class StreamingResponse(Response):
         self.headers.pop("transfer-encoding", None)
 
     async def aclose(self) -> None:
+        """Close the response's iterators once.
+        
+        Subsequent calls have no effect. Any available asynchronous close methods on the primary iterator and source iterator are awaited.
+        """
         if self._closed:
             return
         self._closed = True
@@ -75,10 +103,22 @@ class StreamingResponse(Response):
                 await source_close()
 
     async def _send_message(self, send: Send, message: dict[str, Any]) -> None:
+        """Send an ASGI message within the configured send timeout."""
         async with asyncio.timeout(self.send_timeout):
             await send(message)
 
     async def _pump(self, send: Send, head_only: bool) -> None:
+        """Send the streaming response through ASGI.
+        
+        Args:
+            send: ASGI callable used to transmit response messages.
+            head_only: Whether to send headers and the terminating body without content chunks.
+        
+        Raises:
+            TypeError: If a stream chunk is neither bytes nor str.
+            ValueError: If a stream chunk exceeds the configured size limit.
+            TimeoutError: If retrieving a chunk exceeds the idle timeout.
+        """
         try:
             self.prepare()
             headers = [(key.encode("latin-1"), value.encode("latin-1")) for key, value in self.headers.items()]
@@ -106,6 +146,11 @@ class StreamingResponse(Response):
             await self.aclose()
 
     async def _disconnect(self) -> None:
+        """Wait for the client to disconnect.
+        
+        Raises:
+        	RuntimeError: If an unexpected ASGI event is received.
+        """
         if self.receive is None:
             await asyncio.Event().wait()
             return
@@ -116,6 +161,16 @@ class StreamingResponse(Response):
             raise RuntimeError("Unexpected ASGI event after the request body was consumed.")
 
     async def send(self, send: Send, *, head_only: bool = False) -> None:
+        """
+        Send the streaming response through ASGI and monitor the client connection.
+        
+        Parameters:
+        	head_only (bool): Whether to send headers without response body data.
+        
+        Raises:
+        	RuntimeError: If the response has already been sent.
+        	ConnectionError: If the client disconnects before streaming completes.
+        """
         if self._used:
             raise RuntimeError("A streaming response can only be sent once.")
         self._used = True
@@ -143,6 +198,13 @@ class ServerSentEvent:
     retry: int | None = None
 
     def __post_init__(self) -> None:
+        """
+        Validate optional SSE event metadata and retry values.
+        
+        Raises:
+            ValueError: If event metadata contains invalid characters or exceeds 1024
+                characters, or if retry is not an integer from 0 through 2,147,483,647.
+        """
         for value in (self.event, self.id):
             if value is not None and (
                 not isinstance(value, str) or len(value) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in value)
@@ -155,6 +217,16 @@ class ServerSentEvent:
 
 
 def _json_payload(value: object, model: object) -> str:
+    """
+    Serialize a value as compact JSON after applying the specified response model.
+    
+    Parameters:
+        value (object): The value to project and serialize.
+        model (object): The response model used to project the value.
+    
+    Returns:
+        str: The projected value serialized as UTF-8-compatible JSON.
+    """
     payload = project_response(model, value, ValidationBudget())
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
@@ -174,11 +246,25 @@ class EventSourceResponse(StreamingResponse):
         max_duration: float = 3600,
         max_chunk_bytes: int = 65_536,
     ) -> None:
+        """
+        Initialize a server-sent events response.
+        
+        Parameters:
+            events (AsyncIterable[ServerSentEvent]): Source of events to encode and stream.
+            item_model (object): Model used to validate and serialize event data.
+            heartbeat (float): Interval in seconds between heartbeat comments when no event is available.
+            headers (Mapping[str, str] | None): Additional response headers.
+            send_timeout (float): Maximum time allowed for sending each ASGI message.
+            idle_timeout (float): Maximum time allowed while waiting for streamed data.
+            max_duration (float): Maximum response lifetime in seconds.
+            max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
+        """
         _positive_timeout(heartbeat, "heartbeat")
         validate_response_model(item_model)
         source = aiter(events)
 
         async def encoded() -> AsyncIterator[bytes]:
+            """Encode source events as UTF-8 server-sent event frames, yielding heartbeat comments while awaiting events."""
             pending: asyncio.Future[ServerSentEvent] | None = None
             try:
                 while True:
@@ -231,10 +317,28 @@ class NDJSONResponse(StreamingResponse):
         max_duration: float = 3600,
         max_chunk_bytes: int = 65_536,
     ) -> None:
+        """
+        Initialize a newline-delimited JSON streaming response.
+        
+        Parameters:
+            items (AsyncIterable[object]): Asynchronous source of items to serialize.
+            item_model (object): Model used to validate and serialize each item.
+            headers (Mapping[str, str] | None): Optional response headers.
+            send_timeout (float): Maximum time allowed for sending each chunk.
+            idle_timeout (float): Maximum time allowed between source items.
+            max_duration (float): Maximum response streaming duration.
+            max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
+        """
         validate_response_model(item_model)
         source = aiter(items)
 
         async def encoded() -> AsyncIterator[bytes]:
+            """
+            Serialize each source item as a UTF-8 encoded newline-delimited JSON record.
+            
+            Returns:
+                bytes: The serialized item followed by a newline.
+            """
             async for item in source:
                 yield (_json_payload(item, item_model) + "\n").encode("utf-8")
 

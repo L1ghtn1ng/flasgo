@@ -70,6 +70,12 @@ class Depends:
     scope: Literal["function", "request"] = "request"
 
     def __post_init__(self) -> None:
+        """Validate the dependency provider, scope, and cache configuration.
+        
+        Raises:
+            TypeError: If the provider is not callable or `use_cache` is not a boolean.
+            ValueError: If the scope is not `"function"` or `"request"`.
+        """
         if not callable(self.provider):
             raise TypeError("Depends provider must be callable.")
         if self.scope not in {"function", "request"}:
@@ -109,7 +115,16 @@ def compile_endpoint_plan(
     *,
     dependencies: Sequence[Depends] = (),
 ) -> EndpointPlan:
-    """Compile one endpoint and its dependency graph into a stable binding plan."""
+    """Compile an endpoint and its dependency graph into a stable parameter-binding plan.
+    
+    Parameters:
+    	endpoint (Endpoint): The endpoint callable to compile.
+    	route_path (str): The route pattern used to identify path parameters.
+    	dependencies (Sequence[Depends]): Route-level dependency markers to include in the plan.
+    
+    Returns:
+    	EndpointPlan: The compiled endpoint plan.
+    """
 
     path_names = {match.group("name") for match in _PATH_PARAM_PATTERN.finditer(route_path)}
     plan = _compile_callable(endpoint, path_names=path_names, stack=())
@@ -145,6 +160,21 @@ def _compile_callable(
     path_names: set[str],
     stack: tuple[Provider, ...],
 ) -> EndpointPlan:
+    """
+    Compile a callable into an endpoint plan with validated parameter bindings and dependencies.
+    
+    Parameters:
+        endpoint (Provider): Callable whose signature and annotations are compiled.
+        path_names (set[str]): Route parameter names that must be bound from the path.
+        stack (tuple[Provider, ...]): Providers currently being compiled for cycle detection.
+    
+    Returns:
+        EndpointPlan: The compiled endpoint plan, including parameter bindings and return annotation.
+    
+    Raises:
+        TypeError: If the callable has unsupported parameters, invalid annotations or markers,
+            an invalid dependency, or a dependency cycle.
+    """
     if any(endpoint is item for item in stack):
         chain = " -> ".join(getattr(item, "__name__", repr(item)) for item in (*stack, endpoint))
         raise TypeError(f"Dependency cycle detected: {chain}")
@@ -256,6 +286,16 @@ def _contains_forward_ref(annotation: object) -> bool:
 
 
 def _body_sources(plan: EndpointPlan, *, seen: set[int]) -> set[tuple[int, str, str]]:
+    """
+    Collect body and form parameter sources from an endpoint plan and its dependencies.
+    
+    Parameters:
+    	plan (EndpointPlan): The endpoint plan to inspect.
+    	seen (set[int]): Endpoint identifiers already visited during traversal.
+    
+    Returns:
+    	set[tuple[int, str, str]]: Body and form sources identified by endpoint, source type, and parameter name.
+    """
     endpoint_id = id(plan.endpoint)
     if endpoint_id in seen:
         return set()
@@ -319,6 +359,7 @@ def _reject_reserved_header(value: str) -> None:
 
 
 def _contains_collection(annotation: object) -> bool:
+    """Determine whether an annotation contains a list, set, or tuple type."""
     origin = get_origin(annotation)
     if origin in {list, set, tuple}:
         return True
@@ -331,7 +372,16 @@ def _validate_dependency_scopes(
     parent_scope: str | None = None,
     _seen: set[tuple[int, str | None]] | None = None,
 ) -> None:
-    """Check each provider once per parent scope, preserving lifetime constraints."""
+    """
+    Validate dependency scope nesting throughout an endpoint plan.
+    
+    Parameters:
+        plan (EndpointPlan): The dependency plan to validate.
+        parent_scope (str | None): Scope inherited from the parent dependency.
+    
+    Raises:
+        TypeError: If a request-scoped dependency depends on a function-scoped dependency.
+    """
     seen = _seen if _seen is not None else set()
     key = (id(plan.endpoint), parent_scope)
     if key in seen:

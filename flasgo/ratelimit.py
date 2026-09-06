@@ -24,6 +24,13 @@ class RateLimitRule:
     key_func: RateLimitKeyFunc | None = None
 
     def __post_init__(self) -> None:
+        """
+        Validate rate-limit configuration values.
+        
+        Raises:
+            ValueError: If the request count or window duration is invalid, or if the
+                scope is blank.
+        """
         if isinstance(self.requests, bool) or not isinstance(self.requests, int) or self.requests <= 0:
             raise ValueError("Rate limit requests must be greater than 0.")
         if isinstance(self.window_seconds, bool) or not math.isfinite(self.window_seconds) or self.window_seconds <= 0:
@@ -44,7 +51,17 @@ class RateLimitDecision:
 
 
 class RateLimitBackend(Protocol):
-    async def check_batch(self, rules: list[tuple[RateLimitRule, str]], req: Request) -> list[RateLimitDecision]: ...
+    async def check_batch(self, rules: list[tuple[RateLimitRule, str]], req: Request) -> list[RateLimitDecision]: """
+Evaluate multiple rate-limit rules atomically for a request.
+
+Parameters:
+	rules (list[tuple[RateLimitRule, str]]): Rate-limit rules paired with their client keys.
+	req (Request): The incoming request.
+
+Returns:
+	list[RateLimitDecision]: One decision for each supplied rule.
+"""
+...
 
 
 class RateLimiter:

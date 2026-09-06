@@ -29,7 +29,12 @@ class ResponseValidationError(Exception):
 
 
 def validate_response_model(model: object, *, _seen: set[type[Any]] | None = None) -> None:
-    """Reject unsupported output types before a route or item stream is registered."""
+    """
+    Validate that a response model contains only supported response types.
+    
+    Raises:
+    	TypeError: If the model contains unresolved references, unsupported types, or mapping keys other than `str` or `Any`.
+    """
     if _contains_forward_ref(model) or isinstance(model, str):
         raise TypeError("Response models must use resolved Python types.")
     if get_origin(model) is Annotated:
@@ -85,6 +90,15 @@ def validate_response_model(model: object, *, _seen: set[type[Any]] | None = Non
 
 
 def response_budget(request: Request) -> ValidationBudget:
+    """
+    Create a validation budget from the limits configured for a request.
+    
+    Parameters:
+    	request (Request): The request providing validation depth, work, and issue limits.
+    
+    Returns:
+    	ValidationBudget: The configured validation budget.
+    """
     return ValidationBudget(
         max_depth=request.scope["max_validation_depth"],
         max_work=request.scope["max_validation_work"],
@@ -93,6 +107,19 @@ def response_budget(request: Request) -> ValidationBudget:
 
 
 def project_response(model: object, value: object, budget: ValidationBudget) -> Any:
+    """Project a response value according to its declared model.
+    
+    Parameters:
+    	model (object): The response model used for validation and conversion.
+    	value (object): The response value to project.
+    	budget (ValidationBudget): Limits applied during validation.
+    
+    Returns:
+    	Any: The validated and converted response value.
+    
+    Raises:
+    	ResponseValidationError: If the value does not satisfy the model or validation fails.
+    """
     try:
         return _project(model, value, budget, 0)
     except Exception as exc:
@@ -100,6 +127,20 @@ def project_response(model: object, value: object, budget: ValidationBudget) -> 
 
 
 def contract_response(value: ResponseValue, model: object, request: Request) -> Response:
+    """
+    Convert a response value into a JSON response while applying its declared model, status, and headers.
+    
+    Parameters:
+        value (ResponseValue): The response body, or a tuple containing the body, status, and optional headers.
+        model (object): The declared response model used to validate and serialize the body.
+        request (Request): The request providing response validation limits.
+    
+    Returns:
+        Response: The constructed JSON response.
+    
+    Raises:
+        ResponseValidationError: If `value` is already a response or its body violates the declared model.
+    """
     if isinstance(value, Response):
         raise ResponseValidationError()
     body = value
@@ -114,6 +155,21 @@ def contract_response(value: ResponseValue, model: object, request: Request) -> 
 
 
 def _project(model: object, value: object, budget: ValidationBudget, depth: int) -> Any:
+    """
+    Project a response value according to its declared model.
+    
+    Parameters:
+    	model (object): The response model to validate against.
+    	value (object): The response value to project.
+    	budget (ValidationBudget): Limits applied during validation.
+    	depth (int): Current nesting depth of the value.
+    
+    Returns:
+    	Any: The validated, JSON-serializable response value.
+    
+    Raises:
+    	ResponseValidationError: If the value does not satisfy the model.
+    """
     budget.consume(location=("response",), depth=depth)
     if get_origin(model) is Annotated:
         model = get_args(model)[0]

@@ -11,6 +11,12 @@ def test_finite_stream_has_no_content_length_and_keeps_request_context() -> None
 
     @app.get("/")
     def endpoint() -> StreamingResponse:
+        """
+        Create a streaming response containing the request path followed by a completion marker.
+        
+        Returns:
+            StreamingResponse: The streaming response.
+        """
         async def content():
             yield request.path
             yield b"done"
@@ -37,6 +43,15 @@ def test_disconnect_closes_stream_and_dependencies_without_background_work() -> 
 
     @app.get("/")
     def endpoint(value: Annotated[str, Depends(resource)]) -> StreamingResponse:
+        """
+        Create a streaming response that emits the supplied value and registers background work.
+        
+        Parameters:
+        	value (str): The value yielded by the response stream.
+        
+        Returns:
+        	StreamingResponse: A response that streams the value.
+        """
         async def content():
             try:
                 yield value
@@ -62,6 +77,12 @@ def test_sse_heartbeat_and_safe_json_framing() -> None:
 
     @app.get("/")
     def endpoint() -> EventSourceResponse:
+        """
+        Create a server-sent events response with a heartbeat and a multiline update event.
+        
+        Returns:
+            EventSourceResponse: The configured streaming response.
+        """
         async def events():
             await asyncio.sleep(0.03)
             yield ServerSentEvent({"text": "a\nb"}, event="update", id="1", retry=1000)
@@ -110,6 +131,13 @@ def test_stream_limit_failure_is_incomplete_and_closes_source() -> None:
 
     @app.get("/")
     def endpoint() -> StreamingResponse:
+        """
+        Create a streaming response that rejects chunks larger than two bytes.
+        
+        Returns:
+            StreamingResponse: A response streaming an oversized chunk for testing
+                chunk-size enforcement.
+        """
         async def content():
             try:
                 yield b"oversized"
@@ -133,6 +161,9 @@ def test_stream_idle_timeout_closes_source() -> None:
 
     @app.get("/")
     def endpoint() -> StreamingResponse:
+        """
+        Create a streaming response whose source remains idle until the configured timeout and records when the source closes.
+        """
         async def content():
             try:
                 await asyncio.Event().wait()
@@ -159,6 +190,9 @@ def test_stream_backpressure_and_send_timeout_bound_production() -> None:
     @app.get("/")
     def endpoint() -> StreamingResponse:
         async def content():
+            """
+            Yield up to 1,000 byte chunks while recording production and closure events.
+            """
             try:
                 for index in range(1000):
                     produced.append(index)
@@ -186,6 +220,11 @@ def test_head_closes_unstarted_source_once() -> None:
         iterated = False
 
         def __aiter__(self):
+            """Provide the asynchronous iterator interface for this stream.
+            
+            Returns:
+                The stream itself.
+            """
             return self
 
         async def __anext__(self):
@@ -193,6 +232,7 @@ def test_head_closes_unstarted_source_once() -> None:
             return {"id": 1}
 
         async def aclose(self):
+            """Record that the resource has been closed."""
             self.closed += 1
 
     source = Source()
@@ -210,12 +250,18 @@ def test_middleware_replacing_stream_closes_original_source() -> None:
         closed = 0
 
         def __aiter__(self):
+            """Provide the asynchronous iterator interface for this stream.
+            
+            Returns:
+                The stream itself.
+            """
             return self
 
         async def __anext__(self):
             return b"data"
 
         async def aclose(self):
+            """Record that the resource has been closed."""
             self.closed += 1
 
     source = Source()

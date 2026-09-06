@@ -48,6 +48,18 @@ class Blueprint(RouteDecorators):
         rate_limits: Sequence[RateLimitRule] = (),
         cors: CORSConfig | Literal[False] | None = None,
     ) -> None:
+        """
+        Initialize a reusable group of HTTP routes with shared configuration.
+        
+        Parameters:
+        	name (str): A valid Python identifier used to name the blueprint.
+        	url_prefix (str): A literal path prefix applied to the blueprint's routes.
+        	permissions (Sequence[PermissionLike]): Permissions inherited by routes in the blueprint.
+        	backend (str): Authentication backend used for protected routes.
+        	dependencies (Sequence[Depends]): Dependencies inherited by routes in the blueprint.
+        	rate_limits (Sequence[RateLimitRule]): Rate-limit rules inherited by routes in the blueprint.
+        	cors (CORSConfig | Literal[False] | None): CORS configuration inherited by routes, or `False` to disable inherited CORS.
+        """
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
             raise ValueError("Blueprint names must be Python identifiers without dots.")
         if url_prefix:
@@ -85,6 +97,19 @@ class Blueprint(RouteDecorators):
         response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> None:
+        """
+        Register an endpoint route with the blueprint.
+        
+        Parameters:
+            path (str): The route path.
+            endpoint (Endpoint): The callable that handles the route.
+            methods (Iterable[str]): HTTP methods accepted by the route.
+            name (str | None): The route name; required when the endpoint has no name.
+            cors (CORSConfig | Literal[False] | None): Route-specific CORS configuration.
+            public (bool): Whether the route is publicly accessible.
+            response_model (object): The model used to describe or validate responses.
+            dependencies (Sequence[Depends]): Dependencies applied to the route.
+        """
         _validate_route(path, name)
         endpoint_name = name or getattr(endpoint, "__name__", "")
         if not endpoint_name:
@@ -103,6 +128,12 @@ class Blueprint(RouteDecorators):
         )
 
     def register_blueprint(self, blueprint: Blueprint) -> None:
+        """
+        Register a nested blueprint.
+        
+        Parameters:
+        	blueprint (Blueprint): The blueprint to register.
+        """
         if not isinstance(blueprint, Blueprint):
             raise TypeError("Expected a Blueprint.")
         if blueprint._contains(self):
@@ -110,6 +141,14 @@ class Blueprint(RouteDecorators):
         self._registrations.append(blueprint)
 
     def _contains(self, target: Blueprint) -> bool:
+        """Determine whether this blueprint contains the target blueprint, directly or through nested registrations.
+        
+        Parameters:
+        	target (Blueprint): The blueprint to search for.
+        
+        Returns:
+        	bool: `true` if the target is this blueprint or a nested blueprint, `false` otherwise.
+        """
         return self is target or any(
             item._contains(target) for item in self._registrations if isinstance(item, Blueprint)
         )
@@ -126,6 +165,19 @@ class Blueprint(RouteDecorators):
         rate_limits: tuple[RateLimitRule, ...] = (),
         cors: CORSConfig | Literal[False] | None = None,
     ) -> None:
+        """
+        Register this blueprint and its nested blueprints with an application.
+        
+        Parameters:
+        	app (Flasgo): The application receiving the routes.
+        	prefix (str): URL prefix inherited from parent blueprints.
+        	namespace (str): Route-name namespace inherited from parent blueprints.
+        	permissions (tuple[PermissionLike, ...]): Permissions inherited from parent blueprints.
+        	backend (str | None): Authentication backend inherited from parent blueprints.
+        	dependencies (tuple[Depends, ...]): Dependencies inherited from parent blueprints.
+        	rate_limits (tuple[RateLimitRule, ...]): Rate-limit rules inherited from parent blueprints.
+        	cors (CORSConfig | Literal[False] | None): CORS configuration inherited from parent blueprints.
+        """
         if permissions and self.permissions and backend != self.backend:
             raise ValueError("Nested protected blueprints must use the same authentication backend.")
         backend = backend if permissions else self.backend
@@ -176,6 +228,15 @@ class Blueprint(RouteDecorators):
 
 
 def _copy_endpoint(endpoint: Endpoint) -> Endpoint:
+    """
+    Create a callable wrapper that preserves an endpoint's metadata while forwarding keyword arguments to it.
+    
+    Parameters:
+    	endpoint (Endpoint): The endpoint to wrap.
+    
+    Returns:
+    	Endpoint: A wrapped endpoint retaining the original endpoint's metadata.
+    """
     @wraps(endpoint, updated=())
     def registered(**kwargs: Any) -> Any:
         return endpoint(**kwargs)
@@ -184,10 +245,34 @@ def _copy_endpoint(endpoint: Endpoint) -> Endpoint:
 
 
 def build_url(path: str, values: dict[str, Any]) -> str:
-    """Build a relative URL with validated converters and encoded query values."""
+    """
+    Build a safe relative URL by substituting validated route parameters and encoding remaining values as query parameters.
+    
+    Parameters:
+    	path (str): Route path containing optional parameter placeholders.
+    	values (dict[str, Any]): Values for route parameters and query parameters.
+    
+    Returns:
+    	str: The resulting relative URL.
+    
+    Raises:
+    	ValueError: If a required parameter is missing, invalid, or unsafe, or if the resulting URL is not a safe relative URL.
+    """
     values = dict(values)
 
     def substitute(match: re.Match[str]) -> str:
+        """
+        Substitute a validated URL parameter in a route path.
+        
+        Parameters:
+            match (re.Match[str]): The matched route parameter.
+        
+        Returns:
+            str: The URL-encoded parameter value.
+        
+        Raises:
+            ValueError: If the parameter is missing, invalid, or contains unsafe path components.
+        """
         name = match.group("name")
         if name not in values:
             raise ValueError(f"Missing URL parameter: {name}")

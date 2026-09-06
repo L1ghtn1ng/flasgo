@@ -23,6 +23,18 @@ from flasgo.request import Request
 
 @pytest.fixture(scope="module")
 def redis_url(tmp_path_factory: pytest.TempPathFactory):
+    """
+    Provide a Redis connection URL for integration tests.
+    
+    Parameters:
+    	tmp_path_factory (pytest.TempPathFactory): Factory used to create isolated temporary Redis server storage.
+    
+    Yields:
+    	str: The configured Redis URL or a URL for a temporary Unix-socket Redis server.
+    
+    Raises:
+    	pytest.skip.Exception: If no Redis or Valkey server executable is available.
+    """
     configured = os.environ.get("FLASGO_TEST_REDIS_URL")
     if configured:
         yield configured
@@ -64,6 +76,15 @@ def redis_url(tmp_path_factory: pytest.TempPathFactory):
 
 
 def request_for(identity: str = "127.0.0.1") -> Request:
+    """
+    Create a minimal GET request for the specified client identity.
+    
+    Parameters:
+    	identity (str): Client address to associate with the request.
+    
+    Returns:
+    	Request: A GET request targeting the root path.
+    """
     async def receive():
         return {"type": "http.request", "body": b"", "more_body": False}
 
@@ -112,12 +133,24 @@ def test_session_backend_integrates_cookies_csrf_and_logout() -> None:
 
     @app.get("/login")
     def login() -> str:
+        """
+        Authenticate Alice by storing her identity in the session and regenerating the session identifier.
+        
+        Returns:
+        	str: The string "ok".
+        """
         session["user"] = "alice"
         session.regenerate()
         return "ok"
 
     @app.post("/logout")
     def logout() -> str:
+        """
+        Clear the current session and confirm the logout operation.
+        
+        Returns:
+        	str: The confirmation string "ok".
+        """
         session.clear()
         return "ok"
 
@@ -136,6 +169,15 @@ def test_session_backend_integrates_cookies_csrf_and_logout() -> None:
 def test_storage_outage_fails_closed_without_exposing_backend_details() -> None:
     class Unavailable(MemoryStore):
         async def get(self, key: str) -> bytes | None:
+            """
+            Retrieve the value associated with a key from storage.
+            
+            Returns:
+            	bytes | None: The stored value, or `None` when the key does not exist.
+            
+            Raises:
+            	StoreUnavailable: If the storage backend cannot be accessed.
+            """
             raise StoreUnavailable("redis://password@private.example")
 
     app = Flasgo(session_backend=ServerSideSessions(Unavailable()))
@@ -148,6 +190,7 @@ def test_storage_outage_fails_closed_without_exposing_backend_details() -> None:
 
 def test_redis_sessions_use_real_atomic_storage(redis_url: str) -> None:
     async def run() -> None:
+        """Verify Redis session rotation, stale-update rejection, data preservation, expiration, and cleanup."""
         store = RedisStore.from_url(redis_url, namespace="test-" + uuid4().hex)
         backend = ServerSideSessions(store)
         try:
@@ -170,6 +213,9 @@ def test_redis_sessions_use_real_atomic_storage(redis_url: str) -> None:
 
 
 def test_redis_quota_is_shared_across_app_instances_and_atomic(redis_url: str) -> None:
+    """
+    Verifies shared Redis rate-limit quotas and atomic enforcement across application instances.
+    """
     async def run() -> None:
         namespace = "test-" + uuid4().hex
         first = RedisStore.from_url(redis_url, namespace=namespace)
@@ -219,6 +265,9 @@ def test_redis_capacity_pressure_preserves_active_quotas(redis_url: str) -> None
 def test_redis_timeouts_are_bounded_and_fail_closed() -> None:
     class Client:
         async def eval(self, *args):
+            """
+            Wait indefinitely until the operation is cancelled.
+            """
             await asyncio.Event().wait()
 
     async def run() -> None:
@@ -232,12 +281,23 @@ def test_redis_timeouts_are_bounded_and_fail_closed() -> None:
 def test_storage_write_failure_replaces_success_before_headers() -> None:
     class Unavailable(MemoryStore):
         async def create(self, key: str, value: bytes, ttl: int) -> bool:
+            """Rejects attempts to create a stored value.
+            
+            Raises:
+                StoreUnavailable: Always, with a message indicating unavailable credentials.
+            """
             raise StoreUnavailable("private credentials")
 
     app = Flasgo(session_backend=ServerSideSessions(Unavailable()))
 
     @app.get("/")
     def endpoint() -> str:
+        """
+        Store the user identity in the session and report successful processing.
+        
+        Returns:
+        	str: The literal value `"success"`.
+        """
         session["user"] = "alice"
         return "success"
 
@@ -256,11 +316,22 @@ def test_redis_separate_methods_have_separate_default_quotas(redis_url: str) -> 
             @app.get("/")
             @app.ratelimit(1, per=60)
             def get() -> str:
+                """
+                Identify the HTTP method as GET.
+                
+                Returns:
+                	str: The string "get".
+                """
                 return "get"
 
             @app.post("/")
             @app.ratelimit(1, per=60)
             def post() -> str:
+                """Return the string identifying a POST request.
+                
+                Returns:
+                	str: The string ``"post"``.
+                """
                 return "post"
 
             client = app.test_client()

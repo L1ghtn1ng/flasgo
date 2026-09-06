@@ -13,12 +13,29 @@ from flasgo.request import Request
 @pytest.mark.parametrize("scope", [{}, {"flasgo.dependencies": None}, {"flasgo.dependencies": {}}])
 def test_missing_or_invalid_dependency_context_has_clear_runtime_error(scope: dict) -> None:
     def provider() -> str:
+        """Provide the value used to resolve the test dependency.
+        
+        Returns:
+            str: The dependency value.
+        """
         return "value"
 
     def endpoint(value: Annotated[str, Depends(provider)]) -> str:
+        """
+        Return the dependency-provided string.
+        
+        Returns:
+        	str: The injected dependency value
+        """
         return value
 
     async def receive() -> dict:
+        """
+        Create an empty HTTP request message for an ASGI-compatible receiver.
+        
+        Returns:
+        	dict: An HTTP request message with an empty body.
+        """
         return {"type": "http.request", "body": b""}
 
     request = Request(scope={"type": "http", "path": "/", **scope}, receive=receive)

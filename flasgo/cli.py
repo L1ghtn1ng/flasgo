@@ -127,6 +127,12 @@ def _add_target_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _routes_command(args: argparse.Namespace) -> int:
+    """
+    List the application's registered HTTP and WebSocket routes or emit its policy snapshot.
+    
+    Returns:
+        int: Zero after successfully displaying or writing the route information.
+    """
     app = load_app(args.target, app_name=args.app)
     if args.json or args.policy:
         snapshot = app.policy_snapshot()
@@ -161,6 +167,14 @@ def _openapi_command(args: argparse.Namespace) -> int:
 
 
 def _check_command(args: argparse.Namespace) -> int:
+    """Validate registered routes, authentication configuration, internal endpoint conflicts, deployment settings, and policy changes.
+    
+    Parameters:
+    	args (argparse.Namespace): Command-line options specifying the application target and enabled checks.
+    
+    Returns:
+    	int: 1 if validation issues or policy changes are found, otherwise 0.
+    """
     app = load_app(args.target, app_name=args.app)
     errors: list[str] = []
     seen_http: set[tuple[str, str]] = set()
@@ -233,6 +247,13 @@ def _check_command(args: argparse.Namespace) -> int:
 
 
 def _atomic_write(path: Path, value: str) -> None:
+    """
+    Atomically write text content to a file.
+    
+    Parameters:
+        path (Path): Destination file path.
+        value (str): Text content to write.
+    """
     expanded = path.expanduser()
     absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
     parent = absolute.parent.resolve()
