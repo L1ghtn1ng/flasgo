@@ -99,6 +99,22 @@ def test_sse_heartbeat_and_safe_json_framing() -> None:
     assert response.headers["x-accel-buffering"] == "no"
 
 
+def test_annotated_sse_and_text_responses_use_the_correct_openapi_media_types() -> None:
+    app = Flasgo()
+
+    @app.get("/events")
+    def events() -> Annotated[EventSourceResponse, "server-sent events"]:
+        raise AssertionError("The endpoint is only used to generate OpenAPI.")
+
+    @app.get("/text")
+    def text() -> Annotated[str, "plain text"]:
+        return "response"
+
+    paths = app.openapi_spec()["paths"]
+    assert paths["/events"]["get"]["responses"]["200"]["content"] == {"text/event-stream": {"schema": {"type": "string"}}}
+    assert paths["/text"]["get"]["responses"]["200"]["content"] == {"text/plain": {"schema": {"type": "string"}}}
+
+
 @pytest.mark.parametrize("field", ["event", "id"])
 def test_sse_rejects_control_character_injection(field: str) -> None:
     with pytest.raises(ValueError):

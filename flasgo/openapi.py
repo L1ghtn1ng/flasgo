@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection, Iterable, Mapping
-from typing import Any, get_args, get_origin
+from typing import Annotated, Any, get_args, get_origin
 
 from .auth import HasScope
 from .params import EndpointPlan, ParameterBinding, binding_wire_name, walk_bindings
@@ -220,6 +220,8 @@ def _response_content(annotation: object, *, registry: SchemaRegistry) -> dict[s
     Returns:
         dict[str, Any]: An OpenAPI content mapping with the appropriate media type and schema.
     """
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
     annotation = _strip_response_tuple(annotation)
     stream_types: dict[object, str] = {
         StreamingResponse: "application/octet-stream",
