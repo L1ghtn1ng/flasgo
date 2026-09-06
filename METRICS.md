@@ -177,7 +177,7 @@ work (A06), additional security observations without secrets (A09), and exceptio
 dependency or cryptographic mechanism is introduced. This is not a claim of application-wide OWASP certification;
 application authorization, custom collectors, deployment controls, and monitoring remain application responsibilities.
 
-Run `python -m benchmarks.metrics --requests 500` for a repeatable local ASGI benchmark of enabled/disabled buffered
+Run `python -m benchmarks.metrics --requests 500 --rounds 5` for a repeatable local ASGI benchmark of enabled/disabled buffered
 requests, 16-chunk streams, and scrapes after observing 1 or 100 routes. It uses no sockets or external backends and
 reports median request microseconds, scrape milliseconds, and scrape body bytes. Compare the same script and Python
 environment against the previous revision; local overhead measurements are not production capacity estimates.

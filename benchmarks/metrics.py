@@ -18,6 +18,7 @@ from typing import Any
 from flasgo import Flasgo, StreamingResponse
 
 _TOKEN = "benchmark-only-" + "m" * 32
+_LIFESPAN_TIMEOUT_SECONDS = 10
 
 
 def scope(path: str) -> dict[str, Any]:
@@ -69,16 +70,20 @@ async def measure(enabled: bool, streaming: bool, routes: int, requests: int, ro
         return size
 
     events = asyncio.Queue()
-    ready = asyncio.Event()
+    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     async def lifespan_send(message):
         if message["type"] == "lifespan.startup.complete":
-            ready.set()
+            ready.set_result(None)
+        elif message["type"] == "lifespan.startup.failed":
+            ready.set_exception(RuntimeError(message.get("message", "Application startup failed.")))
 
     lifespan = asyncio.create_task(app({"type": "lifespan"}, events.get, lifespan_send))
-    await events.put({"type": "lifespan.startup"})
-    await ready.wait()
+    started_up = False
     try:
+        await events.put({"type": "lifespan.startup"})
+        await asyncio.wait_for(ready, timeout=_LIFESPAN_TIMEOUT_SECONDS)
+        started_up = True
         for index in range(routes):
             await invoke(f"/route/{index}")
         timings = []
@@ -98,8 +103,12 @@ async def measure(enabled: bool, streaming: bool, routes: int, requests: int, ro
             result.update(scrape_ms=round(statistics.median(scrapes), 2), scrape_bytes=size)
         return result
     finally:
-        await events.put({"type": "lifespan.shutdown"})
-        await lifespan
+        if started_up:
+            await events.put({"type": "lifespan.shutdown"})
+            await asyncio.wait_for(lifespan, timeout=_LIFESPAN_TIMEOUT_SECONDS)
+        else:
+            lifespan.cancel()
+            await asyncio.gather(lifespan, return_exceptions=True)
 
 
 async def main(requests: int, rounds: int) -> None:
