@@ -5,8 +5,12 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING
 
 from .exceptions import HTTPException
+
+if TYPE_CHECKING:
+    from prometheus_client import Histogram
 
 _HTTP_DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10)
 _HTTP_RESPONSE_SIZE_BUCKETS = (64, 256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576, 4_194_304)
@@ -15,6 +19,7 @@ _KNOWN_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", 
 
 
 def _framework_version() -> str:
+    """Read the installed framework version, falling back when package metadata is absent."""
     try:
         return version("flasgo")
     except PackageNotFoundError:
@@ -22,6 +27,7 @@ def _framework_version() -> str:
 
 
 def _trace_exemplar() -> dict[str, str] | None:
+    """Return trace identifiers only when an optional OpenTelemetry span is active."""
     try:
         from opentelemetry import trace
     except ImportError:
@@ -36,11 +42,13 @@ def _trace_exemplar() -> dict[str, str] | None:
 
 
 def normalize_http_method(method: str) -> str:
+    """Map unrecognized HTTP methods to one bounded fallback label."""
     normalized = method.upper()
     return normalized if normalized in _KNOWN_HTTP_METHODS else "_OTHER"
 
 
 def _status_class(status: int) -> str:
+    """Group valid HTTP statuses by class with a bounded fallback for invalid values."""
     return f"{status // 100}xx" if 100 <= status <= 599 else "_OTHER"
 
 
@@ -48,6 +56,7 @@ class Metrics:
     """Small, per-process Prometheus registry with bounded labels."""
 
     def __init__(self) -> None:
+        """Create an app-local registry and metric families without starting the event-loop sampler."""
         try:
             from prometheus_client import (
                 CollectorRegistry,
@@ -232,7 +241,7 @@ class Metrics:
             "Whether the lifespan-owned event-loop sampler is running.",
             registry=self.registry,
         )
-        self._event_loop_lag = None
+        self._event_loop_lag: Histogram | None = None
         self._sampler: asyncio.TimerHandle | None = None
 
     def start_event_loop_sampler(self, interval: float) -> bool:
@@ -252,10 +261,12 @@ class Metrics:
         histogram = self._event_loop_lag
 
         def sample(expected: float) -> None:
+            """Record one scheduling delay and schedule the next sample without replaying missed intervals."""
             histogram.observe(max(0, loop.time() - expected))
             schedule()
 
         def schedule() -> None:
+            """Schedule the next callback relative to the current monotonic loop time."""
             expected = loop.time() + interval
             self._sampler = loop.call_at(expected, sample, expected)
 
@@ -264,6 +275,7 @@ class Metrics:
         return True
 
     def stop_event_loop_sampler(self) -> None:
+        """Cancel the owned callback and mark the sampler inactive without removing collected samples."""
         if self._sampler is not None:
             self._sampler.cancel()
             self._sampler = None
@@ -292,6 +304,7 @@ class Metrics:
             self.backend_duration.labels(component=component, operation=operation).observe(time.perf_counter() - started)
 
     def render(self, accept_header: str | None = None) -> tuple[bytes, str]:
+        """Encode the registry using the exposition format negotiated from the Accept header."""
         from prometheus_client.exposition import choose_encoder
 
         try:
@@ -310,6 +323,7 @@ class Metrics:
         response_body_size: int | None,
         response_sent: bool,
     ) -> None:
+        """Observe a completed HTTP attempt and distinguish response send failures."""
         method_label = normalize_http_method(method)
         labels = {"method": method_label, "route": route, "status": str(status)}
         distribution_labels = {"method": method_label, "route": route, "status_class": _status_class(status)}
@@ -322,12 +336,15 @@ class Metrics:
             self.http_response_send_failures.labels(**labels).inc(exemplar=exemplar)
 
     def observe_websocket(self, *, route: str, outcome: str, duration: float) -> None:
+        """Record one WebSocket outcome and its duration."""
         exemplar = _trace_exemplar()
         self.websocket_connections.labels(route=route, outcome=outcome).inc(exemplar=exemplar)
         self.websocket_duration.labels(route=route, outcome=outcome).observe(duration, exemplar=exemplar)
 
     def observe_background(self, outcome: str) -> None:
+        """Increment the bounded background task outcome counter."""
         self.background_tasks.labels(outcome=outcome).inc(exemplar=_trace_exemplar())
 
     def observe_lifespan(self, phase: str, outcome: str) -> None:
+        """Record a startup or shutdown lifecycle outcome."""
         self.lifespan_events.labels(phase=phase, outcome=outcome).inc()

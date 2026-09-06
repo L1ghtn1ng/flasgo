@@ -191,6 +191,7 @@ def _parse_multipart_form(
     max_parts: int,
     max_fields: int,
 ) -> FormData:
+    """Parse multipart fields and uploads while enforcing configured field, file, and part limits."""
     try:
         boundary_bytes = boundary.encode("ascii")
     except UnicodeEncodeError as exc:
@@ -292,6 +293,7 @@ class Request:
 
     @property
     def query_params(self) -> Mapping[str, list[str]]:
+        """Decode query parameters while enforcing the configured field-count limit."""
         max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
         try:
             return parse_qs(self.query_string, keep_blank_values=True, max_num_fields=max_fields)
@@ -339,6 +341,7 @@ class Request:
         return self.scope.get("user")
 
     async def body(self) -> bytes:
+        """Read and cache the request body within the configured byte and receive-time limits."""
         if self.scope.get("flasgo.websocket_upgrade"):
             raise RuntimeError("Request body is not available on a WebSocket upgrade view.")
         if self._body is not None:
@@ -395,6 +398,7 @@ class Request:
             raise HTTPException(400, _JSON_BODY_ERROR) from exc
 
     async def form(self) -> FormData:
+        """Parse supported form encodings while retaining bounded diagnostic rejection reasons."""
         if self._form_loaded:
             return self._form or FormData()
 
