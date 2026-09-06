@@ -30,6 +30,9 @@
 - Failed handlers no longer commit their session mutations. Successful error handlers receive the pre-dispatch session
   snapshot and may deliberately commit changes such as logout or revocation.
 - Response validation completes before session storage writes, preventing malformed responses from committing state.
+- Invalid session and CSRF cookie names fail during application initialization, before session state can be written.
+- Streaming cleanup timeouts retain their distinct metrics outcome after an otherwise successful response send.
+- Stream finalization skipped at the cleanup-capacity limit remains retryable after capacity becomes available.
 - Security-failure throttling uses bounded, amortized state and fails closed at capacity without evicting active
   clients.
 - Routes with multiple greedy `path` converters are rejected before they can create expensive backtracking matches.

@@ -20,6 +20,7 @@ def _format_http_date(value: datetime) -> str:
 
 
 _SAME_SITE_VALUES = {"lax": "Lax", "strict": "Strict", "none": "None"}
+_COOKIE_NAME_PUNCTUATION = frozenset("!#$%&'*+-.^_`|~")
 
 
 def build_set_cookie(
@@ -32,8 +33,8 @@ def build_set_cookie(
     same_site: str = "Lax",
     path: str = "/",
 ) -> str:
-    _validate_cookie_part(name, part="name")
-    _validate_cookie_part(value, part="value")
+    validate_cookie_name(name)
+    _validate_cookie_value(value)
     _validate_cookie_path(path)
     normalized_same_site = _SAME_SITE_VALUES.get(same_site.strip().lower())
     if normalized_same_site is None:
@@ -68,16 +69,17 @@ def _default_secret_key() -> str:
     return secrets.token_urlsafe(48)
 
 
-def _validate_cookie_part(value: str, *, part: str) -> None:
+def _validate_cookie_value(value: str) -> None:
     if any(char in value for char in ("\r", "\n", "\x00")):
-        msg = f"Invalid cookie {part}: contains control characters."
-        raise ValueError(msg)
-    if part == "name" and any(char in value for char in (";", "=", " ")):
-        msg = "Invalid cookie name: contains forbidden separators."
-        raise ValueError(msg)
-    if part == "value" and any(char in value for char in (";", ",", " ", "\t")):
-        msg = "Invalid cookie value: contains forbidden separators."
-        raise ValueError(msg)
+        raise ValueError("Invalid cookie value: contains control characters.")
+    if any(char in value for char in (";", ",", " ", "\t")):
+        raise ValueError("Invalid cookie value: contains forbidden separators.")
+
+
+def validate_cookie_name(name: str) -> None:
+    """Require a non-empty ASCII HTTP token for a cookie name."""
+    if not name or any(not char.isascii() or not (char.isalnum() or char in _COOKIE_NAME_PUNCTUATION) for char in name):
+        raise ValueError("Invalid cookie name: must be a non-empty ASCII HTTP token.")
 
 
 @dataclass(slots=True)

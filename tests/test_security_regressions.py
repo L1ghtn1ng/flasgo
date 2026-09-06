@@ -78,6 +78,18 @@ def test_all_security_config_booleans_reject_wrong_typed_values() -> None:
         mutated.enforce_allowed_hosts = wrong_security_type
 
 
+@pytest.mark.parametrize(
+    ("setting", "name"),
+    [
+        ("SESSION_COOKIE_NAME", "invalid session"),
+        ("CSRF_COOKIE_NAME", "invalid=csrf"),
+    ],
+)
+def test_invalid_cookie_names_fail_application_initialization(setting: str, name: str) -> None:
+    with pytest.raises(ValueError, match="Invalid cookie name"):
+        Flasgo(settings={setting: name})
+
+
 def test_duplicate_signed_session_cookie_is_treated_as_anonymous() -> None:
     app = Flasgo(settings={"CSRF_ENABLED": False, "SECRET_KEY": "s" * 32})
 
@@ -532,6 +544,17 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
         source.release.set()
         await asyncio.sleep(0)
 
+        streamed_source = ResistantStream()
+        streamed_response = StreamingResponse(streamed_source, cleanup_timeout=0.01)
+
+        async def send(message: dict[str, Any]) -> None:
+            return None
+
+        await asyncio.wait_for(streamed_response.send(send), timeout=0.1)
+        assert streamed_response._metrics_outcome == "cleanup_timeout"
+        streamed_source.release.set()
+        await asyncio.sleep(0)
+
         async def items() -> AsyncIterator[object]:
             yield {"ok": True}
 
@@ -660,5 +683,12 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
                 break
             await asyncio.sleep(0)
         assert streaming_module._active_cleanups == 0
+        assert all(response._closed for response in responses[:-2])
+        assert all(not response._closed for response in responses[-2:])
+
+        for response in responses[-2:]:
+            await response.aclose()
+        assert ResistantCloser.entered == streaming_module._MAX_ACTIVE_CLEANUPS + 2
+        assert all(response._closed for response in responses)
 
     asyncio.run(run())

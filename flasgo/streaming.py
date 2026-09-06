@@ -103,7 +103,6 @@ class StreamingResponse(Response):
         """
         if self._closed:
             return
-        self._closed = True
 
         async def close_iterators() -> None:
             try:
@@ -123,6 +122,7 @@ class StreamingResponse(Response):
         except BaseException:
             _release_cleanup_slot()
             raise
+        self._closed = True
         cleanup.add_done_callback(_cleanup_slot_done)
         await self._await_cleanup(cleanup)
 
@@ -237,7 +237,8 @@ class StreamingResponse(Response):
                 done, _ = await asyncio.wait({pump, disconnect}, return_when=asyncio.FIRST_COMPLETED)
                 if pump in done:
                     await pump
-                    self._metrics_outcome = "completed"
+                    if self._metrics_outcome != "cleanup_timeout":
+                        self._metrics_outcome = "completed"
                 else:
                     await disconnect
                     self._metrics_outcome = "client_disconnect"

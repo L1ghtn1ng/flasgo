@@ -74,6 +74,7 @@ from .security import (
     csrf_is_valid,
     ensure_csrf_cookie,
     host_is_allowed,
+    validate_cookie_name,
     websocket_origin_is_allowed,
 )
 from .server import run_dev_server
@@ -1635,6 +1636,8 @@ class Flasgo(RouteDecorators):
             raise ValueError("SESSION_COOKIE_SAME_SITE must be one of 'Lax', 'Strict', or 'None'.")
         if same_site == "none" and not self.security.session_cookie_secure:
             raise ValueError("SESSION_COOKIE_SAME_SITE='None' requires SESSION_COOKIE_SECURE=True.")
+        validate_cookie_name(self.security.session_cookie_name)
+        validate_cookie_name(self.security.csrf_cookie_name)
         if self.security.max_request_body_bytes <= 0:
             raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0.")
         if self.security.max_request_head_bytes <= 0:
