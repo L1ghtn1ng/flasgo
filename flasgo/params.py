@@ -3,9 +3,9 @@ from __future__ import annotations
 import inspect
 import re
 from annotationlib import Format, ForwardRef
-from collections.abc import Callable
-from dataclasses import dataclass, is_dataclass
-from typing import Annotated, Any, get_args, get_origin, get_type_hints
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, is_dataclass, replace
+from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 from .request import Request
 from .routing import Endpoint
@@ -67,6 +67,15 @@ class Depends:
 
     provider: Provider
     use_cache: bool = True
+    scope: Literal["function", "request"] = "request"
+
+    def __post_init__(self) -> None:
+        if not callable(self.provider):
+            raise TypeError("Depends provider must be callable.")
+        if self.scope not in {"function", "request"}:
+            raise ValueError("Depends scope must be 'function' or 'request'.")
+        if not isinstance(self.use_cache, bool):
+            raise TypeError("Depends use_cache must be a bool.")
 
 
 type ParameterMarker = Body | Query | Header | Cookie | Form | Depends
@@ -91,13 +100,35 @@ class EndpointPlan:
     endpoint: Provider
     bindings: tuple[ParameterBinding, ...]
     return_annotation: object = inspect.Signature.empty
+    dependencies: tuple[ParameterBinding, ...] = ()
 
 
-def compile_endpoint_plan(endpoint: Endpoint, route_path: str) -> EndpointPlan:
+def compile_endpoint_plan(
+    endpoint: Endpoint,
+    route_path: str,
+    *,
+    dependencies: Sequence[Depends] = (),
+) -> EndpointPlan:
     """Compile one endpoint and its dependency graph into a stable binding plan."""
 
     path_names = {match.group("name") for match in _PATH_PARAM_PATTERN.finditer(route_path)}
     plan = _compile_callable(endpoint, path_names=path_names, stack=())
+    extra = []
+    for index, marker in enumerate(dependencies):
+        if not isinstance(marker, Depends):
+            raise TypeError("Route dependencies must be Depends instances.")
+        extra.append(
+            ParameterBinding(
+                str(index),
+                Any,
+                "dependency",
+                inspect.Parameter.empty,
+                marker=marker,
+                dependency=_compile_callable(marker.provider, path_names=path_names, stack=(endpoint,)),
+            )
+        )
+    plan = replace(plan, dependencies=tuple(extra))
+    _validate_dependency_scopes(plan)
     body_sources = _body_sources(plan, seen=set())
     if len(body_sources) > 1:
         endpoint_name = _callable_name(endpoint)
@@ -120,10 +151,10 @@ def _compile_callable(
 
     signature = inspect.signature(endpoint)
     try:
-        hints = get_type_hints(endpoint, include_extras=True)
+        hints = get_type_hints(inspect.unwrap(endpoint), include_extras=True)
     except (NameError, TypeError) as exc:
         try:
-            hints = get_type_hints(endpoint, include_extras=True, format=Format.FORWARDREF)
+            hints = get_type_hints(inspect.unwrap(endpoint), include_extras=True, format=Format.FORWARDREF)
         except (NameError, TypeError) as fallback_exc:
             raise TypeError(f"Could not resolve annotations for {_callable_name(endpoint)!r}: {fallback_exc}") from exc
 
@@ -230,7 +261,7 @@ def _body_sources(plan: EndpointPlan, *, seen: set[int]) -> set[tuple[int, str, 
         return set()
     seen.add(endpoint_id)
     sources: set[tuple[int, str, str]] = set()
-    for binding in plan.bindings:
+    for binding in (*plan.dependencies, *plan.bindings):
         if binding.source in {"body", "form"}:
             sources.add((endpoint_id, binding.source, binding.name))
         elif binding.dependency is not None:
@@ -249,7 +280,7 @@ def walk_bindings(plan: EndpointPlan) -> tuple[ParameterBinding, ...]:
         if endpoint_id in seen:
             return
         seen.add(endpoint_id)
-        for binding in current.bindings:
+        for binding in (*current.dependencies, *current.bindings):
             collected.append(binding)
             if binding.dependency is not None:
                 visit(binding.dependency)
@@ -292,3 +323,13 @@ def _contains_collection(annotation: object) -> bool:
     if origin in {list, set, tuple}:
         return True
     return any(_contains_collection(item) for item in get_args(annotation))
+
+
+def _validate_dependency_scopes(plan: EndpointPlan, *, parent_scope: str | None = None) -> None:
+    for binding in (*plan.dependencies, *plan.bindings):
+        marker = binding.marker
+        if not isinstance(marker, Depends) or binding.dependency is None:
+            continue
+        if parent_scope == "request" and marker.scope == "function":
+            raise TypeError("A request-scoped dependency cannot depend on a function-scoped dependency.")
+        _validate_dependency_scopes(binding.dependency, parent_scope=marker.scope)

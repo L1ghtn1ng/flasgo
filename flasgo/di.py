@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from types import TracebackType
 from typing import Any
 
-from .params import Cookie, Depends, EndpointPlan, Header, ParameterBinding, binding_wire_name
+from .params import (
+    Cookie,
+    Depends,
+    EndpointPlan,
+    Header,
+    ParameterBinding,
+    Provider,
+    _validate_dependency_scopes,
+    binding_wire_name,
+    compile_endpoint_plan,
+)
 from .request import Request
 from .validation import (
     FormValidationError,
@@ -19,12 +31,45 @@ from .validation import (
 )
 
 
+class _DependencyStack(AsyncExitStack):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        if await super().__aexit__(exc_type, exc, traceback):
+            raise RuntimeError("Dependency providers must not suppress application exceptions.")
+        return False
+
+
+class DependencyContext:
+    """Own request resources and a snapshot of context-local testing overrides."""
+
+    def __init__(self, overrides: Mapping[Provider, Provider] | None = None) -> None:
+        self.function_stack = _DependencyStack()
+        self.request_stack = _DependencyStack()
+        self.overrides = dict(overrides or {})
+        self.resolving: set[tuple[int, str]] = set()
+
+    async def enter(self, result: Any, marker: Depends) -> Any:
+        stack = self.function_stack if marker.scope == "function" else self.request_stack
+        if inspect.isasyncgen(result):
+            return await stack.enter_async_context(asynccontextmanager(lambda: result)())
+        if inspect.isgenerator(result):
+            return stack.enter_context(contextmanager(lambda: result)())
+        return await result if inspect.isawaitable(result) else result
+
+    async def close_request(self, exc: BaseException | None = None) -> None:
+        await self.request_stack.__aexit__(type(exc) if exc else None, exc, exc.__traceback__ if exc else None)
+
+
 async def resolve_endpoint_arguments(
     plan: EndpointPlan,
     request: Request,
     path_params: dict[str, Any],
 ) -> dict[str, Any]:
-    cache: dict[int, object] = {}
+    cache: dict[tuple[int, str], object] = {}
     body_cache: dict[str, object] = {}
     budget = ValidationBudget(
         max_depth=_scope_limit(request, "max_validation_depth", 64),
@@ -46,13 +91,13 @@ async def _resolve_plan(
     *,
     request: Request,
     path_params: dict[str, Any],
-    cache: dict[int, object],
+    cache: dict[tuple[int, str], object],
     body_cache: dict[str, object],
     budget: ValidationBudget,
 ) -> dict[str, Any]:
     resolved: dict[str, Any] = {}
     issues: list[ValidationIssue] = []
-    for binding in plan.bindings:
+    for index, binding in enumerate((*plan.dependencies, *plan.bindings)):
         try:
             if binding.source == "request":
                 value = request
@@ -100,22 +145,37 @@ async def _resolve_plan(
             elif binding.source == "dependency" and binding.dependency is not None:
                 marker = binding.marker
                 assert isinstance(marker, Depends)
-                cache_key = id(marker.provider)
+                context = request.scope["flasgo.dependencies"]
+                assert isinstance(context, DependencyContext)
+                provider = context.overrides.get(marker.provider, marker.provider)
+                cache_key = (id(marker.provider), marker.scope)
                 if marker.use_cache and cache_key in cache:
                     value = cache[cache_key]
                 else:
-                    arguments = await _resolve_plan(
-                        binding.dependency,
-                        request=request,
-                        path_params=path_params,
-                        cache=cache,
-                        body_cache=body_cache,
-                        budget=budget,
-                    )
-                    result = marker.provider(**arguments)
-                    value = await result if inspect.isawaitable(result) else result
-                    if marker.use_cache:
-                        cache[cache_key] = value
+                    if cache_key in context.resolving:
+                        raise RuntimeError("Dependency override introduces a cycle.")
+                    context.resolving.add(cache_key)
+                    try:
+                        dependency = binding.dependency
+                        if provider is not marker.provider:
+                            dependency = compile_endpoint_plan(
+                                provider, request.scope.get("route_template", request.path)
+                            )
+                        _validate_dependency_scopes(dependency, parent_scope=marker.scope)
+                        arguments = await _resolve_plan(
+                            dependency,
+                            request=request,
+                            path_params=path_params,
+                            cache=cache,
+                            body_cache=body_cache,
+                            budget=budget,
+                        )
+                        result = provider(**arguments)
+                        value = await context.enter(result, marker)
+                        if marker.use_cache:
+                            cache[cache_key] = value
+                    finally:
+                        context.resolving.remove(cache_key)
                 value = validate_value(
                     binding.annotation,
                     value,
@@ -124,7 +184,8 @@ async def _resolve_plan(
                 )
             else:
                 raise RuntimeError(f"Unknown endpoint binding source: {binding.source}")
-            resolved[binding.name] = value
+            if index >= len(plan.dependencies):
+                resolved[binding.name] = value
         except FormValidationError:
             raise
         except RequestValidationError as exc:

@@ -7,12 +7,14 @@ import json
 import logging
 import re
 import secrets
+import sys
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -37,12 +39,12 @@ from .cors import (
     _parse_cors_preflight,
 )
 from .debug import Debug
-from .di import resolve_endpoint_arguments
+from .di import DependencyContext, resolve_endpoint_arguments
 from .exceptions import HTTPException
 from .logging import configure_logging, log_event
 from .metrics import Metrics
 from .openapi import build_openapi_spec
-from .params import compile_endpoint_plan
+from .params import Depends, Provider, compile_endpoint_plan
 from .ratelimit import (
     RateLimiter,
     build_rate_limit_response,
@@ -50,6 +52,7 @@ from .ratelimit import (
     rate_limit,
     rate_limit_success_headers,
 )
+from .registration import RouteDecorators
 from .request import Request
 from .response import Response, ResponseValue, to_response
 from .routing import (
@@ -173,7 +176,7 @@ def user() -> User:
     return current
 
 
-class Flasgo:
+class Flasgo(RouteDecorators):
     """Async-first web application with Flask-style routing and secure defaults."""
 
     def __init__(
@@ -217,6 +220,10 @@ class Flasgo:
         self._lifespan_iterator: AsyncGenerator[None] | None = None
         self._lifespan_active = False
         self.state = SimpleNamespace()
+        self._dependency_overrides: ContextVar[Mapping[Provider, Provider]] = ContextVar(
+            "flasgo_dependency_overrides",
+            default=MappingProxyType({}),
+        )
         self._metrics = Metrics() if self.settings.METRICS_ENABLED else None
         self._telemetry = (
             Telemetry(
@@ -316,31 +323,39 @@ class Flasgo:
         if instrument:
             self._metrics.http_active.inc()
         req_token = _request_ctx.set(req)
-        loaded_session = self._load_session(req)
+        loaded_session = Session({})
         req.scope["session"] = loaded_session
         session_token = _session_ctx.set(loaded_session)
         req.scope["user"] = User.anonymous()
         user_token = _user_ctx.set(req.scope["user"])
+        contexts_reset = False
+        dependencies = DependencyContext(self._dependency_overrides.get())
+        req.scope["flasgo.dependencies"] = dependencies
         try:
             try:
-                response = await self._dispatch(req)
+                async with dependencies.function_stack:
+                    loaded_session = await self._load_session(req)
+                    req.scope["session"] = loaded_session
+                    _session_ctx.set(loaded_session)
+                    response = await self._dispatch(req)
             except Exception as exc:
+                await self._close_request_dependencies(req, dependencies, exc)
                 response = await self._handle_error(req, exc)
-            finally:
-                _user_ctx.reset(user_token)
-                _session_ctx.reset(session_token)
-                _request_ctx.reset(req_token)
 
             try:
-                self._prepare_response(req, response)
-            except Exception:
+                await self._prepare_response(req, response)
+            except Exception as exc:
+                await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-prepare-failed", req=req)
-                response = Response.text(
-                    "Internal Server Error. Check the application logs for the original failure.",
-                    status_code=500,
-                    headers={"x-request-id": req.request_id},
-                )
+                if isinstance(exc, HTTPException):
+                    status, detail = exc.status_code, exc.detail
+                else:
+                    status, detail = 500, "Internal Server Error"
+                response = Response.text(detail, status_code=status, headers={"x-request-id": req.request_id})
                 apply_security_headers(response, self.security)
+                cors = req.scope.get("flasgo.cors")
+                if isinstance(cors, CORSConfig):
+                    _apply_cors_response_headers(req, response, cors)
                 response.prepare()
 
             sent = False
@@ -348,8 +363,11 @@ class Flasgo:
             try:
                 await response.send(observed_send, head_only=req.method == "HEAD")
                 sent = True
-            except Exception:
+            except Exception as exc:
+                await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-send-failed", req=req)
+            else:
+                await self._close_request_dependencies(req, dependencies)
 
             duration = time.perf_counter() - started
             route = str(req.scope.get("route_template", "<unmatched>"))
@@ -374,14 +392,36 @@ class Flasgo:
                     response_sent=sent,
                 )
 
+            _user_ctx.reset(user_token)
+            _session_ctx.reset(session_token)
+            _request_ctx.reset(req_token)
+            contexts_reset = True
             if sent and response.background is not None:
                 response.background.bind_request_id(req.request_id)
                 if self._metrics is not None:
                     response.background.bind_observer(self._metrics.observe_background)
                 await response.background()
         finally:
-            if instrument:
-                self._metrics.http_active.dec()
+            try:
+                await self._close_request_dependencies(req, dependencies, sys.exception())
+            finally:
+                if not contexts_reset:
+                    _user_ctx.reset(user_token)
+                    _session_ctx.reset(session_token)
+                    _request_ctx.reset(req_token)
+                if instrument:
+                    self._metrics.http_active.dec()
+
+    async def _close_request_dependencies(
+        self,
+        req: Request,
+        dependencies: DependencyContext,
+        exc: BaseException | None = None,
+    ) -> None:
+        try:
+            await dependencies.close_request(exc)
+        except Exception:
+            self._log_security_event(logging.ERROR, "dependency-cleanup-failed", req=req)
 
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
         state = scope.get("state")
@@ -484,7 +524,7 @@ class Flasgo:
             route = match.route_path
             websocket.path_params = dict(match.params)
             upgrade_req = self._request_from_websocket_scope(scope)
-            loaded_session = self._load_session(upgrade_req)
+            loaded_session = await self._load_session(upgrade_req)
             upgrade_req.scope["session"] = loaded_session
             upgrade_req.scope["user"] = User.anonymous()
             scope["session"] = loaded_session
@@ -715,65 +755,6 @@ class Flasgo:
             return headers
         return [(name, value) for name, value in headers if name.lower() != b"host"]
 
-    def route(
-        self,
-        path: str,
-        *,
-        methods: Iterable[str] = ("GET",),
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        def decorator(func: Endpoint) -> Endpoint:
-            self.add_route(path, func, methods=methods, name=name, cors=cors)
-            return func
-
-        return decorator
-
-    def get(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("GET",), name=name, cors=cors)
-
-    def post(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("POST",), name=name, cors=cors)
-
-    def put(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("PUT",), name=name, cors=cors)
-
-    def patch(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("PATCH",), name=name, cors=cors)
-
-    def delete(
-        self,
-        path: str,
-        *,
-        name: str | None = None,
-        cors: CORSConfig | Literal[False] | None = None,
-    ) -> Callable[[Endpoint], Endpoint]:
-        return self.route(path, methods=("DELETE",), name=name, cors=cors)
-
     def websocket(
         self,
         path: str,
@@ -875,6 +856,7 @@ class Flasgo:
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        dependencies: Sequence[Depends] = (),
     ) -> None:
         if cors is not None and cors is not False and not isinstance(cors, CORSConfig):
             raise TypeError("Route cors must be a CORSConfig instance, False, or None.")
@@ -896,11 +878,31 @@ class Flasgo:
         if "GET" in normalized:
             normalized = frozenset((*normalized, "HEAD"))
         resolved_cors = self.cors if cors is None else None if cors is False else cors
-        plan = compile_endpoint_plan(endpoint, path)
-        self._routes.append(Route(path, normalized, endpoint, plan, name=name, cors=resolved_cors))
+        plan = compile_endpoint_plan(endpoint, path, dependencies=dependencies)
+        self._routes.append(
+            Route(
+                path,
+                normalized,
+                endpoint,
+                plan,
+                name=name,
+                cors=resolved_cors,
+            )
+        )
         if resolved_cors is not None:
             self._has_cors_routes = True
         self._openapi_dirty = True
+
+    @contextmanager
+    def override_dependencies(self, overrides: Mapping[Provider, Provider]):
+        """Temporarily override providers in this execution context, including nested tests."""
+        if not all(callable(key) and callable(value) for key, value in overrides.items()):
+            raise TypeError("Dependency overrides must map callables to callables.")
+        token = self._dependency_overrides.set({**self._dependency_overrides.get(), **overrides})
+        try:
+            yield
+        finally:
+            self._dependency_overrides.reset(token)
 
     def run(
         self,
@@ -1010,7 +1012,7 @@ class Flasgo:
                 break
         return uuid4().hex
 
-    def _prepare_response(self, req: Request, response: Response) -> None:
+    async def _prepare_response(self, req: Request, response: Response) -> None:
         response.headers.setdefault("x-request-id", req.request_id)
         apply_security_headers(response, self.security)
         is_cors_preflight = req.scope.get("flasgo.cors_preflight") is True
@@ -1019,7 +1021,7 @@ class Flasgo:
         if isinstance(cors, CORSConfig) and not is_cors_preflight:
             _apply_cors_response_headers(req, response, cors)
         if not response.allow_public_cache and not is_cors_preflight and not is_metrics_response:
-            session_token = self._persist_session(req, response)
+            session_token = await self._persist_session(req, response)
             if self.security.csrf_enabled:
                 ensure_csrf_cookie(req, response, self.security, session_token=session_token)
         response.prepare()
@@ -1480,14 +1482,14 @@ class Flasgo:
                 return handler
         return None
 
-    def _load_session(self, req: Request) -> Session:
+    async def _load_session(self, req: Request) -> Session:
         token = req.cookies.get(self.security.session_cookie_name)
         if not token:
             return Session({})
         data = self._session_signer.loads(token, max_age=self.security.session_cookie_max_age)
         return Session(data or {})
 
-    def _persist_session(self, req: Request, response: Response) -> str | None:
+    async def _persist_session(self, req: Request, response: Response) -> str | None:
         current = req.scope.get("session")
         if not isinstance(current, Session) or not current.modified:
             return req.cookies.get(self.security.session_cookie_name)
