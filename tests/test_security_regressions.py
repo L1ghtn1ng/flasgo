@@ -411,6 +411,15 @@ def test_duplicate_csrf_binding_values_are_rejected() -> None:
     csrf_cookie = next(
         part.split("=", 1)[1] for part in seed_response.headers["set-cookie"].split("\n") if part.startswith("flasgo-csrf=")
     ).split(";", 1)[0]
+    accepted = client.post(
+        "/submit",
+        headers=[
+            ("cookie", f"flasgo-csrf={csrf_cookie}"),
+            ("x-csrf-token", csrf_cookie),
+            ("origin", "http://localhost"),
+        ],
+    )
+    assert accepted.status_code == 200
     response = client.post(
         "/submit",
         headers=[
