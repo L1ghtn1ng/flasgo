@@ -192,3 +192,76 @@ def test_provider_suppression_cannot_turn_failed_request_into_success() -> None:
         raise ValueError("failure")
 
     assert app.test_client().get("/").status_code == 500
+
+
+def test_registered_uncached_providers_do_not_repeat_scope_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flasgo import di
+
+    calls = []
+
+    def provider() -> str:
+        calls.append("called")
+        return "value"
+
+    app = Flasgo()
+
+    @app.get("/")
+    def endpoint(
+        first: Annotated[str, Depends(provider, use_cache=False)],
+        second: Annotated[str, Depends(provider, use_cache=False)],
+    ) -> str:
+        return first + second
+
+    def unexpected_validation(*args: object, **kwargs: object) -> None:
+        pytest.fail("Registered plans must already be scope-validated")
+
+    monkeypatch.setattr(di, "_validate_dependency_scopes", unexpected_validation)
+    for _ in range(2):
+        assert app.test_client().get("/").text == "valuevalue"
+    assert len(calls) == 4
+
+
+def test_override_preserves_outer_request_lifetime_constraint() -> None:
+    calls = []
+
+    def original() -> str:
+        return "original"
+
+    def short() -> str:
+        calls.append("short")
+        return "short"
+
+    def replacement(value: Annotated[str, Depends(short, scope="function")]) -> str:
+        calls.append("replacement")
+        return value
+
+    app = Flasgo()
+
+    @app.get("/")
+    def endpoint(value: Annotated[str, Depends(original)]) -> str:
+        return value
+
+    with app.override_dependencies({original: replacement}):
+        assert app.test_client().get("/").status_code == 500
+    assert calls == []
+    assert app.test_client().get("/").text == "original"
+
+
+def test_shared_provider_is_validated_separately_for_each_parent_scope() -> None:
+    def short() -> str:
+        return "short"
+
+    def shared(value: Annotated[str, Depends(short, scope="function")]) -> str:
+        return value
+
+    app = Flasgo()
+    with pytest.raises(TypeError, match="request-scoped"):
+
+        @app.get("/")
+        def endpoint(
+            first: Annotated[str, Depends(shared, scope="function")],
+            second: Annotated[str, Depends(shared, scope="request")],
+        ) -> str:
+            return first + second
+
+    assert app._routes == []

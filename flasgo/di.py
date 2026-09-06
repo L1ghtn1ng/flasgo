@@ -164,7 +164,7 @@ async def _resolve_plan(
                             dependency = compile_endpoint_plan(
                                 provider, request.scope.get("route_template", request.path)
                             )
-                        _validate_dependency_scopes(dependency, parent_scope=marker.scope)
+                            _validate_dependency_scopes(dependency, parent_scope=marker.scope)
                         arguments = await _resolve_plan(
                             dependency,
                             request=request,

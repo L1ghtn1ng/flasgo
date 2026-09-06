@@ -325,11 +325,22 @@ def _contains_collection(annotation: object) -> bool:
     return any(_contains_collection(item) for item in get_args(annotation))
 
 
-def _validate_dependency_scopes(plan: EndpointPlan, *, parent_scope: str | None = None) -> None:
+def _validate_dependency_scopes(
+    plan: EndpointPlan,
+    *,
+    parent_scope: str | None = None,
+    _seen: set[tuple[int, str | None]] | None = None,
+) -> None:
+    """Check each provider once per parent scope, preserving lifetime constraints."""
+    seen = _seen if _seen is not None else set()
+    key = (id(plan.endpoint), parent_scope)
+    if key in seen:
+        return
+    seen.add(key)
     for binding in (*plan.dependencies, *plan.bindings):
         marker = binding.marker
         if not isinstance(marker, Depends) or binding.dependency is None:
             continue
         if parent_scope == "request" and marker.scope == "function":
             raise TypeError("A request-scoped dependency cannot depend on a function-scoped dependency.")
-        _validate_dependency_scopes(binding.dependency, parent_scope=marker.scope)
+        _validate_dependency_scopes(binding.dependency, parent_scope=marker.scope, _seen=seen)
