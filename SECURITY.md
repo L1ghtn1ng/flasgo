@@ -140,9 +140,13 @@ Thank you for helping keep Flasgo secure.
 
 ## Development-branch security boundaries
 
-The [application features guide](docs/application-features.md) documents blueprint permission inheritance, route-policy
-snapshots and deployment checks, dependency lifetimes, response contracts, streaming limits, and optional shared
-storage. Treat custom middleware/authentication and snapshots' application-owned permissions as review boundaries.
+The website documents [blueprint permission inheritance](https://flasgo.dev/guides/blueprints-and-url-generation/),
+[policy checks](https://flasgo.dev/guides/policy-and-deployment-checks/),
+[dependency lifetimes](https://flasgo.dev/guides/request-data-and-dependencies/),
+[response contracts](https://flasgo.dev/guides/response-contracts/),
+[streaming limits](https://flasgo.dev/guides/streaming-responses/), and
+[shared storage](https://flasgo.dev/guides/shared-storage/).
+Treat custom middleware/authentication and snapshots' application-owned permissions as review boundaries.
 Snapshots report configuration and cannot prove application authorization correctness.
 
 Use function-scoped dependencies for transactions that must finish before a success response. Generator cleanup must

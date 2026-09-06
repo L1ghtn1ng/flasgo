@@ -321,7 +321,7 @@ not repeatedly invoke a backend. Rules with a custom `key_func` execute after su
 use the authenticated identity. Repeated authentication failures are also subject to the security-failure limiter.
 
 The built-in limiter intentionally does not trust `X-Forwarded-For` by default because that header is client-controlled unless a trusted reverse proxy has sanitized it. If the ASGI server provides no client identity, security-failure events are still logged but never throttle a shared "unknown" bucket, so one client cannot lock out the others; run behind a server that supplies peer addresses. In multi-process or multi-host production deployments, use an edge limiter or the optional `RedisRateLimiter` so all workers enforce the same decorated route quota.
-See the [shared storage guide](docs/application-features.md#shared-quotas-and-server-side-sessions).
+See the [shared storage guide](https://flasgo.dev/guides/shared-storage/).
 
 ## Typed request data and dependencies
 
@@ -383,6 +383,8 @@ not markup. Non-finite floats (`NaN`, `Infinity`) are rejected on input and neve
 
 When a handler returns a dataclass instance, Flasgo recursively converts nested dataclasses to JSON and omits every
 underscore-prefixed dataclass field before conversion. Ordinary mapping keys are application data and are not filtered.
+Typed mapping models require `str` or `Any` keys; output keys must always be strings. Unsupported key types fail
+at route registration or stream construction.
 
 The same per-route endpoint plan drives runtime binding and OpenAPI generation, so request models, aliases, validation
 responses, and dependency-provided query fields stay aligned. Duplicate wire parameters merge requiredness when their
@@ -565,15 +567,20 @@ handing off.
 
 ## Application structure, contracts, and shared storage
 
-The current development branch adds the following opt-in APIs. See the
-[application features guide](docs/application-features.md) for complete examples, defaults, migration behavior,
-security boundaries, and testing instructions.
+The current development branch adds the following opt-in APIs. The website guides cover
+[blueprints](https://flasgo.dev/guides/blueprints-and-url-generation/),
+[policy checks](https://flasgo.dev/guides/policy-and-deployment-checks/),
+[dependencies](https://flasgo.dev/guides/request-data-and-dependencies/),
+[response contracts](https://flasgo.dev/guides/response-contracts/),
+[streaming](https://flasgo.dev/guides/streaming-responses/), and
+[shared storage](https://flasgo.dev/guides/shared-storage/), including defaults, migration behavior, and testing.
 
 - `Blueprint`: reusable HTTP route groups with nested prefixes, namespaced endpoints, additive permissions,
   shared dependencies, and atomic registration through `Flasgo.register_blueprint`.
 - `url_for` and `Flasgo.url_for`: validated relative URL generation, also available in configured Jinja templates.
 - `Flasgo.policy_snapshot`, `flasgo routes --policy/--json`, and `flasgo check --deploy/--against/--json`:
-  inspect framework policy and review changes in CI without exporting secrets.
+  inspect framework policy and review changes in CI without exporting secrets. Save baselines atomically with
+  `flasgo routes app.py --json --output policy.json` (`-o`); this keeps app import output out of the snapshot.
 - `Depends`: sync/async generator providers with function/request lifetimes and deterministic cleanup;
   `Flasgo.override_dependencies` supplies context-local test overrides.
 - `response_model=` and `ResponseValidationError`: opt-in response validation and recursive public-field filtering

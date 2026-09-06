@@ -392,7 +392,7 @@ For production, run behind a real ASGI server and keep Flasgo security settings 
 Use `Blueprint` for reusable HTTP route groups and `url_for` for named redirects and template links. A Flasgo blueprint
 adds declared permissions/dependencies to its children and registers atomically; it is not a compatibility wrapper
 for arbitrary Flask extensions. Flask-style endpoint names become `blueprint.endpoint` names. See the
-[blueprint guide](docs/application-features.md#blueprints-and-url-generation).
+[blueprint guide](https://flasgo.dev/guides/blueprints-and-url-generation/).
 
 Existing response annotations remain descriptive. Add `response_model=` explicitly when migrating a route to enforced
 output filtering. Use `Depends(..., scope="function")` for a transaction that must finish before sending a response;
@@ -400,6 +400,6 @@ use the default request scope for resources used by streaming. Streaming produce
 session, and cookie changes must finish before the handler returns.
 
 Signed-cookie sessions remain compatible by default. Opting into `ServerSideSessions` changes the cookie format and
-requires existing users to log in again. Review [shared-storage semantics](docs/application-features.md#shared-quotas-and-server-side-sessions)
+requires existing users to log in again. Review [shared-storage semantics](https://flasgo.dev/guides/shared-storage/)
 before switching an existing deployment, particularly session conflicts, identifier rotation, backend outages, and
 quota identities. Add a policy snapshot and `flasgo check --deploy` to migration review and CI.
