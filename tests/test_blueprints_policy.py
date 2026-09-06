@@ -43,7 +43,7 @@ def test_nested_blueprints_preserve_auth_dependencies_and_url_generation() -> No
 
 def test_blueprint_registration_is_atomic_and_does_not_modify_original_endpoint() -> None:
     app = Flasgo()
-    group = Blueprint("private", permissions=[IsAuthenticated()])
+    group = Blueprint("private", permissions=[IsAuthenticated()], rate_limits=[RateLimitRule(2, 60)])
 
     @group.get("/first")
     def first() -> str:
