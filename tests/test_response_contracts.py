@@ -1,6 +1,9 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
-from flasgo import Flasgo, Response
+import pytest
+from flasgo import EventSourceResponse, Flasgo, NDJSONResponse, Response
 
 
 @dataclass
@@ -67,8 +70,6 @@ def test_recursive_output_is_bounded() -> None:
 
 
 def test_response_contract_rejects_unsupported_nested_types_at_registration() -> None:
-    import pytest
-
     class Unsupported:
         pass
 
@@ -78,3 +79,51 @@ def test_response_contract_rejects_unsupported_nested_types_at_registration() ->
 
     with pytest.raises(TypeError, match="Unsupported response model"):
         Flasgo().get("/", response_model=Model)(dict)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        dict[int, str],
+        Mapping[int, str],
+        dict[bool, str],
+        dict[float, str],
+        list[dict[int, str]],
+        dict[str, dict[int, str]],
+    ],
+)
+def test_mapping_key_models_fail_before_route_registration(model: object) -> None:
+    app = Flasgo()
+    with pytest.raises(TypeError, match="mappings must use str or Any keys"):
+        app.get("/", response_model=model)(dict)
+    assert app._routes == []
+
+
+def test_dataclass_mapping_key_models_fail_at_registration() -> None:
+    @dataclass
+    class Model:
+        labels: Mapping[int, str]
+
+    with pytest.raises(TypeError, match="mappings must use str or Any keys"):
+        Flasgo().get("/", response_model=Model)(dict)
+
+
+@pytest.mark.parametrize("model", [dict[str, PublicUser], Mapping[str, PublicUser], dict[Any, PublicUser]])
+def test_supported_mapping_models_project_values_and_reject_non_string_output_keys(model: object) -> None:
+    app = Flasgo()
+    value = {"id": 1, "display_name": "A", "password_hash": "secret"}
+    app.get("/", response_model=model)(lambda: {"user": value})
+    invalid_output: dict[Any, Any] = {1: value}
+    app.get("/invalid", response_model=model)(lambda: invalid_output)
+    assert app.test_client().get("/").json() == {"user": {"id": 1, "display_name": "A"}}
+    assert app.test_client().get("/invalid").status_code == 500
+
+
+@pytest.mark.parametrize("response_type", [EventSourceResponse, NDJSONResponse])
+def test_stream_mapping_model_is_rejected_before_source_consumption(response_type: type) -> None:
+    async def source():
+        pytest.fail("Invalid model must be rejected before consuming items")
+        yield {}
+
+    with pytest.raises(TypeError, match="mappings must use str or Any keys"):
+        response_type(source(), item_model=dict[int, str])

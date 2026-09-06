@@ -29,6 +29,7 @@ class ResponseValidationError(Exception):
 
 
 def validate_response_model(model: object, *, _seen: set[type[Any]] | None = None) -> None:
+    """Reject unsupported output types before a route or item stream is registered."""
     if _contains_forward_ref(model) or isinstance(model, str):
         raise TypeError("Response models must use resolved Python types.")
     if get_origin(model) is Annotated:
@@ -73,7 +74,10 @@ def validate_response_model(model: object, *, _seen: set[type[Any]] | None = Non
             validate_response_model(type(value), _seen=_seen)
         return
     if origin in {list, tuple, set, frozenset, dict, Mapping, Union, types.UnionType}:
-        for member in get_args(model):
+        args = get_args(model)
+        if origin in {dict, Mapping} and args and args[0] not in {str, Any}:
+            raise TypeError("Response model mappings must use str or Any keys.")
+        for member in args:
             if member is not Ellipsis:
                 validate_response_model(member, _seen=_seen)
         return
