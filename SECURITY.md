@@ -3,7 +3,7 @@
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| Latest `0.8.x` release | ✅ |
+| Latest `0.9.x` release | ✅ |
 | Older `0.x` releases | ❌ |
 
 Security fixes are made against `main` first and may be backported to the latest release line when practical. If you are running an older release, upgrade to the newest available version before requesting support.
