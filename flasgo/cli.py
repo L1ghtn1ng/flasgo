@@ -14,6 +14,7 @@ from types import ModuleType
 from typing import Any
 
 from .app import Flasgo
+from .policy import compare_policy, deployment_issues
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     routes_parser = subparsers.add_parser("routes", help="List registered HTTP and WebSocket routes")
     _add_target_arguments(routes_parser)
+    routes_parser.add_argument("--policy", action="store_true", help="Explain effective route security policies")
+    routes_parser.add_argument("--json", action="store_true", help="Emit a versioned policy snapshot as JSON")
     routes_parser.set_defaults(handler=_routes_command)
 
     openapi_parser = subparsers.add_parser("openapi", help="Render the application's OpenAPI document")
@@ -66,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Validate routes and application configuration")
     _add_target_arguments(check_parser)
+    check_parser.add_argument(
+        "--deploy", action="store_true", help="Check production security settings and declared access"
+    )
+    check_parser.add_argument("--json", action="store_true", help="Emit structured issues and policy changes")
+    check_parser.add_argument("--against", help="Compare with a routes --json policy snapshot; fail on any change")
     check_parser.set_defaults(handler=_check_command)
 
     db_parser = subparsers.add_parser("db", help="Manage optional Alembic database migrations")
@@ -117,6 +125,15 @@ def _add_target_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _routes_command(args: argparse.Namespace) -> int:
     app = load_app(args.target, app_name=args.app)
+    if args.json or args.policy:
+        snapshot = app.policy_snapshot()
+        if args.json:
+            print(json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False))
+        else:
+            print(snapshot["scope"])
+            for route in snapshot["routes"]:
+                print(json.dumps(route, sort_keys=True, allow_nan=False))
+        return 0
     print("PROTOCOL  METHODS      PATH                      NAME")
     for route in app._routes:
         methods = ",".join(sorted(route.methods))
@@ -180,12 +197,30 @@ def _check_command(args: argparse.Namespace) -> int:
         if route.raw_path in internal_paths
     )
 
-    if errors:
-        for error in sorted(set(errors)):
-            print(f"error: {error}", file=sys.stderr)
-        return 1
-    print("Flasgo check passed.")
-    return 0
+    issues = [{"code": "registration", "severity": "error", "message": error} for error in sorted(set(errors))]
+    if args.deploy:
+        issues.extend(issue.to_dict() for issue in deployment_issues(app))
+    changes = []
+    if args.against:
+        try:
+            with Path(args.against).open("rb") as source:
+                raw = source.read(2_097_153)
+            if len(raw) > 2_097_152:
+                raise ValueError("Policy snapshot exceeds 2 MiB.")
+            changes = compare_policy(json.loads(raw), app.policy_snapshot())
+        except (OSError, ValueError, RecursionError) as exc:
+            issues.append({"code": "policy_snapshot", "severity": "error", "message": str(exc)})
+    failed = bool(issues or changes)
+    if args.json:
+        print(json.dumps({"passed": not failed, "issues": issues, "changes": changes}, indent=2, sort_keys=True))
+    else:
+        for issue in issues:
+            print(f"{issue['severity']}: {issue['code']}: {issue['message']}", file=sys.stderr)
+        for change in changes:
+            print(f"policy changed: {change['section']}", file=sys.stderr)
+        if not failed:
+            print("Flasgo check passed.")
+    return int(failed)
 
 
 def _atomic_write(path: Path, value: str) -> None:

@@ -761,9 +761,10 @@ class Flasgo(RouteDecorators):
         path: str,
         *,
         name: str | None = None,
+        public: bool = False,
     ) -> Callable[[WebSocketEndpoint], WebSocketEndpoint]:
         def decorator(func: WebSocketEndpoint) -> WebSocketEndpoint:
-            self.add_websocket_route(path, func, name=name)
+            self.add_websocket_route(path, func, name=name, public=public)
             return func
 
         return decorator
@@ -774,8 +775,11 @@ class Flasgo(RouteDecorators):
         endpoint: WebSocketEndpoint,
         *,
         name: str | None = None,
+        public: bool = False,
     ) -> None:
-        self._websocket_routes.append(WebSocketRoute(path, endpoint, name=name))
+        if not isinstance(public, bool):
+            raise TypeError("public must be a bool.")
+        self._websocket_routes.append(WebSocketRoute(path, endpoint, name=name, public=public))
 
     def lifespan(self, fn: LifespanHandler) -> LifespanHandler:
         if self._lifespan_handler is not None:
@@ -857,9 +861,12 @@ class Flasgo(RouteDecorators):
         methods: Iterable[str] = ("GET",),
         name: str | None = None,
         cors: CORSConfig | Literal[False] | None = None,
+        public: bool = False,
         response_model: object = None,
         dependencies: Sequence[Depends] = (),
     ) -> None:
+        if not isinstance(public, bool):
+            raise TypeError("public must be a bool.")
         if cors is not None and cors is not False and not isinstance(cors, CORSConfig):
             raise TypeError("Route cors must be a CORSConfig instance, False, or None.")
         reserved_paths: set[str] = set()
@@ -891,6 +898,7 @@ class Flasgo(RouteDecorators):
                 plan,
                 name=name,
                 cors=resolved_cors,
+                public=public,
                 response_model=response_model,
             )
         )
@@ -908,6 +916,11 @@ class Flasgo(RouteDecorators):
             yield
         finally:
             self._dependency_overrides.reset(token)
+
+    def policy_snapshot(self) -> dict[str, Any]:
+        from .policy import policy_snapshot
+
+        return policy_snapshot(self)
 
     def run(
         self,
@@ -976,6 +989,7 @@ class Flasgo(RouteDecorators):
             self._build_static_endpoint(static_directory),
             methods=("GET",),
             name=f"static:{static_directory.url_path}",
+            public=True,
         )
 
     def test_client(self) -> TestClient:

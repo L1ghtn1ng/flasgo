@@ -51,6 +51,7 @@ class Route:
     endpoint_plan: EndpointPlan
     name: str | None = None
     cors: CORSConfig | None = None
+    public: bool = False
     response_model: object = None
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
@@ -86,6 +87,7 @@ class WebSocketRoute:
     raw_path: str
     endpoint: WebSocketEndpoint
     name: str | None = None
+    public: bool = False
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
 
