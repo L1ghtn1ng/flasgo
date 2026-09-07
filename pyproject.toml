@@ -64,8 +64,8 @@ dev = [
   "prometheus-client==0.26.0",
   "pytest==9.1.1",
   "redis==8.1.0",
-  "ruff==0.16.4",
-  "ty==0.0.74",
+  "ruff==0.16.5",
+  "ty==0.0.75",
 ]
 
 [tool.ruff]
