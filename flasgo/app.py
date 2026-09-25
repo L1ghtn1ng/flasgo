@@ -7,7 +7,6 @@ import secrets
 import sys
 import time
 from annotationlib import Format
-from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from contextvars import ContextVar
@@ -71,6 +70,7 @@ from .routing import (
 )
 from .security import (
     SecurityConfig,
+    SecurityFailureThrottle,
     allowed_host_pattern,
     apply_security_headers,
     csrf_is_valid,
@@ -306,7 +306,7 @@ class Flasgo(RouteDecorators):
         self._session_backend = session_backend
         self._openapi_cache: dict[str, Any] | None = None
         self._openapi_dirty = True
-        self._security_failures: OrderedDict[str, tuple[float, int]] = OrderedDict()
+        self._security_throttle = SecurityFailureThrottle(self.security)
         self._logger = logging.getLogger("flasgo.security")
         self._access_logger = logging.getLogger("flasgo.access")
         self._websocket_logger = logging.getLogger("flasgo.websocket")
@@ -2172,57 +2172,14 @@ class Flasgo(RouteDecorators):
 
     def _register_security_failure(self, req: Request) -> bool:
         """Register a security failure and observe any resulting throttle decision."""
-        limit = self.security.security_failure_rate_limit
-        if limit <= 0:
-            return False
-        client = req.client_ip
-        if client is None:
-            # Without a peer identity there is no per-client bucket to update; throttling
-            # a shared "unknown" bucket would let one client lock out all the others.
-            return False
-        window = self.security.security_failure_window_seconds
-        now = time.monotonic()
-        self._prune_security_failures(now, window)
-        start, count = self._security_failures.get(client, (now, 0))
-        if now - start >= window:
-            self._security_failures.pop(client, None)
-            start = now
-            count = 0
-        if client not in self._security_failures and len(self._security_failures) >= 10_000:
-            self._observe_rejection(req, "security_rate_limit")
-            return True
-        count += 1
-        self._security_failures[client] = (start, count)
-        if count > limit:
+        if self._security_throttle.register(req.client_ip):
             self._observe_rejection(req, "security_rate_limit")
             return True
         return False
 
-    def _prune_security_failures(self, now: float, window: float) -> None:
-        """Remove expired client buckets in amortized insertion order."""
-        cutoff = now - window
-        while self._security_failures:
-            client, (started, _count) = next(iter(self._security_failures.items()))
-            if started >= cutoff:
-                break
-            self._security_failures.pop(client)
-
     def _security_failure_is_limited(self, req: Request) -> bool:
         """Check existing failure state and observe a throttle decision without incrementing failures."""
-        limit = self.security.security_failure_rate_limit
-        if limit <= 0:
-            return False
-        client = req.client_ip
-        if client is None:
-            return False
-        state = self._security_failures.get(client)
-        if state is None:
-            return False
-        start, count = state
-        if time.monotonic() - start >= self.security.security_failure_window_seconds:
-            self._security_failures.pop(client, None)
-            return False
-        if count >= limit:
+        if self._security_throttle.is_limited(req.client_ip):
             self._observe_rejection(req, "security_rate_limit")
             return True
         return False

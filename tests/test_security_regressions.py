@@ -730,14 +730,14 @@ def test_security_failure_tracking_is_bounded_and_reuses_expired_capacity(monkey
 
     for index in range(10_000):
         assert app._register_security_failure(request_for(f"client-{index}")) is False
-    assert len(app._security_failures) == 10_000
+    assert len(app._security_throttle._clients) == 10_000
     assert app._register_security_failure(request_for("overflow")) is True
-    assert len(app._security_failures) == 10_000
-    assert "client-0" in app._security_failures
+    assert len(app._security_throttle._clients) == 10_000
+    assert "client-0" in app._security_throttle._clients
 
     now = 61.0
     assert app._register_security_failure(request_for("after-expiry")) is False
-    assert list(app._security_failures) == ["after-expiry"]
+    assert list(app._security_throttle._clients) == ["after-expiry"]
 
 
 def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_routes() -> None:

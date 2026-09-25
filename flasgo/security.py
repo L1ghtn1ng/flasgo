@@ -1,6 +1,8 @@
 import ipaddress
 import re
 import secrets
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -418,3 +420,60 @@ def _canonical_origin(value: str) -> tuple[str, str, int] | None:
     ):
         return None
     return scheme, parsed.hostname.lower(), port or (443 if scheme == "https" else 80)
+
+
+class SecurityFailureThrottle:
+    """Count security failures per client in fixed windows and report when a client should be throttled.
+
+    Tracking is bounded to ``max_clients`` identities. When full, a new client is throttled rather than evicting a
+    live entry, so an attacker cannot flush other clients' failure history. Limits are read from ``config`` on each
+    call so later configuration changes apply.
+    """
+
+    def __init__(self, config: SecurityConfig, *, max_clients: int = 10_000) -> None:
+        self._config = config
+        self._max_clients = max_clients
+        self._clients: OrderedDict[str, tuple[float, int]] = OrderedDict()
+
+    def register(self, client: str | None) -> bool:
+        """Record one failure for ``client`` and return whether it is now throttled."""
+        limit = self._config.security_failure_rate_limit
+        if limit <= 0 or client is None:
+            # Without a peer identity there is no per-client bucket; throttling a shared "unknown" bucket would let
+            # one client lock out all the others.
+            return False
+        window = self._config.security_failure_window_seconds
+        now = time.monotonic()
+        self._prune(now, window)
+        start, count = self._clients.get(client, (now, 0))
+        if now - start >= window:
+            self._clients.pop(client, None)
+            start, count = now, 0
+        if client not in self._clients and len(self._clients) >= self._max_clients:
+            return True
+        count += 1
+        self._clients[client] = (start, count)
+        return count > limit
+
+    def is_limited(self, client: str | None) -> bool:
+        """Return whether ``client`` is already throttled, without recording a failure."""
+        limit = self._config.security_failure_rate_limit
+        if limit <= 0 or client is None:
+            return False
+        state = self._clients.get(client)
+        if state is None:
+            return False
+        start, count = state
+        if time.monotonic() - start >= self._config.security_failure_window_seconds:
+            self._clients.pop(client, None)
+            return False
+        return count >= limit
+
+    def _prune(self, now: float, window: float) -> None:
+        """Remove expired client buckets in amortized insertion order."""
+        cutoff = now - window
+        while self._clients:
+            client, (started, _count) = next(iter(self._clients.items()))
+            if started >= cutoff:
+                break
+            self._clients.pop(client)
