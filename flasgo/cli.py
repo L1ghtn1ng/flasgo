@@ -494,13 +494,14 @@ def _import_target(target: _ResolvedTarget) -> ModuleType:
 
 
 def _namespace_matches_target(module: ModuleType, target: _ResolvedTarget) -> bool:
-    assert target.source is not None
+    if target.source is None:
+        raise RuntimeError("A namespace target must be resolved from a source file.")
     if "." not in target.module_name:
         return _module_matches_source(module, target.source)
     expected_directory = target.import_root / target.module_name.partition(".")[0]
     location = _module_location(module)
     if location is not None:
-        return location == expected_directory or location.parent == expected_directory
+        return expected_directory in {location, location.parent}
     return any(Path(value).resolve() == expected_directory for value in getattr(module, "__path__", ()))
 
 

@@ -2,14 +2,14 @@ import asyncio
 import sys
 from typing import Any
 
-from flasgo import CORSConfig, Flasgo
-from flasgo.metrics import Metrics
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from _helpers import METRICS_TOKEN as _TOKEN
 from _helpers import metrics_app as _app
+from flasgo import CORSConfig, Flasgo
+from flasgo.metrics import Metrics
 
 
 def _scrape(app: Flasgo, *, accept: str | None = None) -> str:

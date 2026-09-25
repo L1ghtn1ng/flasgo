@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Annotated, Any, cast
 
 import pytest
+from openapi_spec_validator import OpenAPIV32SpecValidator, validate
+
 from flasgo import (
     AuthResult,
     Body,
@@ -20,7 +22,6 @@ from flasgo import (
     bearer_token_backend,
 )
 from flasgo.testing import TestClient
-from openapi_spec_validator import OpenAPIV32SpecValidator, validate
 
 
 @dataclass

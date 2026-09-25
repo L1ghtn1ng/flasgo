@@ -37,6 +37,9 @@
 - Packaging: license metadata uses a PEP 639 SPDX expression (`BSD-3-Clause`) with `license-files`, the `Typing ::
   Typed`, `Python :: 3 :: Only` and `Environment :: Web Environment` classifiers are declared, and source
   distributions contain an explicit file list, so untracked local files are never packaged.
+- Development tooling: ruff now also enforces the C4, DTZ, ERA, FLY, FURB, G, INP, ISC, LOG, PGH, PLW, PT, PTH, PYI,
+  Q, RET, RSE, S, SLOT, T20 and TID rule sets (with targeted per-file ignores), import sorting treats `flasgo` as
+  first-party, and pytest runs in strict mode with warnings treated as errors.
 
 ### Fixed
 

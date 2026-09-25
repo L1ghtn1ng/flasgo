@@ -3,9 +3,10 @@ from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from typing import Any, cast, get_type_hints
 
+import pytest
+
 import flasgo.app as app_module
 import flasgo.streaming as streaming_module
-import pytest
 from flasgo import (
     Blueprint,
     Flasgo,
@@ -48,7 +49,7 @@ def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
     assert response.cookies == []
     with pytest.raises(ValueError, match="Invalid Set-Cookie"):
         Response(body=b"", cookies=[raw_cookie])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"(?i)set-cookie"):
         Response(body=b"", headers={"Set-Cookie": raw_cookie})
 
     async def run() -> None:
@@ -65,7 +66,7 @@ def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
                 mutated.headers["Set-Cookie"] = raw_cookie
             else:
                 mutated.cookies.append(raw_cookie)
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match=r"(?i)set-cookie"):
                 await mutated.send(send)
 
         async def receive() -> dict[str, Any]:
@@ -81,11 +82,13 @@ def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
                 max_messages_per_minute=60,
             )
             await websocket.receive_connect()
-            with pytest.raises(ValueError):
-                if accept:
-                    await websocket.accept(headers={"Set-Cookie": raw_cookie})
-                else:
-                    await websocket.deny(403, "Denied", headers={"Set-Cookie": raw_cookie})
+            handshake = (
+                websocket.accept(headers={"Set-Cookie": raw_cookie})
+                if accept
+                else websocket.deny(403, "Denied", headers={"Set-Cookie": raw_cookie})
+            )
+            with pytest.raises(ValueError, match=r"Invalid (Set-Cookie value|WebSocket \w+ header)"):
+                await handshake
         assert messages == []
 
     asyncio.run(run())
@@ -124,7 +127,7 @@ def test_intersecting_route_ties_are_rejected_for_both_protocols(converter: str,
 
     async def socket(value: str) -> None:
         """Provide a WebSocket endpoint for registration-only overlap checks."""
-        return None
+        return
 
     app.add_websocket_route(paths[0], socket)
     with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
@@ -889,7 +892,7 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
 
         async def send(message: dict[str, Any]) -> None:
             """Accept ASGI output without adding transport delay."""
-            return None
+            return
 
         try:
             await asyncio.wait_for(streamed_response.send(send), timeout=0.1)
@@ -942,7 +945,7 @@ def test_stream_teardown_is_bounded_after_duration_or_disconnect(disconnect: boo
 
         async def send(message: dict[str, Any]) -> None:
             """Accept response messages without affecting the producer deadline."""
-            return None
+            return
 
         response.receive = receive
         expected = ConnectionError if disconnect else TimeoutError
@@ -996,7 +999,7 @@ def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> 
 
         async def send(message: dict[str, Any]) -> None:
             """Accept transport output without introducing additional failures."""
-            return None
+            return
 
         response.receive = receive
         try:

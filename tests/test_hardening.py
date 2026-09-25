@@ -3,12 +3,12 @@ import json
 import time
 
 import pytest
+
+from _helpers import extract_cookie
 from flasgo import Flasgo, HTTPException, Request, User
 from flasgo.security import build_set_cookie
 from flasgo.session import SessionSigner, b64encode, hmac_digest
 from flasgo.testing import TestClient
-
-from _helpers import extract_cookie
 
 
 def test_authorize_defaults_to_is_authenticated() -> None:
@@ -84,7 +84,7 @@ def test_csrf_rejects_same_host_with_wrong_scheme() -> None:
 
 @pytest.mark.parametrize("cookie_value", ["bad;value", "bad,value", "bad value", "bad\tvalue"])
 def test_build_set_cookie_rejects_unsafe_value_separators(cookie_value: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid cookie value"):
         build_set_cookie("session", cookie_value)
 
 

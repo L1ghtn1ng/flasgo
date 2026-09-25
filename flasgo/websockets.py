@@ -248,7 +248,7 @@ class WebSocket:
         if self._application_state is not _ApplicationState.ACCEPTED:
             raise RuntimeError(self._not_open_message("receiving"))
         if self._client_state is _ClientState.DISCONNECTED:
-            raise WebSocketDisconnect()
+            raise WebSocketDisconnect
         message = await self._receive()
         message_type = message.get("type")
         if message_type == "websocket.disconnect":

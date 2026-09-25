@@ -4,6 +4,7 @@ import logging
 from collections.abc import Iterator
 
 import pytest
+
 from flasgo.logging import configure_logging, log_event
 
 

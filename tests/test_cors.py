@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+
 from flasgo import CORSConfig, Flasgo, IsAuthenticated, Request, Response
 from flasgo.security import SecurityConfig
 

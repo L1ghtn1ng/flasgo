@@ -2,7 +2,7 @@ import inspect
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from types import TracebackType
-from typing import Any, override
+from typing import Any, cast, override
 
 from .params import (
     Depends,
@@ -184,8 +184,8 @@ async def _resolve_plan(
             elif binding.source == "form":
                 value = await _resolve_form(binding, request, body_cache, budget)
             elif binding.source == "dependency" and binding.dependency is not None:
-                marker = binding.marker
-                assert isinstance(marker, Depends)
+                # Dependency bindings are always compiled with a Depends marker.
+                marker = cast(Depends, binding.marker)
                 context = request.scope.get("flasgo.dependencies")
                 if not isinstance(context, DependencyContext):
                     raise RuntimeError("Dependency resolution requires a DependencyContext in request.scope['flasgo.dependencies'].")

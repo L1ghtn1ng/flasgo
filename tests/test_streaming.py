@@ -1,8 +1,9 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
+
 from flasgo import Depends, EventSourceResponse, Flasgo, NDJSONResponse, ServerSentEvent, StreamingResponse, request
 
 
@@ -117,11 +118,9 @@ def test_annotated_sse_and_text_responses_use_the_correct_openapi_media_types() 
 
 @pytest.mark.parametrize("field", ["event", "id"])
 def test_sse_rejects_control_character_injection(field: str) -> None:
-    with pytest.raises(ValueError):
-        if field == "event":
-            ServerSentEvent("test", event="x\ndata: injected")
-        else:
-            ServerSentEvent("test", id="x\ndata: injected")
+    injected: dict[str, Any] = {field: "x\ndata: injected"}
+    with pytest.raises(ValueError, match="without control characters"):
+        ServerSentEvent("test", **injected)
 
 
 def test_ndjson_contract_filters_each_item() -> None:

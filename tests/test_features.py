@@ -2,10 +2,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from jinja2 import TemplateError
+
 from flasgo import Flasgo, Request, Response, TestClient, redirect, session
 from flasgo import staticfiles as staticfiles_module
 from flasgo.debug import Debug
-from jinja2 import TemplateError
 
 
 def test_urlencoded_form_parsing_support() -> None:

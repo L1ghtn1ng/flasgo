@@ -2,6 +2,7 @@ import socket
 from collections.abc import Callable
 
 import pytest
+
 from flasgo import Flasgo, SSRFConfig, SSRFGuard, SSRFViolation
 
 PUBLIC_IPV4 = "1.1.1.1"

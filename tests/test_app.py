@@ -2,8 +2,10 @@ import asyncio
 import logging
 from collections import deque
 
-import flasgo.ratelimit as ratelimit_module
 import pytest
+
+import flasgo.ratelimit as ratelimit_module
+from _helpers import extract_cookie
 from flasgo import (
     Flasgo,
     HasScope,
@@ -21,8 +23,6 @@ from flasgo.app import session
 from flasgo.ratelimit import RateLimiter, RateLimitRule
 from flasgo.security import SecurityConfig
 from flasgo.testing import TestClient
-
-from _helpers import extract_cookie
 
 
 def test_async_route_and_json_response() -> None:
@@ -734,7 +734,7 @@ def test_default_secret_is_not_predictable_literal() -> None:
 
 
 def test_short_secret_rejected_when_debug_false() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="SECRET_KEY must be at least 32 characters"):
         Flasgo(settings={"DEBUG": False, "SECRET_KEY": "short"})
 
 
@@ -1077,13 +1077,13 @@ def test_auth_backend_exception_fails_closed() -> None:
 
 def test_register_auth_backend_rejects_empty_name() -> None:
     app = Flasgo()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Auth backend name must not be empty"):
         app.register_auth_backend("   ", lambda req: None)
 
 
 def test_authorize_rejects_empty_backend_name() -> None:
     app = Flasgo()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Auth backend name must not be empty"):
         app.authorize(IsAuthenticated(), backend="  ")
 
 

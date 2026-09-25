@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any, cast
 
 import pytest
+
 from flasgo import (
     Flasgo,
     IsAuthenticated,
@@ -145,7 +146,6 @@ def test_websocket_authentication_failures_are_throttled_before_backend() -> Non
     def backend(request: object) -> None:
         nonlocal calls
         calls += 1
-        return None
 
     app = Flasgo(
         settings={
@@ -178,7 +178,6 @@ def test_websocket_default_route_limit_runs_before_authentication() -> None:
     def backend(request: object) -> None:
         nonlocal calls
         calls += 1
-        return None
 
     app = Flasgo(settings={"CSRF_ENABLED": False, "SECURITY_FAILURE_RATE_LIMIT": 0})
     app.register_auth_backend("test", backend)
@@ -363,7 +362,8 @@ def test_websocket_handler_with_type_checking_only_annotation_registers(tmp_path
         )
     )
     spec = importlib.util.spec_from_file_location("ws_forward_ref_app", module_path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 

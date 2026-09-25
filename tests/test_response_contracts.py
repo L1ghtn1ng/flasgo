@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+
 from flasgo import EventSourceResponse, Flasgo, NDJSONResponse, Response
 
 

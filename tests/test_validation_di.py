@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 import pytest
+
 from flasgo import (
     Body,
     Cookie,
@@ -92,12 +93,11 @@ class UnknownAnnotation:
     pass
 
 
-_DI_CALLS = 0
+_DI_CALLS = [0]
 
 
 def _page_size(limit: Annotated[int, Query()] = 10) -> int:
-    global _DI_CALLS
-    _DI_CALLS += 1
+    _DI_CALLS[0] += 1
     return limit
 
 
@@ -235,8 +235,7 @@ def test_form_validation_error_preserves_safe_form_values() -> None:
 
 def test_dependencies_are_nested_cached_and_validated() -> None:
     app = Flasgo()
-    global _DI_CALLS
-    _DI_CALLS = 0
+    _DI_CALLS[0] = 0
 
     @app.get("/items")
     def items(
@@ -248,7 +247,7 @@ def test_dependencies_are_nested_cached_and_validated() -> None:
 
     response = app.test_client().get("/items?limit=25")
     assert response.json() == {"first": 25, "second": 25, "label": "page:25"}
-    assert _DI_CALLS == 1
+    assert _DI_CALLS[0] == 1
 
 
 def test_dependency_cycles_and_multiple_body_models_fail_at_registration() -> None:
@@ -876,7 +875,8 @@ def test_one_unresolvable_model_annotation_does_not_break_the_other_fields(tmp_p
         )
     )
     spec = importlib.util.spec_from_file_location("partial_hints_models", module_path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)

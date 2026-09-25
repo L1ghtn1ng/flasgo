@@ -120,7 +120,7 @@ def project_response(model: object, value: object, budget: ValidationBudget) -> 
     try:
         return _project(model, value, budget, 0)
     except Exception as exc:
-        raise ResponseValidationError() from exc
+        raise ResponseValidationError from exc
 
 
 def contract_response(value: ResponseValue, model: object, request: Request) -> Response:
@@ -139,7 +139,7 @@ def contract_response(value: ResponseValue, model: object, request: Request) -> 
         ResponseValidationError: If `value` is already a response or its body violates the declared model.
     """
     if isinstance(value, Response):
-        raise ResponseValidationError()
+        raise ResponseValidationError
     body = value
     status = 200
     headers = None
@@ -172,7 +172,7 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
         model = get_args(model)[0]
     if is_dataclass(model) and isinstance(model, type):
         if not isinstance(value, Mapping) and not (is_dataclass(value) and not isinstance(value, type)):
-            raise ResponseValidationError()
+            raise ResponseValidationError
         hints = _model_hints(model)
         result = {}
         for field in fields(model):
@@ -185,7 +185,7 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
                 elif field.default_factory is not MISSING:
                     field_value = field.default_factory()
                 else:
-                    raise ResponseValidationError()
+                    raise ResponseValidationError
             result[field.name] = _project(hints.get(field.name, field.type), field_value, budget, depth + 1)
         return result
     origin = get_origin(model)
@@ -199,24 +199,24 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
                     raise
             except ResponseValidationError:
                 pass
-        raise ResponseValidationError()
+        raise ResponseValidationError
     if origin in {list, tuple, set, frozenset} or model in {list, tuple, set, frozenset}:
         if not isinstance(value, list | tuple | set | frozenset):
-            raise ResponseValidationError()
+            raise ResponseValidationError
         if origin is tuple and args and args[-1] is not Ellipsis:
             if len(value) != len(args):
-                raise ResponseValidationError()
+                raise ResponseValidationError
             return [_project(item_type, item, budget, depth + 1) for item_type, item in zip(args, value, strict=True)]
         member = args[0] if args else Any
         return [_project(member, item, budget, depth + 1) for item in value]
     if origin in {dict, Mapping} or model is dict:
         if not isinstance(value, Mapping):
-            raise ResponseValidationError()
-        key_type, item_type = args if args else (str, Any)
+            raise ResponseValidationError
+        key_type, item_type = args or (str, Any)
         result = {}
         for key, item in value.items():
             if not isinstance(key, str):
-                raise ResponseValidationError()
+                raise ResponseValidationError
             validate_value(key_type, key, location=("response",), budget=budget)
             result[key] = _project(item_type, item, budget, depth + 1)
         return result
@@ -232,5 +232,5 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
         if value is None or isinstance(value, str | bool | int | float):
             model = type(value)
         else:
-            raise ResponseValidationError()
+            raise ResponseValidationError
     return to_jsonable(validate_value(model, value, location=("response",), budget=budget))

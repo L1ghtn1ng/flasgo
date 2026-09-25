@@ -2,6 +2,7 @@ import asyncio
 from typing import Annotated
 
 import pytest
+
 from flasgo import Depends, Flasgo
 
 

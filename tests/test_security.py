@@ -2,6 +2,7 @@ import dataclasses
 from typing import Annotated, Any, cast
 
 import pytest
+
 from flasgo import (
     Body,
     Flasgo,
@@ -185,9 +186,9 @@ def test_json_rejects_non_finite_constants() -> None:
 
 
 def test_response_json_rejects_non_finite_floats() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not JSON compliant"):
         Response.json({"v": float("nan")})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not JSON compliant"):
         Response.json({"v": float("inf")})
 
 

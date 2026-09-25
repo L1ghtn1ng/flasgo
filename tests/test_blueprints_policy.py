@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from flasgo import Blueprint, Depends, Flasgo, HasScope, IsAuthenticated, RateLimitRule, User, cli
 from flasgo.policy import compare_policy, deployment_issues
 
@@ -93,7 +94,7 @@ def test_blueprint_cycles_and_duplicates_fail_without_partial_registration() -> 
 def test_url_for_rejects_ambiguous_path_values(value: str) -> None:
     app = Flasgo()
     app.get("/<path:value>", name="file")(lambda value: value)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"Unsafe URL parameter|safe relative URL"):
         app.url_for("file", value=value)
 
 
@@ -120,7 +121,7 @@ def test_policy_omits_secrets_and_detects_permission_change() -> None:
     assert app.security.secret_key not in json.dumps(before)
     app.authorize(IsAuthenticated())(private)
     assert compare_policy(before, app.policy_snapshot())[0]["section"] == "routes"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="schema_version=1"):
         compare_policy({"schema_version": 2}, app.policy_snapshot())
 
 
@@ -177,7 +178,10 @@ def test_duplicate_route_names_are_rejected_at_registration() -> None:
 
 def test_url_for_encodes_literal_segments_and_skips_none_query_values() -> None:
     app = Flasgo()
-    app.get("/café/<int:item_id>", name="item")(lambda item_id: str(item_id))
+
+    @app.get("/café/<int:item_id>", name="item")
+    def item(item_id: int) -> str:
+        return str(item_id)
 
     assert app.url_for("item", item_id=3, q=None, sort="a b") == "/caf%C3%A9/3?sort=a+b"
 

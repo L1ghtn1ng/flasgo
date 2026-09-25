@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from flasgo import Flasgo
 from flasgo import server as server_module
 

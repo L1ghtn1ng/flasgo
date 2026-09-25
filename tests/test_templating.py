@@ -1,6 +1,11 @@
 from pathlib import Path
 
 import pytest
+from jinja2 import BaseLoader as JinjaBaseLoader
+from jinja2 import Template as JinjaTemplate
+from jinja2 import TemplateNotFound as JinjaTemplateNotFound
+from jinja2.exceptions import SecurityError, UndefinedError
+
 from flasgo import (
     BaseLoader,
     Flasgo,
@@ -12,10 +17,6 @@ from flasgo import (
     render_template,
 )
 from flasgo.templating import SecureTemplateLoader
-from jinja2 import BaseLoader as JinjaBaseLoader
-from jinja2 import Template as JinjaTemplate
-from jinja2 import TemplateNotFound as JinjaTemplateNotFound
-from jinja2.exceptions import SecurityError, UndefinedError
 
 
 def test_template_exports_match_jinja2_types() -> None:

@@ -2,13 +2,15 @@ import json
 import os
 import stat
 import sys
+import textwrap
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from openapi_spec_validator import OpenAPIV32SpecValidator, validate
+
 from flasgo import Flasgo
 from flasgo import cli as cli_module
-from openapi_spec_validator import OpenAPIV32SpecValidator, validate
 
 
 @pytest.fixture(autouse=True)
@@ -368,15 +370,14 @@ def test_load_app_replaces_cached_package_parent(tmp_path: Path) -> None:
 def test_routes_openapi_and_check_commands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     app_file = tmp_path / "app.py"
     app_file.write_text(
-        "\n".join(
-            (
-                "from flasgo import Flasgo",
-                "app = Flasgo(settings={'CSRF_ENABLED': False})",
-                "@app.get('/users/<int:user_id>', name='user')",
-                "async def user(user_id: int): return {'id': user_id}",
-                "@app.websocket('/events', name='events')",
-                "async def events(websocket): pass",
-            )
+        textwrap.dedent(
+            """\
+            from flasgo import Flasgo
+            app = Flasgo(settings={'CSRF_ENABLED': False})
+            @app.get('/users/<int:user_id>', name='user')
+            async def user(user_id: int): return {'id': user_id}
+            @app.websocket('/events', name='events')
+            async def events(websocket): pass"""
         ),
         encoding="utf-8",
     )
@@ -444,15 +445,14 @@ def test_check_fails_when_app_registration_rejects_duplicate_routes(
     """Report conflicting application routes as a failed check with a useful diagnostic."""
     app_file = tmp_path / "bad_app.py"
     app_file.write_text(
-        "\n".join(
-            (
-                "from flasgo import Flasgo",
-                "app = Flasgo(settings={'CSRF_ENABLED': False})",
-                "@app.get('/duplicate')",
-                "async def first(): return 'one'",
-                "@app.get('/duplicate')",
-                "async def second(): return 'two'",
-            )
+        textwrap.dedent(
+            """\
+            from flasgo import Flasgo
+            app = Flasgo(settings={'CSRF_ENABLED': False})
+            @app.get('/duplicate')
+            async def first(): return 'one'
+            @app.get('/duplicate')
+            async def second(): return 'two'"""
         ),
         encoding="utf-8",
     )

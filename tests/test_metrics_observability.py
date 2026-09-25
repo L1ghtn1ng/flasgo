@@ -4,6 +4,12 @@ from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 import pytest
+from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client.openmetrics.parser import text_string_to_metric_families as parse_openmetrics
+from prometheus_client.parser import text_string_to_metric_families as parse_prometheus
+
+from _helpers import METRICS_TOKEN as _TOKEN
+from _helpers import metrics_app as _app
 from flasgo import (
     Depends,
     EventSourceResponse,
@@ -17,12 +23,6 @@ from flasgo import (
 )
 from flasgo.metrics import Metrics
 from flasgo.ratelimit import RateLimiter
-from prometheus_client import Counter, Gauge, Histogram
-from prometheus_client.openmetrics.parser import text_string_to_metric_families as parse_openmetrics
-from prometheus_client.parser import text_string_to_metric_families as parse_prometheus
-
-from _helpers import METRICS_TOKEN as _TOKEN
-from _helpers import metrics_app as _app
 
 
 def _sample(app: Flasgo, name: str, **labels: str) -> float | None:

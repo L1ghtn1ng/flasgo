@@ -9,15 +9,15 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
+import jwt
 import pytest
-from flasgo import Flasgo, HasScope, IsAuthenticated, WebSocket, encode_jwt, jwt_backend
-from flasgo.logging import log_event
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-import jwt
+from flasgo import Flasgo, HasScope, IsAuthenticated, WebSocket, encode_jwt, jwt_backend
+from flasgo.logging import log_event
 
 _JWT_SECRET = "this-is-a-test-secret-with-at-least-32-bytes"
 
@@ -71,25 +71,10 @@ def test_jwt_backend_enforces_algorithm_issuer_audience_expiry_and_scopes() -> N
 
 
 def test_jwt_backend_rejects_weak_secrets_and_reserved_claim_overrides() -> None:
-    try:
+    with pytest.raises(ValueError, match="at least 32 bytes"):
         jwt_backend("short", issuer="issuer", audience="audience")
-    except ValueError as exc:
-        assert "at least 32 bytes" in str(exc)
-    else:
-        raise AssertionError("A weak HS256 secret was accepted.")
-
-    try:
-        encode_jwt(
-            "alice",
-            _JWT_SECRET,
-            issuer="issuer",
-            audience="audience",
-            additional_claims={"sub": "mallory"},
-        )
-    except ValueError as exc:
-        assert "reserved claims" in str(exc)
-    else:
-        raise AssertionError("A reserved JWT claim was overridden.")
+    with pytest.raises(ValueError, match="reserved claims"):
+        encode_jwt("alice", _JWT_SECRET, issuer="issuer", audience="audience", additional_claims={"sub": "mallory"})
 
 
 @pytest.mark.parametrize("scope", ["read admin", "read\tadmin", 'say"hi"', "back\\slash", "caf\u00e9"])

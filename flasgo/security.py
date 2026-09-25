@@ -14,7 +14,7 @@ from .request import Request
 from .response import Response
 from .session import hmac_digest
 
-_CSRF_TOKEN_VERSION = "v1"
+_CSRF_TOKEN_VERSION = "v1"  # noqa: S105 - a token format version, not a secret
 _CSRF_SIGNING_SALT = "flasgo.csrf"
 
 

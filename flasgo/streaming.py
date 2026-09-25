@@ -295,7 +295,7 @@ def _consume_detached_cleanup_task(task: asyncio.Future[Any]) -> None:
 
 def _admit_cleanup(response: StreamingResponse) -> bool:
     """Reserve active capacity or enqueue cleanup; reject overflow explicitly."""
-    global _active_cleanups
+    global _active_cleanups  # noqa: PLW0603 - intentionally process-wide, guarded by _active_cleanups_lock
     with _active_cleanups_lock:
         if _active_cleanups >= _MAX_ACTIVE_CLEANUPS:
             if len(_pending_cleanups) >= _MAX_PENDING_CLEANUPS:
@@ -309,7 +309,7 @@ def _admit_cleanup(response: StreamingResponse) -> bool:
 
 def _release_cleanup_slot() -> None:
     """Transfer released capacity to queued cleanup on its owning event loop."""
-    global _active_cleanups
+    global _active_cleanups  # noqa: PLW0603 - intentionally process-wide, guarded by _active_cleanups_lock
     with _active_cleanups_lock:
         _active_cleanups -= 1
         pending = _pending_cleanups.popleft() if _pending_cleanups else None

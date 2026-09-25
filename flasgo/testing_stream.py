@@ -42,7 +42,8 @@ class AsyncTestStream:
         Raises:
             RuntimeError: If the application finishes without starting a response.
         """
-        assert self.task is not None
+        if self.task is None:
+            raise RuntimeError("The test stream has not been started.")
         waiter = asyncio.create_task(self.started.wait())
         try:
             await asyncio.wait({waiter, self.task}, return_when=asyncio.FIRST_COMPLETED)
@@ -63,7 +64,8 @@ class AsyncTestStream:
         Raises:
             RuntimeError: If the application ends before the response is complete.
         """
-        assert self.task is not None
+        if self.task is None:
+            raise RuntimeError("The test stream has not been started.")
         while True:
             if not self.queue.empty():
                 message = self.queue.get_nowait()

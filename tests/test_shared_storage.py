@@ -6,6 +6,7 @@ import time
 from uuid import uuid4
 
 import pytest
+
 from flasgo import (
     Flasgo,
     MemoryStore,
@@ -97,11 +98,13 @@ def test_server_sessions_revoke_rotate_and_reject_stale_updates() -> None:
         backend = ServerSideSessions(MemoryStore())
         original = Session({"user": "alice"}, modified=True)
         first = await backend.save(original, max_age=60)
-        assert first is not None and "alice" not in first
+        assert first is not None
+        assert "alice" not in first
         stale = await backend.load(first)
         original.regenerate()
         second = await backend.save(original, max_age=60)
-        assert second and second != first
+        assert second
+        assert second != first
         assert (await backend.load(first)).data == {}
         stale["user"] = "revived"
         with pytest.raises(HTTPException) as error:
@@ -159,7 +162,8 @@ def test_session_backend_integrates_cookies_csrf_and_logout() -> None:
     login_response = client.get("/login")
     cookies = login_response.headers["set-cookie"]
     assert "alice" not in cookies
-    assert "HttpOnly" in cookies and "Secure" in cookies
+    assert "HttpOnly" in cookies
+    assert "Secure" in cookies
     assert client.post("/logout").status_code == 403
     token = client.cookies["flasgo-csrf"]
     response = client.post("/logout", headers={"x-csrf-token": token, "origin": "http://localhost"})
@@ -200,7 +204,8 @@ def test_redis_sessions_use_real_atomic_storage(redis_url: str) -> None:
             stale = await backend.load(token)
             session.regenerate()
             rotated = await backend.save(session, max_age=1)
-            assert rotated and rotated != token
+            assert rotated
+            assert rotated != token
             stale["value"] = 1
             with pytest.raises(HTTPException):
                 await backend.save(stale, max_age=1)
