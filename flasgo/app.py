@@ -10,14 +10,15 @@ import re
 import secrets
 import sys
 import time
+from annotationlib import Format
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin, get_type_hints
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -784,7 +785,8 @@ class Flasgo(RouteDecorators):
                 active = True
             try:
                 await self._call_websocket_endpoint(websocket, match)
-                outcome = "closed" if websocket.disconnected else "success"
+                # A handler that returns without accepting is denied with 403 below, which is not a success.
+                outcome = "closed" if websocket.disconnected else "success" if websocket.accepted else "not_accepted"
             except WebSocketDisconnect:
                 outcome = "closed"
             except Exception:
@@ -798,10 +800,12 @@ class Flasgo(RouteDecorators):
                     client=websocket.client_ip,
                 )
                 self._websocket_logger.debug("websocket handler exception", exc_info=True)
-                if websocket.accepted:
-                    await websocket.close(1011, "Internal Error")
-                elif not websocket.disconnected:
-                    await websocket.deny(500, "Internal Server Error")
+                # The peer may already be gone; that must not relabel the handler failure as a clean close.
+                with suppress(WebSocketDisconnect):
+                    if websocket.accepted:
+                        await websocket.close(1011, "Internal Error")
+                    elif not websocket.disconnected:
+                        await websocket.deny(500, "Internal Server Error")
             finally:
                 if websocket.accepted:
                     await websocket.close(1000)
@@ -907,12 +911,10 @@ class Flasgo(RouteDecorators):
         websocket: WebSocket,
         match: WebSocketMatchResult,
     ) -> None:
-        signature = inspect.signature(match.endpoint)
-        parameters = signature.parameters
-        should_inject = "websocket" in parameters or any(
-            parameter.annotation in {WebSocket, "WebSocket"} for parameter in parameters.values()
-        )
-        value = match.endpoint(websocket=websocket, **match.params) if should_inject else match.endpoint(**match.params)
+        if match.websocket_parameter is not None:
+            value = match.endpoint(**{match.websocket_parameter: websocket}, **match.params)
+        else:
+            value = match.endpoint(**match.params)
         await _maybe_await(value)
 
     def _match_websocket_route(self, path: str) -> WebSocketMatchResult | None:
@@ -1016,7 +1018,7 @@ class Flasgo(RouteDecorators):
         """
         if not isinstance(public, bool):
             raise TypeError("public must be a bool.")
-        route = WebSocketRoute(path, endpoint, name=name, public=public)
+        route = WebSocketRoute(path, endpoint, name=name, public=public, websocket_parameter=_websocket_parameter(endpoint))
         if any(
             existing.contract_shape == route.contract_shape
             or (existing.specificity == route.specificity and routes_overlap(existing.raw_path, route.raw_path))
@@ -2446,6 +2448,29 @@ def _security_rate_limit_response() -> Response:
         "Too many failed security checks from this client. Wait a moment before retrying.",
         status_code=429,
     )
+
+
+def _websocket_parameter(endpoint: WebSocketEndpoint) -> str | None:
+    """Find, once at registration, the handler parameter that receives the connection.
+
+    That is a parameter named ``websocket`` or one annotated as :class:`WebSocket` (including ``Annotated``).
+    Annotations are read with ``FORWARDREF`` so names imported only for type checking do not fail at runtime.
+    """
+    parameters = inspect.signature(endpoint, annotation_format=Format.FORWARDREF).parameters
+    if "websocket" in parameters:
+        return "websocket"
+    target = inspect.unwrap(endpoint)
+    try:
+        hints = get_type_hints(target, include_extras=True)
+    except NameError, TypeError:
+        hints = get_type_hints(target, include_extras=True, format=Format.FORWARDREF)
+    for name in parameters:
+        annotation = hints.get(name)
+        if get_origin(annotation) is Annotated:
+            annotation = get_args(annotation)[0]
+        if annotation is WebSocket or annotation == "WebSocket" or getattr(annotation, "__forward_arg__", None) == "WebSocket":
+            return name
+    return None
 
 
 def _most_restrictive(decisions: Sequence[RateLimitDecision]) -> RateLimitDecision | None:

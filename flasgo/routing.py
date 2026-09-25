@@ -43,6 +43,7 @@ class WebSocketMatchResult:
     params: dict[str, Any]
     route_path: str
     name: str | None
+    websocket_parameter: str | None = None
 
 
 @dataclass(slots=True)
@@ -129,6 +130,7 @@ class WebSocketRoute:
     endpoint: WebSocketEndpoint
     name: str | None = None
     public: bool = False
+    websocket_parameter: str | None = None
     _regex: re.Pattern[str] | None = None
     _casts: dict[str, Callable[[str], Any]] | None = None
 
@@ -160,6 +162,7 @@ class WebSocketRoute:
             params=params,
             route_path=self.raw_path,
             name=self.name,
+            websocket_parameter=self.websocket_parameter,
         )
 
 

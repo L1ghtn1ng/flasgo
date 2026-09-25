@@ -47,6 +47,10 @@
   still counts, which let clients exceed the longer quota. Retry-After for a denied request in a shared scope (in
   memory and Redis) now waits until enough entries expire to fall under that rule's limit instead of only the oldest
   one, so clients that honour it are not immediately denied again.
+- WebSocket handlers are inspected once at registration. Annotations imported only under `TYPE_CHECKING` no longer
+  fail every connection, the connection can be received under any parameter name annotated `WebSocket` (including
+  `Annotated[WebSocket, ...]`), and a handler that returns without accepting is recorded with the outcome
+  `not_accepted` instead of `success`.
 
 ## [0.9.1] - 2026-09-06
 

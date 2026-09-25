@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import textwrap
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Annotated
 
 import pytest
 from flasgo import (
@@ -308,3 +312,79 @@ def test_response_send_failure_never_attempts_a_second_response() -> None:
     asyncio.run(app(scope, receive, send))
 
     assert messages == ["http.response.start", "http.response.body"]
+
+
+def test_websocket_handler_parameter_is_resolved_at_registration() -> None:
+    """Handlers may take the connection under any name via an annotation, including Annotated metadata."""
+    app = Flasgo()
+
+    @app.websocket("/named", public=True)
+    async def named(conn: WebSocket) -> None:
+        await conn.accept()
+        await conn.send_text("named")
+
+    @app.websocket("/annotated", public=True)
+    async def annotated(conn: Annotated[WebSocket, {"doc": "connection"}]) -> None:
+        await conn.accept()
+        await conn.send_text("annotated")
+
+    @app.websocket("/items/<int:item_id>", public=True)
+    async def with_params(websocket: WebSocket, item_id: int) -> None:
+        await websocket.accept()
+        await websocket.send_text(str(item_id))
+
+    with app.test_client() as client:
+        for path, expected in (("/named", "named"), ("/annotated", "annotated"), ("/items/7", "7")):
+            with client.websocket_connect(path) as websocket:
+                assert websocket.receive_text() == expected
+
+
+def test_websocket_handler_with_type_checking_only_annotation_registers(tmp_path: Path) -> None:
+    """Names imported only under TYPE_CHECKING must not break every connection with NameError."""
+    module_path = tmp_path / "ws_forward_ref_app.py"
+    module_path.write_text(
+        textwrap.dedent(
+            """
+            from typing import TYPE_CHECKING
+
+            from flasgo import Flasgo, WebSocket
+
+            if TYPE_CHECKING:
+                from decimal import Decimal
+
+            app = Flasgo()
+
+
+            @app.websocket("/socket", public=True)
+            async def socket(websocket: WebSocket, hint: "Decimal | None" = None) -> None:
+                await websocket.accept()
+                await websocket.send_text("ok")
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("ws_forward_ref_app", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with module.app.test_client() as client, client.websocket_connect("/socket") as websocket:
+        assert websocket.receive_text() == "ok"
+
+
+def test_websocket_handler_that_never_accepts_is_not_logged_as_success(caplog: pytest.LogCaptureFixture) -> None:
+    app = Flasgo()
+
+    @app.websocket("/noaccept", public=True)
+    async def noaccept(websocket: WebSocket) -> None:
+        return None
+
+    with (
+        caplog.at_level("INFO", logger="flasgo.websocket"),
+        app.test_client() as client,
+        pytest.raises(WebSocketHandshakeError),
+        client.websocket_connect("/noaccept"),
+    ):
+        pass
+
+    outcomes = [getattr(record, "outcome", None) for record in caplog.records if getattr(record, "event", None) == "websocket-complete"]
+    assert outcomes == ["not_accepted"]
