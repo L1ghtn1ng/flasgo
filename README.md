@@ -564,8 +564,8 @@ handing off.
   `extract_bearer_token`, `jwt_backend`, `encode_jwt`
 - Rate limiting: `RateLimitRule`, `rate_limit`
 - WebSockets: `WebSocket`, `WebSocketDisconnect`, `WebSocketException`
-- Testing: `TestClient`, `TestResponse`, `AsyncTestStream`, `SyncWebSocketSession`, `AsyncWebSocketSession`,
-  `WebSocketHandshakeError`
+- Testing: `TestClient`, `TestResponse`, `AsyncTestStream`, `SyncWebSocketSession`,
+  `AsyncWebSocketSession`, `WebSocketHandshakeError`
 - Flask-style globals and responses: `request`, `session`, `current_user`, `jsonify`, `redirect`,
   `Response.redirect`, `is_safe_redirect_target`
 - Templating: `BaseLoader`, `SecureTemplateLoader`, `JinjaTemplates`, `Template`, `TemplateNotFound`,
