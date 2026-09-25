@@ -32,6 +32,8 @@
 - The in-memory rate limiter and `MemoryStore` remember when their earliest entry expires, so once full they reject
   new clients without rescanning every key (about 5 ms per request at 10,000 keys before, microseconds now). Capacity
   denials from the in-memory limiter report a Retry-After based on that expiry.
+- `BackgroundTasks.bind_observer()` is deprecated (Flasgo no longer uses it), and an observer that raises no longer
+  makes a successful task be reported as failed.
 
 ### Fixed
 

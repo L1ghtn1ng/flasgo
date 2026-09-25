@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from warnings import deprecated
 
 from .logging import log_event
 
@@ -98,6 +99,7 @@ class BackgroundTasks:
             if task.request_id is None:
                 task.request_id = request_id
 
+    @deprecated("BackgroundTasks.bind_observer is unused by Flasgo and will be removed; use the metrics integration.")
     def bind_observer(self, observer: Callable[[str], None]) -> None:
         """Set the legacy callback for successful and failed task calls."""
         self._observer = observer
@@ -134,8 +136,6 @@ class BackgroundTasks:
                     if inspect.isawaitable(result):
                         await result
                 log_event(logger, logging.INFO, "background-task-complete", request_id=task.request_id)
-                if self._observer is not None:
-                    self._observer("success")
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
@@ -143,9 +143,13 @@ class BackgroundTasks:
                 outcome = "failure"
                 log_event(logger, logging.ERROR, "background-task-failed", request_id=task.request_id)
                 logger.debug("background task exception", exc_info=True)
-                if self._observer is not None:
-                    self._observer("failure")
             finally:
+                # Outside the task's try: an observer error must not relabel a successful task as failed.
+                if self._observer is not None and outcome != "cancelled":
+                    try:
+                        self._observer(outcome)
+                    except Exception:
+                        logger.debug("background observer exception", exc_info=True)
                 if metrics is not None:
                     metrics.background_active.dec()
                     metrics.background_duration.observe(time.perf_counter() - started)

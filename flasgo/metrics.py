@@ -310,7 +310,7 @@ class Metrics:
         route: str,
         status: int,
         duration: float,
-        response_body_size: int | None,
+        response_body_size: int,
         response_sent: bool,
     ) -> None:
         """Observe a completed HTTP attempt and distinguish response send failures."""
@@ -320,7 +320,7 @@ class Metrics:
         exemplar = _trace_exemplar()
         self.http_requests.labels(**labels).inc(exemplar=exemplar)
         self.http_duration.labels(**distribution_labels).observe(duration, exemplar=exemplar)
-        if response_sent and response_body_size is not None:
+        if response_sent:
             self.http_response_body_size.labels(**distribution_labels).observe(response_body_size, exemplar=exemplar)
         else:
             self.http_response_send_failures.labels(**labels).inc(exemplar=exemplar)

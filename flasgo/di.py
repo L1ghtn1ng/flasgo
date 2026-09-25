@@ -5,10 +5,8 @@ from types import TracebackType
 from typing import Any, override
 
 from .params import (
-    Cookie,
     Depends,
     EndpointPlan,
-    Header,
     ParameterBinding,
     Provider,
     _validate_dependency_scopes,
@@ -170,16 +168,12 @@ async def _resolve_plan(
                 else:
                     value = validate_text_values(binding.annotation, values, location=("query", key), budget=budget)
             elif binding.source == "header":
-                marker = binding.marker
-                assert isinstance(marker, Header)
                 key = binding_wire_name(binding)
                 values = request.header_values(key)
                 if is_collection_annotation(binding.annotation):
                     values = tuple(item.strip(" \t") for value in values for item in value.split(","))
                 value = _resolve_text_binding(binding, values, location=("header", key), budget=budget)
             elif binding.source == "cookie":
-                marker = binding.marker
-                assert isinstance(marker, Cookie)
                 key = binding_wire_name(binding)
                 values = request.cookie_values(key)
                 if len(values) > 1:
