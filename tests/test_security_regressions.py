@@ -1079,6 +1079,11 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
         "attacker.com%2f.example.com",
         "[evil].example.com",
         "example.com",
+        # IPv6 zone IDs accept arbitrary text; a browser reads this link as userinfo "[::1%" at host evil.com.
+        "[::1%@evil.com#.example.com]",
+        "[::1%@evil.com#.example.com]:443",
+        "[::1%.example.com]",
+        "[::ffff:127.0.0.1%25x.example.com]",
     ],
 )
 def test_suffix_host_patterns_reject_url_delimiter_smuggling(host: str) -> None:
@@ -1337,3 +1342,29 @@ def test_settings_subclass_bool_fields_are_checked_on_assignment() -> None:
         setattr(settings, "FEATURE_ENABLED", "yes")  # noqa: B010 - bypass static typing on purpose
     with pytest.raises(TypeError, match="DEBUG must be a bool"):
         setattr(settings, "DEBUG", "false")  # noqa: B010 - bypass static typing on purpose
+
+
+@pytest.mark.parametrize("host", ["[::1%eth0]", "[::1%25eth0]:8000", "[fe80::1%lo]"])
+def test_ipv6_hosts_with_zone_ids_are_rejected(host: str) -> None:
+    """Zone IDs have no meaning in a Host header and must not match an allowed IPv6 address."""
+    app = Flasgo(settings={"ALLOWED_HOSTS": {"::1", "fe80::1"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    client = app.test_client()
+    assert client.get("/", headers={"host": host}).status_code == 400
+    assert client.get("/", headers={"host": "[::1]:8000"}).status_code == 200
+
+
+def test_allowed_hosts_rejects_ipv6_zone_id_patterns() -> None:
+    with pytest.raises(ValueError, match="ALLOWED_HOSTS entry"):
+        Flasgo(settings={"ALLOWED_HOSTS": {"::1%eth0"}})
+
+
+def test_suffix_patterns_never_match_ipv6_literals() -> None:
+    from flasgo.security import host_is_allowed
+
+    assert not host_is_allowed("[::1]", allowed_hosts={".example.com"})
+    assert host_is_allowed("[::1]", allowed_hosts={"::1"})

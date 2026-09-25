@@ -44,7 +44,9 @@
 ### Fixed
 
 - `ALLOWED_HOSTS` now accepts only DNS names and IP literals in the Host header, so URL delimiters such as `?`, `#`, or
-  spaces can no longer smuggle an attacker host past a suffix pattern like `.example.com`.
+  spaces can no longer smuggle an attacker host past a suffix pattern like `.example.com`. Bracketed IPv6 Host values
+  with a zone ID (for example `[::1%@evil.com#.example.com]`) are rejected, and suffix patterns never match IPv6
+  literals.
 - Response header names are now case-insensitive (`ResponseHeaders`). Flask-style `response.headers["Content-Type"] = ...`
   replaces the existing header instead of sending a second, conflicting `Content-Type`/`Content-Length`, and a custom
   `X-Frame-Options` no longer ships alongside the default one.

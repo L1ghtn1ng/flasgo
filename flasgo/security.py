@@ -186,7 +186,8 @@ def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
             continue
         if p == hostname:
             return True
-        if p.startswith(".") and hostname.endswith(p):
+        # Suffix patterns only ever apply to DNS names; an IPv6 literal (which contains ":") never matches one.
+        if p.startswith(".") and ":" not in hostname and hostname.endswith(p):
             return True
     return False
 
@@ -205,10 +206,7 @@ def _host_header_hostname(host: str | None) -> str | None:
         remainder = raw[end + 1 :]
         if remainder and (not remainder.startswith(":") or not remainder[1:].isdigit()):
             return None
-        try:
-            return str(ipaddress.IPv6Address(hostname))
-        except ValueError:
-            return None
+        return _ipv6_literal(hostname)
     if raw.count(":") > 1:
         return None
     if ":" in raw:
@@ -225,6 +223,22 @@ def _host_header_hostname(host: str | None) -> str | None:
     return hostname
 
 
+def _ipv6_literal(value: str) -> str | None:
+    """Return the compressed form of a plain IPv6 address, rejecting zone IDs.
+
+    ``ipaddress`` accepts almost any text after ``%`` as a zone ID, so ``::1%@evil.com#.example.com`` would
+    otherwise be treated as an IPv6 literal whose text ends in an allowed suffix. Zone IDs are also meaningless
+    in an HTTP Host header (RFC 9110 has no syntax for them).
+    """
+    if "%" in value:
+        return None
+    try:
+        address = ipaddress.IPv6Address(value)
+    except ValueError:
+        return None
+    return None if address.scope_id is not None else str(address)
+
+
 def allowed_host_pattern(pattern: str) -> str | None:
     """Normalize an ``ALLOWED_HOSTS`` entry, or return ``None`` when it is not a valid host pattern."""
     raw = pattern.strip().lower()
@@ -234,10 +248,7 @@ def allowed_host_pattern(pattern: str) -> str | None:
     normalized = _host_header_hostname(raw)
     if normalized is not None:
         return normalized
-    try:
-        return str(ipaddress.IPv6Address(raw))
-    except ValueError:
-        return None
+    return _ipv6_literal(raw)
 
 
 def ensure_csrf_cookie(
