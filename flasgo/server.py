@@ -102,14 +102,29 @@ async def arun_with_reload(
         raise RuntimeError(_WATCHFILES_MISSING) from exc
 
     with _reload_environment(reload_dirs) as (watch_paths, command), _cancel_on_sigterm():
-        process = await asyncio.to_thread(_start_reload_child, command)
+        process = await _start_reload_child_async(command)
         try:
             async for changes in awatch(*watch_paths, ignore_permission_denied=True):
                 log_reload_changes(changes)
                 await asyncio.to_thread(_stop_reload_child, process)
-                process = await asyncio.to_thread(_start_reload_child, command)
+                process = await _start_reload_child_async(command)
         finally:
             await asyncio.to_thread(_stop_reload_child, process)
+
+
+async def _start_reload_child_async(command: str) -> subprocess.Popen[bytes]:
+    """Start a child in a worker thread without losing it if cancellation arrives mid-start.
+
+    Cancelling ``await asyncio.to_thread(...)`` does not stop the thread, which would still spawn a child that no
+    caller holds a reference to. Shield the start, and on cancellation wait for it and stop what it spawned.
+    """
+    start = asyncio.ensure_future(asyncio.to_thread(_start_reload_child, command))
+    try:
+        return await asyncio.shield(start)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await asyncio.to_thread(_stop_reload_child, await start)
+        raise
 
 
 def _start_reload_child(command: str) -> subprocess.Popen[bytes]:

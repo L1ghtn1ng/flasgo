@@ -114,6 +114,43 @@ def test_cancelling_the_reloader_stops_the_server_child(monkeypatch: pytest.Monk
     assert started[0].poll() is not None
 
 
+def test_cancelling_the_reloader_while_a_child_is_starting_stops_that_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Cancellation during the worker-thread spawn must not leave the freshly started child running."""
+    started: list[subprocess.Popen[bytes]] = []
+    spawning = threading.Event()
+    release = threading.Event()
+    real_start = server_module._start_reload_child
+
+    def slow_start(command: str) -> subprocess.Popen[bytes]:
+        spawning.set()
+        release.wait(10)
+        process = real_start(command)
+        started.append(process)
+        return process
+
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", slow_start)
+    monkeypatch.setattr(server_module.sys, "orig_argv", [sys.executable, "-c", "import time; time.sleep(60)"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        assert await asyncio.to_thread(spawning.wait, 10)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert len(started) == 1
+    assert started[0].poll() is not None
+
+
 def test_app_run_uses_debug_reload_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     app = Flasgo(settings={"DEBUG": True})
     seen: dict[str, Any] = {}

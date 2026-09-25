@@ -273,14 +273,17 @@ def _atomic_write(path: Path, value: str) -> None:
         existing_mode = None
     temporary: Path | None = None
     try:
-        # Created with 0o666 so the kernel applies the current umask; reading or changing the process umask
-        # would briefly widen permissions for files other threads create meanwhile.
-        temporary, descriptor = _create_temporary(parent, destination.name)
+        # A replacement starts with the destination's own mode, so a private (0600) file's new contents are never
+        # readable by others, even briefly. A new file uses 0o666 and the kernel applies the current umask; reading
+        # or changing the process umask would widen permissions for files other threads create meanwhile.
+        initial_mode = existing_mode if existing_mode is not None else 0o666
+        temporary, descriptor = _create_temporary(parent, destination.name, mode=initial_mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
         if existing_mode is not None:
+            # Restore any bits the umask stripped at creation; this never widens access beyond the destination's.
             temporary.chmod(existing_mode)
         temporary.replace(destination)
         temporary = None
@@ -289,12 +292,12 @@ def _atomic_write(path: Path, value: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _create_temporary(parent: Path, name: str) -> tuple[Path, int]:
-    """Exclusively create a hidden sibling file for an atomic replace."""
+def _create_temporary(parent: Path, name: str, *, mode: int) -> tuple[Path, int]:
+    """Exclusively create a hidden sibling file for an atomic replace, with ``mode`` masked by the umask."""
     for _attempt in range(100):
         candidate = parent / f".{name}.{secrets.token_hex(8)}"
         try:
-            return candidate, os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            return candidate, os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         except FileExistsError:
             continue
     raise FileExistsError(f"Could not create a temporary file next to {parent / name}.")

@@ -428,6 +428,30 @@ def test_atomic_write_uses_umask_for_new_files_and_keeps_existing_modes(tmp_path
         os.umask(previous)
 
 
+def test_atomic_write_never_exposes_a_private_files_new_contents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replacing a 0600 file must not create a group/world-readable temporary copy, even before the chmod."""
+    private = tmp_path / "private.json"
+    private.write_text("old", encoding="utf-8")
+    private.chmod(0o600)
+    modes_while_writing: list[int] = []
+    real_fsync = cli_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        modes_while_writing.append(stat.S_IMODE(os.fstat(descriptor).st_mode))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(cli_module.os, "fsync", recording_fsync)
+    previous = os.umask(0o022)
+    try:
+        cli_module._atomic_write(private, "secret")
+    finally:
+        os.umask(previous)
+
+    assert modes_while_writing == [0o600]
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    assert private.read_text(encoding="utf-8") == "secret"
+
+
 def test_atomic_write_removes_the_temporary_file_when_writing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def failing_fsync(_fd: int) -> None:
         raise OSError("disk full")
