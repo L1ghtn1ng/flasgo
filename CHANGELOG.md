@@ -79,6 +79,12 @@
 - A client disconnecting from a streaming or SSE response is logged as `http-client-disconnected` at INFO instead of
   an ERROR-level `response-send-failed` event, and `EventSourceResponse` rejects a `heartbeat` that is not shorter
   than `idle_timeout` (which would close quiet streams before the first ping).
+- Validation: one unresolvable model annotation no longer makes every field of that model reject all values; `Model |
+  None` reports the model's field errors; `FormValidationError.errors` groups list-field errors under the field name;
+  numeric query, header and form text must be plain ASCII decimals (`"1_000"`, `" 12 "` and non-ASCII digits are
+  rejected); `Literal`, `Enum` and `UUID` require exact JSON types; `set[Model]` with unhashable items and
+  `__post_init__` failures return 422 instead of 500; error messages no longer echo internal type names; and model
+  type hints are cached per class.
 
 ## [0.9.1] - 2026-09-06
 

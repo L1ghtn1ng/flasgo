@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
+import textwrap
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
+from pathlib import Path
 from typing import Annotated, Any, Literal, cast
+from uuid import UUID
 
 import pytest
 from flasgo import (
@@ -749,3 +755,130 @@ def test_huge_json_numbers_for_float_fields_are_validation_errors(payload: bytes
     response = app.test_client().post("/numbers", body=payload, headers={"content-type": "application/json"})
     assert response.status_code == 422
     assert cast(Any, response.json())["errors"][0]["message"] == "Expected a finite number."
+
+
+def _issues(annotation: Any, value: object, *, from_text: bool = False) -> list[tuple[tuple[object, ...], str]]:
+    from flasgo.validation import RequestValidationError, validate_text_values, validate_value
+
+    try:
+        if from_text:
+            validate_text_values(annotation, [cast(str, value)], location=("query", "v"))
+        else:
+            validate_value(annotation, value, location=("body",))
+    except RequestValidationError as exc:
+        return [(issue.location, issue.message) for issue in exc.issues]
+    return []
+
+
+@pytest.mark.parametrize("text", ["1_000", " 12 ", "٣", "+", "1.5"])
+def test_integer_text_must_be_plain_ascii_decimal(text: str) -> None:
+    assert _issues(int, text, from_text=True) == [(("query", "v"), "Expected an integer.")]
+
+
+@pytest.mark.parametrize("text", ["1_0.5", " 1.5", "nan", "inf", "0x10"])
+def test_float_text_must_be_plain_decimal(text: str) -> None:
+    assert _issues(float, text, from_text=True) == [(("query", "v"), "Expected a finite number.")]
+
+
+def test_numeric_text_still_accepts_ordinary_values() -> None:
+    from flasgo.validation import validate_text_values
+
+    assert validate_text_values(int, ["-42"], location=("query", "v")) == -42
+    assert validate_text_values(float, ["1.5e3"], location=("query", "v")) == 1500.0
+    assert validate_text_values(float, [".5"], location=("query", "v")) == 0.5
+
+
+class _Level(Enum):
+    ONE = 1
+
+
+def test_literal_enum_and_uuid_require_exact_json_types() -> None:
+    assert _issues(Literal[0, True], False)
+    assert not _issues(Literal[0, True], 0)
+    assert _issues(_Level, True)
+    assert not _issues(_Level, 1)
+    assert _issues(UUID, 0x12345678123456781234567812345678) == [(("body",), "Expected a UUID.")]
+
+
+def test_validation_messages_do_not_leak_annotation_names() -> None:
+    assert _issues(date, 5) == [(("body",), "Expected an ISO date value.")]
+    assert _issues(_Level.__class__, object()) == [(("body",), "Invalid value.")]
+
+
+@dataclass
+class _Point:
+    x: int
+
+
+@dataclass
+class _Positive:
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.value < 0:
+            raise ValueError("negative")
+
+
+def test_optional_model_reports_nested_field_errors() -> None:
+    assert _issues(_Point | None, {"x": "nope"}) == [(("body", "x"), "Expected an integer.")]
+
+
+def test_model_construction_failures_are_validation_errors() -> None:
+    assert _issues(_Positive, {"value": -1}) == [(("body",), "Value is not valid for this model.")]
+    assert _issues(set[_Point], [{"x": 1}]) == [(("body",), "Set items must be hashable.")]
+
+
+def test_unhashable_annotated_metadata_inside_unions_is_supported() -> None:
+    assert not _issues(Annotated[int, {"doc": "count"}] | None, 1)
+
+
+@dataclass
+class _Tags:
+    tags: list[int]
+
+
+def test_form_errors_group_list_items_under_the_field_name() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/tags")
+    async def tags(form: Annotated[_Tags, Form()]) -> str:
+        return "ok"
+
+    @app.errorhandler(FormValidationError)
+    def invalid(_request: Any, exc: Exception) -> dict[str, list[str]]:
+        return cast(FormValidationError, exc).errors
+
+    response = app.test_client().post("/tags", data={"tags": ["a", "b"]})
+    assert list(cast(dict[str, Any], response.json())) == ["tags"]
+
+
+def test_one_unresolvable_model_annotation_does_not_break_the_other_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TYPE_CHECKING-only name on one field used to make every field of the model reject all values."""
+    module_path = tmp_path / "partial_hints_models.py"
+    module_path.write_text(
+        textwrap.dedent(
+            """
+            from __future__ import annotations
+
+            from dataclasses import dataclass
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                from decimal import Decimal
+
+
+            @dataclass
+            class Inner:
+                x: int
+                note: Decimal | None = None
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("partial_hints_models", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+
+    assert not _issues(module.Inner, {"x": 2})
+    assert _issues(module.Inner, {"x": "two"}) == [(("body", "x"), "Expected an integer.")]
