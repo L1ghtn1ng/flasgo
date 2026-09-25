@@ -10,13 +10,14 @@ import sys
 import time
 from annotationlib import Format
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin, get_type_hints, override
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints, override
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -183,7 +184,7 @@ class _CountingSend:
                 self._stream_bytes.inc(size)
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class _AuthDenial:
     """Transport-agnostic outcome of a failed authorization check."""
 
@@ -196,12 +197,12 @@ class _AuthDenial:
 _default_auth_backend = _DefaultAuthBackend()
 
 
+@dataclass(slots=True, frozen=True)
 class RouteAuth:
-    __slots__ = ("backend", "permissions")
+    """Authentication backend and permissions required by one route."""
 
-    def __init__(self, backend: str, permissions: tuple[PermissionLike, ...]) -> None:
-        self.backend = backend
-        self.permissions = permissions
+    backend: str
+    permissions: tuple[PermissionLike, ...]
 
 
 def request() -> Request:
@@ -1292,7 +1293,7 @@ class Flasgo(RouteDecorators):
         return result
 
     @contextmanager
-    def override_dependencies(self, overrides: Mapping[Provider, Provider]):
+    def override_dependencies(self, overrides: Mapping[Provider, Provider]) -> Iterator[None]:
         """
         Temporarily override dependency providers within the current execution context.
 
@@ -2462,18 +2463,10 @@ def _request_head_size(scope: Scope) -> int:
 
 
 def _status_text(status_code: int) -> str:
-    return {
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        408: "Request Timeout",
-        413: "Payload Too Large",
-        431: "Request Header Fields Too Large",
-        429: "Too Many Requests",
-        500: "Internal Server Error",
-    }.get(status_code, str(status_code))
+    try:
+        return HTTPStatus(status_code).phrase
+    except ValueError:
+        return str(status_code)
 
 
 def _security_rate_limit_response() -> Response:
@@ -2533,7 +2526,8 @@ def _permission_denied_response(user: User, *, challenge: str | None) -> Respons
     )
 
 
-async def _maybe_await(value: Any) -> Any:
+async def _maybe_await[T](value: T | Awaitable[T]) -> T:
+    # inspect.isawaitable() does not narrow for type checkers, hence the casts.
     if inspect.isawaitable(value):
-        return await value
-    return value
+        return await cast(Awaitable[T], value)
+    return cast(T, value)

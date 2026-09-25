@@ -34,7 +34,7 @@ _MISSING = object()
 def build_parser() -> argparse.ArgumentParser:
     """Create the Flasgo CLI argument parser."""
 
-    parser = argparse.ArgumentParser(prog="flasgo")
+    parser = argparse.ArgumentParser(prog="flasgo", suggest_on_error=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run a Flasgo application")

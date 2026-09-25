@@ -20,6 +20,10 @@
   annotations lazily (PEP 649/749).
 - Internal type aliases use `type` statements and generics use PEP 695 syntax; union checks rely on `typing.Union is
   types.UnionType` (3.14).
+- Typing and 3.14 idioms: overriding methods use `@typing.override`; context managers and `User.anonymous()` return
+  `Self`; `RouteAuth` is a frozen dataclass; status reason phrases come from `http.HTTPStatus` (so a 413 WebSocket
+  denial or fallback body now reads "Content Too Large", the RFC 9110 name); and the CLI suggests close matches for
+  mistyped commands (`argparse` `suggest_on_error`).
 
 ### Fixed
 

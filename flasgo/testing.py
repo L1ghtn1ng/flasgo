@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from http.cookies import Morsel, SimpleCookie
-from typing import Any, cast
+from typing import Any, Self, cast
 from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -175,7 +175,7 @@ class TestClient:
         self._lifespan_send: asyncio.Queue[Message] | None = None
         self._lifespan_task: asyncio.Task[None] | None = None
 
-    def __enter__(self) -> TestClient:
+    def __enter__(self) -> Self:
         if self._mode is not None:
             raise RuntimeError("TestClient contexts may not be re-entered.")
         self._mode = "sync"
@@ -195,7 +195,7 @@ class TestClient:
         finally:
             self._stop_sync_loop()
 
-    async def __aenter__(self) -> TestClient:
+    async def __aenter__(self) -> Self:
         if self._mode is not None:
             raise RuntimeError("TestClient contexts may not be re-entered.")
         self._mode = "async"
@@ -961,7 +961,7 @@ class SyncWebSocketSession:
     def response_headers(self) -> dict[str, str]:
         return dict(self._transport.response_headers)
 
-    def __enter__(self) -> SyncWebSocketSession:
+    def __enter__(self) -> Self:
         self._client._submit(self._transport.start())
         return self
 
@@ -1002,7 +1002,7 @@ class AsyncWebSocketSession:
     def response_headers(self) -> dict[str, str]:
         return dict(self._transport.response_headers)
 
-    async def __aenter__(self) -> AsyncWebSocketSession:
+    async def __aenter__(self) -> Self:
         await self._transport.start()
         return self
 
