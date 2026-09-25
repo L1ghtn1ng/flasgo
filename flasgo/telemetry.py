@@ -95,10 +95,15 @@ class Telemetry:
         return name, attributes
 
     def shutdown(self) -> None:
-        """Flush and close only a tracer provider created by Flasgo."""
+        """Flush spans from a tracer provider created by Flasgo at the end of a lifespan.
+
+        The provider is not shut down here: the same app may run another lifespan cycle (for example a second
+        test client context), and a shut-down provider silently drops every later span. The SDK closes it at
+        interpreter exit.
+        """
 
         if self._owned_provider:
-            self._provider.shutdown()
+            self._provider.force_flush()
 
 
 def _build_tracer_provider(settings: Settings) -> Any:

@@ -437,3 +437,24 @@ def test_owned_provider_exports_otlp_protobuf_and_flushes_on_shutdown(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_owned_tracer_provider_keeps_exporting_across_lifespan_cycles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second lifespan cycle on the same app must still export spans instead of silently dropping them."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "set_tracer_provider", lambda _provider: None)
+    monkeypatch.setattr("flasgo.telemetry._build_tracer_provider", lambda settings: provider)
+    app = Flasgo(settings={"CSRF_ENABLED": False, "OTEL_ENABLED": True})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    for _ in range(2):
+        with app.test_client() as client:
+            client.get("/")
+
+    assert len(exporter.get_finished_spans()) >= 2
+    provider.shutdown()

@@ -115,6 +115,9 @@
   longer describes it as unrestricted. `Settings.get()` returns only settings fields, not methods, and cookie
   `Expires` / static `Last-Modified` dates no longer depend on the process locale.
 - `WebSocket.query_params` now enforces `MAX_FORM_FIELDS` like HTTP requests do.
+- A Flasgo-owned OpenTelemetry tracer provider is flushed, not shut down, when a lifespan ends, so later lifespan
+  cycles on the same app (for example a second test client context) keep exporting spans. The SDK still shuts it down
+  at interpreter exit.
 
 ## [0.9.1] - 2026-09-06
 
