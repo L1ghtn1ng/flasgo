@@ -5,9 +5,8 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .request import Request
-from .response import Response
+from .response import HTTP_TOKEN_RE, Response
 
-_HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _DNS_HOST_RE = re.compile(
     r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)"
     r"(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$"
@@ -76,8 +75,8 @@ def _parse_cors_preflight(request: Request) -> _CORSPreflight | None:
     if request.method != "OPTIONS":
         return None
 
-    origins = _scope_header_values(request, b"origin")
-    requested_methods = _scope_header_values(request, b"access-control-request-method")
+    origins = request.header_values("origin")
+    requested_methods = request.header_values("access-control-request-method")
     if not origins or not requested_methods:
         return None
     if len(origins) != 1 or len(requested_methods) != 1:
@@ -87,10 +86,10 @@ def _parse_cors_preflight(request: Request) -> _CORSPreflight | None:
     method = requested_methods[0].strip()
     if origin is None:
         return _CORSPreflight(None, None, frozenset(), "invalid origin")
-    if not _HTTP_TOKEN_RE.fullmatch(method):
+    if not HTTP_TOKEN_RE.fullmatch(method):
         return _CORSPreflight(origin, None, frozenset(), "invalid requested method")
 
-    requested_headers = _scope_header_values(request, b"access-control-request-headers")
+    requested_headers = request.header_values("access-control-request-headers")
     parsed_headers: set[str] = set()
     for value in requested_headers:
         parts = value.split(",")
@@ -98,7 +97,7 @@ def _parse_cors_preflight(request: Request) -> _CORSPreflight | None:
             return _CORSPreflight(origin, method.upper(), frozenset(), "invalid requested header")
         for part in parts:
             header = part.strip().lower()
-            if not _HTTP_TOKEN_RE.fullmatch(header) or header == "*":
+            if not HTTP_TOKEN_RE.fullmatch(header) or header == "*":
                 return _CORSPreflight(origin, method.upper(), frozenset(), "invalid requested header")
             parsed_headers.add(header)
 
@@ -142,7 +141,7 @@ def _apply_cors_response_headers(request: Request, response: Response, config: C
     if not config.allows_method(request.method):
         return
 
-    origins = _scope_header_values(request, b"origin")
+    origins = request.header_values("origin")
     if len(origins) != 1:
         return
     origin = _normalize_request_origin(origins[0])
@@ -186,7 +185,7 @@ def _normalize_methods(values: Collection[str]) -> frozenset[str]:
         raise TypeError("CORS allow_methods must be a collection of method names, not one string.")
     normalized: set[str] = set()
     for value in values:
-        if not isinstance(value, str) or not _HTTP_TOKEN_RE.fullmatch(value):
+        if not isinstance(value, str) or not HTTP_TOKEN_RE.fullmatch(value):
             raise ValueError("Every CORS allow_methods entry must be a valid HTTP method token.")
         if value == "*":
             raise ValueError("CORS allow_methods does not support '*'. List each allowed method explicitly.")
@@ -203,7 +202,7 @@ def _normalize_header_names(values: Collection[str], *, setting: str) -> frozens
         raise TypeError(f"CORS {setting} must be a collection of header names, not one string.")
     normalized: set[str] = set()
     for value in values:
-        if not isinstance(value, str) or not _HTTP_TOKEN_RE.fullmatch(value):
+        if not isinstance(value, str) or not HTTP_TOKEN_RE.fullmatch(value):
             raise ValueError(f"Every CORS {setting} entry must be a valid HTTP header name.")
         normalized.add(value.lower())
     return frozenset(normalized)
@@ -250,14 +249,6 @@ def _canonical_origin(value: str) -> str | None:
     default_port = 443 if scheme == "https" else 80
     authority = host if port is None or port == default_port else f"{host}:{port}"
     return f"{scheme}://{authority}"
-
-
-def _scope_header_values(request: Request, name: bytes) -> list[str]:
-    return [
-        value.decode("latin-1")
-        for key, value in request.scope.get("headers", [])
-        if isinstance(key, bytes) and isinstance(value, bytes) and key.lower() == name
-    ]
 
 
 def _add_vary(headers: dict[str, str], *names: str) -> None:

@@ -8,11 +8,10 @@ from .auth import HasScope
 from .params import EndpointPlan, ParameterBinding, binding_wire_name, walk_bindings
 from .ratelimit import endpoint_rate_limits
 from .response import Response
-from .routing import Route
+from .routing import _PARAM_PATTERN, Route
 from .streaming import EventSourceResponse, NDJSONResponse, StreamingResponse
 from .validation import SchemaRegistry, contains_uploaded_file
 
-_PARAM_PATTERN = re.compile(r"<(?:(?P<converter>[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
 _UNSAFE_OPERATION_ID_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 _FIXED_PATH_ITEM_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 

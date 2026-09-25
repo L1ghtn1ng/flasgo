@@ -1,17 +1,15 @@
 import inspect
-import re
 from annotationlib import Format, ForwardRef
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 from .request import Request
-from .routing import Endpoint
+from .response import HTTP_TOKEN_RE
+from .routing import Endpoint, _route_parameter_names
 
 type Provider = Callable[..., Any]
 
-_PATH_PARAM_PATTERN = re.compile(r"<(?:(?:[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
-_WIRE_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _RESERVED_OPENAPI_HEADERS = frozenset({"accept", "authorization", "content-type", "cookie"})
 
 
@@ -125,7 +123,7 @@ def compile_endpoint_plan(
         EndpointPlan: The compiled endpoint plan.
     """
 
-    path_names = {match.group("name") for match in _PATH_PARAM_PATTERN.finditer(route_path)}
+    path_names = set(_route_parameter_names(route_path))
     plan = _compile_callable(endpoint, path_names=path_names, stack=())
     extra = []
     for index, marker in enumerate(dependencies):
@@ -353,7 +351,7 @@ def binding_wire_name(binding: ParameterBinding) -> str:
 
 
 def _validate_wire_name(value: str, *, kind: str) -> None:
-    if not value or not _WIRE_NAME_PATTERN.fullmatch(value):
+    if not value or not HTTP_TOKEN_RE.fullmatch(value):
         raise ValueError(f"{kind} aliases must be non-empty HTTP token names without whitespace or separators.")
 
 

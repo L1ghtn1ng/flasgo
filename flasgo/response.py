@@ -15,7 +15,8 @@ if TYPE_CHECKING:
     from .templating import JinjaTemplates
 
 type Headers = Mapping[str, str]
-_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+# RFC 9110 token: header names, method names, and cookie/header wire names.
+HTTP_TOKEN_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 class ResponseHeaders(dict[str, str]):
@@ -376,17 +377,15 @@ def _tuple_to_response(
 
 def _validate_header(name: str, value: str) -> None:
     """Validate header syntax and enforce cookie-specific rules for Set-Cookie."""
-    if not _HEADER_NAME_RE.fullmatch(name):
+    if not HTTP_TOKEN_RE.fullmatch(name):
+        # The token pattern is ASCII-only and excludes CR, LF, and NUL.
         msg = f"Invalid header name: {name!r}"
         raise ValueError(msg)
-    if any(char in name for char in ("\r", "\n", "\x00")):
-        msg = f"Invalid header name: {name!r}"
-        raise ValueError(msg)
-    if any(char in value for char in ("\r", "\n", "\x00")):
+    if any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in value):
+        # Reject every control character except HTAB here, rather than letting the server fail mid-response.
         msg = f"Invalid header value for {name!r}"
         raise ValueError(msg)
     try:
-        name.encode("ascii")
         value.encode("latin-1")
     except UnicodeEncodeError as exc:
         raise ValueError(f"HTTP header {name!r} is not Latin-1 encodable.") from exc

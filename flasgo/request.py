@@ -37,6 +37,11 @@ def parse_query_params(scope: Scope) -> dict[str, list[str]]:
         raise _RequestRejection(413, "Query string exceeds MAX_FORM_FIELDS.", "form_limit") from exc
 
 
+def scope_header_values(scope: Scope, name: bytes) -> tuple[str, ...]:
+    """Return every value of a lowercase header name from an ASGI scope, preserving duplicates."""
+    return tuple(value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == name)
+
+
 def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"Invalid JSON constant: {value!r}")
 
@@ -305,9 +310,7 @@ class Request:
 
     def header_values(self, name: str) -> tuple[str, ...]:
         """Return every wire-level value for a case-insensitive header name."""
-
-        normalized = name.lower().encode("latin-1")
-        return tuple(value.decode("latin-1") for key, value in self.scope.get("headers", []) if key.lower() == normalized)
+        return scope_header_values(self.scope, name.lower().encode("latin-1"))
 
     def cookie_values(self, name: str) -> tuple[str, ...]:
         """Return every value for an exact, case-sensitive cookie name."""

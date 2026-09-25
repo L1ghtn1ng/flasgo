@@ -58,8 +58,8 @@ from .ratelimit import (
     rate_limit_success_headers,
 )
 from .registration import RouteDecorators, route_methods
-from .request import Request
-from .response import Response, ResponseValue, to_response
+from .request import Request, scope_header_values
+from .response import HTTP_TOKEN_RE, Response, ResponseValue, to_response
 from .routing import (
     Endpoint,
     MatchResult,
@@ -108,7 +108,6 @@ _request_ctx: ContextVar[Request | None] = ContextVar("flasgo_request", default=
 _session_ctx: ContextVar[Session | None] = ContextVar("flasgo_session", default=None)
 _user_ctx: ContextVar[User | None] = ContextVar("flasgo_user", default=None)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-_HTTP_METHOD_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 # Stable HTTP server span known methods (RFC 9110 + PATCH + QUERY).
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
@@ -377,7 +376,7 @@ class Flasgo(RouteDecorators):
         """Return whether the scope carries exactly one allowed Host header (always true when enforcement is off)."""
         if not self.security.enforce_allowed_hosts:
             return True
-        host_values = _scope_header_values(scope, b"host")
+        host_values = scope_header_values(scope, b"host")
         return len(host_values) == 1 and host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts)
 
     def _backend_operation(self, req: Request, component: str, operation: str) -> AbstractContextManager[None]:
@@ -913,7 +912,7 @@ class Flasgo(RouteDecorators):
     def _websocket_origin_allowed(self, req: Request) -> bool:
         if not self.settings.WEBSOCKET_ENFORCE_ORIGIN:
             return True
-        origins = _scope_header_values(req.scope, b"origin")
+        origins = scope_header_values(req.scope, b"origin")
         if not origins:
             return self.settings.WEBSOCKET_ALLOW_MISSING_ORIGIN
         if len(origins) != 1:
@@ -1205,7 +1204,7 @@ class Flasgo(RouteDecorators):
         self._reject_duplicate_route_name(name)
         normalized_methods: set[str] = set()
         for method in route_methods(methods):
-            if not isinstance(method, str) or not _HTTP_METHOD_RE.fullmatch(method):
+            if not isinstance(method, str) or not HTTP_TOKEN_RE.fullmatch(method):
                 raise ValueError("HTTP route methods must be non-empty RFC 9110 method tokens such as GET or QUERY.")
             normalized_methods.add(method.upper())
         if not normalized_methods:
@@ -2379,10 +2378,6 @@ def _valid_websocket_origin(value: str) -> bool:
         and not parsed.query
         and not parsed.fragment
     )
-
-
-def _scope_header_values(scope: Scope, name: bytes) -> list[str]:
-    return [value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == name]
 
 
 def _single_cookie_value(req: Request, name: str) -> str | None:
