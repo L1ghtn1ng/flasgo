@@ -319,3 +319,35 @@ def test_official_test_client_persists_cookies_and_follows_redirects() -> None:
     assert redirected.status_code == 200
     assert redirected.json() == {"method": "GET"}
     assert len(redirected.history) == 1
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected"),
+    [
+        ("application/x-www-form-urlencoded; charset=latin-1", b"name=%E9", 200),
+        ("application/x-www-form-urlencoded", b"name=%C3%A9", 200),
+        ("application/x-www-form-urlencoded", b"name=%FF", 400),
+    ],
+)
+def test_urlencoded_forms_decode_percent_escapes_with_the_declared_charset(content_type: str, body: bytes, expected: int) -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/form")
+    async def form(request: Request) -> dict[str, str | None]:
+        return {"name": (await request.form()).get("name")}
+
+    response = app.test_client().post("/form", body=body, headers={"content-type": content_type})
+    assert response.status_code == expected
+    if expected == 200:
+        assert response.json() == {"name": "é"}
+
+
+def test_request_cookies_read_every_cookie_header_first_value_wins() -> None:
+    app = Flasgo()
+
+    @app.get("/cookies")
+    def cookies(request: Request) -> dict[str, str]:
+        return request.cookies
+
+    response = app.test_client().get("/cookies", headers=[("cookie", "a=1; b=2"), ("cookie", "a=3; c=4")])
+    assert response.json() == {"a": "1", "b": "2", "c": "4"}

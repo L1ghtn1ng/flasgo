@@ -59,6 +59,10 @@
 - `HTTPException` is hashable and compared by identity like other exceptions, `str(abort(403, "no"))` is `"no"`
   instead of empty, it pickles with its headers, and `abort()` is annotated `-> Never` so type checkers treat the code
   after it as unreachable.
+- URL-encoded forms decode percent-escapes with the declared `charset` and reject invalid bytes with a 400, instead of
+  decoding them as UTF-8 and silently replacing bad bytes with U+FFFD.
+- `Request.cookies` now reads every `Cookie` header, with the first value winning for a repeated name, matching
+  `cookie_values()`. Previously only the last header was parsed.
 
 ## [0.9.1] - 2026-09-06
 

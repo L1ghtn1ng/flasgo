@@ -69,19 +69,6 @@ def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
     return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in raw_headers}
 
 
-def _parse_cookies(cookie_header: str | None) -> dict[str, str]:
-    if not cookie_header:
-        return {}
-    cookies: dict[str, str] = {}
-    for chunk in cookie_header.split(";"):
-        item = chunk.strip()
-        if not item or "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        cookies[key.strip()] = value.strip()
-    return cookies
-
-
 def _parse_cookie_values(cookie_headers: list[str]) -> dict[str, list[str]]:
     cookies: dict[str, list[str]] = {}
     for cookie_header in cookie_headers:
@@ -307,7 +294,8 @@ class Request:
 
     @property
     def cookies(self) -> dict[str, str]:
-        return _parse_cookies(self.headers.get("cookie"))
+        """Return cookies from every ``Cookie`` header; the first value wins for a repeated name."""
+        return {name: values[0] for name, values in _parse_cookie_values(list(self.header_values("cookie"))).items()}
 
     def header_values(self, name: str) -> tuple[str, ...]:
         """Return every wire-level value for a case-insensitive header name."""
@@ -412,7 +400,11 @@ class Request:
                 error_detail="Invalid form encoding. Use a supported charset such as UTF-8.",
             )
             try:
-                parsed = parse_qs(decoded, keep_blank_values=True, max_num_fields=max_fields)
+                # Percent-escapes must be decoded with the declared charset too, and strictly: silently replacing
+                # invalid bytes with U+FFFD would accept input that multipart parsing rejects.
+                parsed = parse_qs(decoded, keep_blank_values=True, max_num_fields=max_fields, encoding=charset, errors="strict")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(400, "Invalid form encoding. Use a supported charset such as UTF-8.") from exc
             except ValueError as exc:
                 raise _RequestRejection(413, "Form data exceeds MAX_FORM_FIELDS.", "form_limit") from exc
             form = FormData(fields=parsed)
