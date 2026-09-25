@@ -142,6 +142,8 @@
 - `url_for()` percent-encodes literal path text (for example `/café`) and omits query values that are `None` instead
   of rendering `?q=None`. The helper now lives in `flasgo.routing.build_url` (still importable from
   `flasgo.blueprints`).
+- Route paths with a repeated parameter name, an unknown converter, or a malformed placeholder such as `<int: id>` now
+  raise a clear `ValueError`; previously they raised `re.PatternError` or registered silently as literal paths.
 
 ## [0.9.1] - 2026-09-06
 

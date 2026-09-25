@@ -171,9 +171,19 @@ def _validate_route(path: str, name: str | None) -> None:
         raise ValueError("Route paths must not contain control characters.")
     if name is not None and any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ValueError("Route names must not contain control characters.")
-    path_converters = [match for match in _PARAM_PATTERN.finditer(path) if (match.group("converter") or "str") == "path"]
-    if len(path_converters) > 1:
+    matches = list(_PARAM_PATTERN.finditer(path))
+    if sum((match.group("converter") or "str") == "path" for match in matches) > 1:
         raise ValueError("A route may contain at most one path converter.")
+    for match in matches:
+        converter = match.group("converter")
+        if converter is not None and converter not in _CONVERTERS:
+            raise ValueError(f"Unknown route converter {converter!r} in {path!r}.")
+    names = [match.group("name") for match in matches]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Route {path!r} repeats a parameter name.")
+    if any(char in _PARAM_PATTERN.sub("", path) for char in "<>"):
+        # e.g. "<int: id>" would otherwise register silently as a literal path.
+        raise ValueError(f"Route {path!r} has a malformed <converter:name> placeholder.")
 
 
 def _route_shape(path: str) -> str:

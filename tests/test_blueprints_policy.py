@@ -180,3 +180,18 @@ def test_url_for_encodes_literal_segments_and_skips_none_query_values() -> None:
     app.get("/café/<int:item_id>", name="item")(lambda item_id: str(item_id))
 
     assert app.url_for("item", item_id=3, q=None, sort="a b") == "/caf%C3%A9/3?sort=a+b"
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/<a>/<int:a>", "repeats a parameter name"),
+        ("/items/<int: id>", "malformed"),
+        ("/items/<id", "malformed"),
+        ("/items/<bogus:id>", "Unknown route converter"),
+    ],
+)
+def test_malformed_route_placeholders_are_rejected(path: str, message: str) -> None:
+    app = Flasgo()
+    with pytest.raises(ValueError, match=message):
+        app.get(path)(lambda **_: "ok")
