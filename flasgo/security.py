@@ -4,6 +4,7 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
+from functools import cache
 from typing import get_type_hints
 from urllib.parse import urlsplit
 
@@ -88,8 +89,37 @@ def _validate_cookie_path(path: str) -> None:
         raise ValueError("Invalid cookie path: must be Latin-1 encodable.") from exc
 
 
-def _default_secret_key() -> str:
+def default_secret_key() -> str:
     return secrets.token_urlsafe(48)
+
+
+@cache
+def _bool_fields(cls: type) -> frozenset[str]:
+    return frozenset(name for name, annotation in get_type_hints(cls).items() if annotation is bool)
+
+
+class StrictBoolFields:
+    """Dataclass mixin that rejects non-bool values for ``bool`` fields, at construction and on assignment.
+
+    A truthy string such as ``"false"`` must never silently enable or disable a security control. Field types are
+    resolved once per class (including subclasses), so later assignments are checked too.
+    """
+
+    __slots__ = ()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _bool_fields(type(self)) and not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool.")
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self) -> None:
+        self._validate_boolean_fields()
+
+    def _validate_boolean_fields(self) -> None:
+        """Validate boolean fields, including after a caller mutates an existing instance."""
+        for name in _bool_fields(type(self)):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool.")
 
 
 def _validate_cookie_value(value: str) -> None:
@@ -107,7 +137,7 @@ def validate_cookie_name(name: str) -> None:
 
 
 @dataclass(slots=True)
-class SecurityConfig:
+class SecurityConfig(StrictBoolFields):
     allowed_hosts: set[str] = field(default_factory=lambda: {"127.0.0.1", "localhost"})
     enforce_allowed_hosts: bool = True
 
@@ -141,24 +171,7 @@ class SecurityConfig:
 
     security_headers: dict[str, str] = field(default_factory=default_security_headers)
 
-    secret_key: str = field(default_factory=_default_secret_key)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        """Reject wrong-typed boolean assignments throughout the configuration lifetime."""
-        annotation = type(self).__annotations__.get(name)
-        if annotation in {bool, "bool"} and not isinstance(value, bool):
-            raise TypeError(f"{name} must be a bool.")
-        object.__setattr__(self, name, value)
-
-    def __post_init__(self) -> None:
-        """Reject wrong-typed booleans before they can disable a security control."""
-        self._validate_boolean_fields()
-
-    def _validate_boolean_fields(self) -> None:
-        """Validate boolean fields, including after a caller mutates an existing instance."""
-        for name, annotation in get_type_hints(type(self)).items():
-            if annotation is bool and not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be a bool.")
+    secret_key: str = field(default_factory=default_secret_key)
 
 
 def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:

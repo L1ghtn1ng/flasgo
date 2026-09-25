@@ -1,16 +1,15 @@
 import importlib
-import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast, get_type_hints
+from typing import Any, cast
 
-from .security import SecurityConfig, default_security_headers
+from .security import SecurityConfig, StrictBoolFields, default_secret_key, default_security_headers
 
 
 @dataclass
-class Settings:
+class Settings(StrictBoolFields):
     DEBUG: bool = False
-    SECRET_KEY: str = field(default_factory=lambda: secrets.token_urlsafe(48))
+    SECRET_KEY: str = field(default_factory=default_secret_key)
 
     ALLOWED_HOSTS: set[str] = field(default_factory=lambda: {"127.0.0.1", "localhost"})
     ENFORCE_ALLOWED_HOSTS: bool = True
@@ -78,23 +77,6 @@ class Settings:
 
     SECURITY_HEADERS: dict[str, str] = field(default_factory=default_security_headers)
     EXTRA: dict[str, Any] = field(default_factory=dict, repr=False)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        """Reject wrong-typed boolean assignments throughout the settings lifetime."""
-        annotation = type(self).__annotations__.get(name)
-        if annotation in {bool, "bool"} and not isinstance(value, bool):
-            raise TypeError(f"{name} must be a bool.")
-        object.__setattr__(self, name, value)
-
-    def __post_init__(self) -> None:
-        """Reject wrong-typed booleans before any security setting is consumed."""
-        self._validate_boolean_fields()
-
-    def _validate_boolean_fields(self) -> None:
-        """Validate boolean fields, including after a caller mutates an existing instance."""
-        for name, annotation in get_type_hints(type(self)).items():
-            if annotation is bool and not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be a bool.")
 
     def to_security_config(self) -> SecurityConfig:
         return SecurityConfig(

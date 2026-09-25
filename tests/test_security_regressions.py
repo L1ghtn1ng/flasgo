@@ -1319,3 +1319,18 @@ def test_cookie_expires_is_locale_independent() -> None:
     from flasgo.security import _format_http_date
 
     assert _format_http_date(datetime(2026, 1, 5, 12, 0, tzinfo=UTC)) == "Mon, 05 Jan 2026 12:00:00 GMT"
+
+
+def test_settings_subclass_bool_fields_are_checked_on_assignment() -> None:
+    """Assignment checks used the concrete class's own annotations only, missing inherited and subclass fields."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class AppSettings(Settings):
+        FEATURE_ENABLED: bool = False
+
+    settings = AppSettings()
+    with pytest.raises(TypeError, match="FEATURE_ENABLED must be a bool"):
+        setattr(settings, "FEATURE_ENABLED", "yes")  # noqa: B010 - bypass static typing on purpose
+    with pytest.raises(TypeError, match="DEBUG must be a bool"):
+        setattr(settings, "DEBUG", "false")  # noqa: B010 - bypass static typing on purpose
