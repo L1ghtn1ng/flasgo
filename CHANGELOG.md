@@ -13,6 +13,9 @@
 - `after_request` hooks now also run for 404 and 405 responses and for authentication and authorization denials,
   matching the existing behaviour for rate-limit rejections and before-request short-circuits. Error-handler responses
   and CSRF or host rejections still bypass them.
+- The built-in development server uses uvicorn's `websockets-sansio` WebSocket implementation instead of the
+  deprecated legacy `websockets` one (which logged a deprecation warning at startup), and no longer sends a `server:
+  uvicorn` header.
 
 ### Fixed
 

@@ -131,3 +131,17 @@ def test_dev_server_uses_hardened_uvicorn_configuration(monkeypatch: pytest.Monk
     assert seen["ws_max_size"] == 4096
     assert seen["ws_per_message_deflate"] is False
     assert seen["limit_concurrency"] == 100
+    assert seen["ws"] == "websockets-sansio"
+    assert seen["server_header"] is False
+
+
+def test_dev_server_websocket_implementation_loads_without_deprecation_warnings() -> None:
+    import warnings
+
+    import uvicorn
+
+    config = uvicorn.Config(Flasgo(), ws="websockets-sansio", lifespan="off", server_header=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config.load()
+    assert config.ws_protocol_class is not None

@@ -48,13 +48,15 @@ async def run_dev_server(
         proxy_headers=False,
         http="h11",
         h11_max_incomplete_event_size=max_request_head_bytes,
-        ws="websockets",
+        # The legacy "websockets" implementation is deprecated; sansio still supports the websocket.http.response
+        # extension that WebSocket.deny() relies on.
+        ws="websockets-sansio",
         ws_max_size=websocket_max_message_bytes,
-        ws_max_queue=32,
         ws_ping_interval=20.0,
         ws_ping_timeout=20.0,
         ws_per_message_deflate=False,
         limit_concurrency=limit_concurrency,
+        server_header=False,
     )
     await uvicorn.Server(config).serve()
 
