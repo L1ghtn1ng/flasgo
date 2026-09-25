@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,7 +31,9 @@ def hmac_digest(secret: str, payload: bytes) -> str:
 
 
 @dataclass(slots=True)
-class Session:
+class Session(MutableMapping[str, Any]):
+    """Mutable session mapping that tracks whether it needs to be persisted."""
+
     data: dict[str, Any]
     modified: bool = False
     _session_id: str | None = field(default=None, repr=False)
@@ -66,12 +69,28 @@ class Session:
         self.data[key] = value
         self.modified = True
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def __delitem__(self, key: str) -> None:
+        del self.data[key]
+        self.modified = True
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.data)
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.data
+
+    def get(self, key: str, default: Any = None) -> Any:  # ty: ignore[invalid-method-override]
         return self.data.get(key, default)
 
     def pop(self, key: str, default: Any = None) -> Any:
+        """Remove and return ``key``, or ``default`` when absent. Only an actual removal marks the session modified."""
+        if key not in self.data:
+            return default
         self.modified = True
-        return self.data.pop(key, default)
+        return self.data.pop(key)
 
     def clear(self) -> None:
         self.modified = True

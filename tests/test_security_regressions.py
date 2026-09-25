@@ -1157,3 +1157,68 @@ def test_response_headers_are_case_insensitive() -> None:
     response.prepare()
     assert response.headers["content-type"] == "text/csv"
     assert list(response.headers) == ["content-type", "content-length"]
+
+
+def test_session_supports_mapping_protocol() -> None:
+    """Flask idioms such as ``"user" in session`` must work instead of raising KeyError(0)."""
+    from flasgo.session import Session
+
+    current = Session({"user": 1})
+    assert "user" in current
+    assert "missing" not in current
+    assert list(current) == ["user"]
+    assert len(current) == 1
+    assert not Session({})
+    assert current.setdefault("theme", "dark") == "dark"
+    assert current.modified
+    del current["theme"]
+    assert dict(current.items()) == {"user": 1}
+
+
+def test_session_pop_of_missing_key_does_not_mark_modified() -> None:
+    """Consuming an absent flash message on every page must not re-sign the cookie or rotate the CSRF binding."""
+    from flasgo.session import Session
+
+    current = Session({"user": 1})
+    assert current.pop("flash", None) is None
+    assert not current.modified
+    assert current.pop("user") == 1
+    assert current.modified
+
+
+def test_session_proxy_forwards_attribute_writes_to_the_request_session() -> None:
+    """``session.modified = True`` must reach the request's session rather than the shared module-level proxy."""
+    import flasgo.globals as globals_module
+
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+    observed: list[bool] = []
+
+    @app.get("/mark")
+    def mark() -> str:
+        session.modified = True
+        return "ok"
+
+    @app.get("/check")
+    def check() -> str:
+        observed.append(session.modified)
+        return "ok"
+
+    client = app.test_client()
+    marked = client.get("/mark")
+    assert "set-cookie" in marked.headers
+    client.get("/check")
+    assert observed == [False]
+    assert "modified" not in object.__dir__(globals_module.session)
+
+
+def test_session_proxy_supports_container_operations() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> dict[str, Any]:
+        session["a"] = 1
+        session["b"] = 2
+        del session["b"]
+        return {"has_a": "a" in session, "has_b": "b" in session, "keys": list(session), "size": len(session), "truthy": bool(session)}
+
+    assert app.test_client().get("/").json() == {"has_a": True, "has_b": False, "keys": ["a"], "size": 1, "truthy": True}

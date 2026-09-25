@@ -11,6 +11,12 @@
   `X-Frame-Options` no longer ships alongside the default one.
 - A parameter marker nested inside another type, such as `Annotated[str, Header()] | None`, is now rejected at route
   registration. Previously the marker was silently dropped and the value was read from the query string instead.
+- `Session` is now a full `MutableMapping`: `"key" in session`, iteration, `len()`, `del session[key]`, `update()` and
+  `setdefault()` work. `session.pop(key, None)` only marks the session modified when the key existed, so consuming an
+  absent flash message no longer re-issues the session cookie and CSRF token on every page.
+- The `flasgo.session`, `flasgo.request` and `flasgo.current_user` proxies now forward attribute writes, deletion,
+  membership, iteration and `len()` to the request-bound object. Previously `session.modified = True` was stored on the
+  shared module-level proxy, so the session was never saved and the flag leaked into later requests.
 
 ## [0.9.1] - 2026-09-06
 
