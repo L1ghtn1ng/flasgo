@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import re
-from collections.abc import Collection, Iterable, Mapping
+import types
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Annotated, Any, get_args, get_origin
 
 from .auth import HasScope
@@ -13,6 +15,7 @@ from .streaming import EventSourceResponse, NDJSONResponse, StreamingResponse
 from .validation import SchemaRegistry, contains_uploaded_file
 
 _PARAM_PATTERN = re.compile(r"<(?:(?P<converter>[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
+_UNSAFE_OPERATION_ID_CHARS = re.compile(r"[^A-Za-z0-9_]+")
 _FIXED_PATH_ITEM_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 
 
@@ -107,24 +110,25 @@ def _build_operation(
     Returns:
         tuple[dict[str, Any], str | None]: The operation definition and the name of its security scheme, if authentication applies.
     """
-    parameters = _path_parameters(route.raw_path)
     bindings = walk_bindings(plan)
+    parameters = _path_parameters(route.raw_path, bindings, registry=registry)
     parameters.extend(_bound_parameters(bindings, registry=registry))
 
     operation_id = _operation_id(route, method=method, known_operation_ids=known_operation_ids)
     summary, description = _summary_and_description(route.endpoint.__doc__)
-    operation: dict[str, Any] = {
-        "operationId": operation_id,
-        "responses": {
+    response_annotation = route.response_model if route.response_model is not None else plan.return_annotation
+    success: dict[str, Any]
+    if response_annotation is None or response_annotation is types.NoneType:
+        # Handlers returning None produce an empty 204 response at runtime.
+        success = {"204": {"description": "No Content"}}
+    else:
+        success = {
             "200": {
                 "description": "Successful Response",
-                "content": _response_content(
-                    route.response_model if route.response_model is not None else plan.return_annotation,
-                    registry=registry,
-                ),
+                "content": _response_content(response_annotation, registry=registry),
             }
-        },
-    }
+        }
+    operation: dict[str, Any] = {"operationId": operation_id, "responses": success}
     body_binding = next((item for item in bindings if item.source in {"body", "form"}), None)
     if body_binding is not None:
         operation["requestBody"] = _request_body(body_binding, registry=registry)
@@ -230,10 +234,9 @@ def _response_content(annotation: object, *, registry: SchemaRegistry) -> dict[s
     }
     if annotation in stream_types:
         return {stream_types[annotation]: {"schema": {"type": "string"}}}
-    if annotation is Response or annotation is str:
+    if annotation is Response or annotation is str or annotation is bytes:
+        # Matches to_response(), which sends str and bytes bodies as text/plain.
         return {"text/plain": {"schema": {"type": "string"}}}
-    if annotation is bytes:
-        return {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}
     return {"application/json": {"schema": registry.schema_for(annotation)}}
 
 
@@ -280,7 +283,8 @@ def _validation_error_schema(registry: SchemaRegistry) -> dict[str, Any]:
 
 def _operation_id(route: Route, *, method: str, known_operation_ids: set[str]) -> str:
     endpoint_name = getattr(route.endpoint, "__name__", route.endpoint.__class__.__name__)
-    base = f"{route.name or endpoint_name}_{method.lower()}"
+    # Code generators reject punctuation such as the ":" and "/" in "static:/static".
+    base = _UNSAFE_OPERATION_ID_CHARS.sub("_", f"{route.name or endpoint_name}_{method.lower()}")
     candidate = base
     suffix = 1
     while candidate in known_operation_ids:
@@ -291,24 +295,36 @@ def _operation_id(route: Route, *, method: str, known_operation_ids: set[str]) -
 
 
 def _summary_and_description(doc: str | None) -> tuple[str | None, str | None]:
+    """Split a docstring into its first line and the remaining text, keeping paragraphs and indentation."""
     if doc is None:
         return None, None
-    lines = [line.strip() for line in doc.strip().splitlines() if line.strip()]
-    if not lines:
+    cleaned = inspect.cleandoc(doc)
+    if not cleaned:
         return None, None
-    return lines[0], "\n".join(lines[1:]) if len(lines) > 1 else None
+    summary, _, rest = cleaned.partition("\n")
+    return summary.strip(), rest.strip("\n") or None
 
 
 def _to_openapi_path(path: str) -> str:
     return _PARAM_PATTERN.sub(lambda match: "{" + match.group("name") + "}", path)
 
 
-def _path_parameters(path: str) -> list[dict[str, Any]]:
+def _path_parameters(path: str, bindings: Sequence[ParameterBinding], *, registry: SchemaRegistry) -> list[dict[str, Any]]:
+    annotations = {binding.name: binding.annotation for binding in bindings if binding.source == "path"}
     parameters: list[dict[str, Any]] = []
     for match in _PARAM_PATTERN.finditer(path):
-        converter = match.group("converter") or "str"
-        schema = {"type": "integer"} if converter == "int" else {"type": "number"} if converter == "float" else {"type": "string"}
-        parameters.append({"name": match.group("name"), "in": "path", "required": True, "schema": schema})
+        name = match.group("name")
+        converter = match.group("converter")
+        if converter == "int":
+            schema: dict[str, Any] = {"type": "integer"}
+        elif converter == "float":
+            schema = {"type": "number"}
+        elif converter is None and name in annotations:
+            # Untyped segments are coerced to the handler's annotation, so document that type.
+            schema = registry.schema_for(annotations[name])
+        else:
+            schema = {"type": "string"}
+        parameters.append({"name": name, "in": "path", "required": True, "schema": schema})
     return parameters
 
 

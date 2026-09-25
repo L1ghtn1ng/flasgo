@@ -85,6 +85,11 @@
   rejected); `Literal`, `Enum` and `UUID` require exact JSON types; `set[Model]` with unhashable items and
   `__post_init__` failures return 422 instead of 500; error messages no longer echo internal type names; and model
   type hints are cached per class.
+- OpenAPI now matches runtime behaviour: handlers returning `None` are documented as 204 with no content, `bytes`
+  responses as `text/plain`, untyped path segments with the handler's annotated type, operation IDs contain only
+  `[A-Za-z0-9_]` (the static route produced `static:/static_get`), and docstring descriptions keep paragraph breaks
+  and indentation. Tuple route response models are rejected at registration because a returned tuple is read as
+  `(body, status)`.
 
 ## [0.9.1] - 2026-09-06
 

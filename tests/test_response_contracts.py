@@ -125,3 +125,12 @@ def test_stream_mapping_model_is_rejected_before_source_consumption(response_typ
 
     with pytest.raises(TypeError, match="mappings must use str or Any keys"):
         response_type(source(), item_model=dict[int, str])
+
+
+@pytest.mark.parametrize("model", [tuple[int, int], tuple, tuple[int, ...]])
+def test_tuple_route_response_models_are_rejected(model: object) -> None:
+    """A tuple body would be read as (body, status), so such a route could only ever return 500."""
+    app = Flasgo()
+
+    with pytest.raises(TypeError, match="cannot be tuples"):
+        app.add_route("/pair", lambda: (1, 2), response_model=model)

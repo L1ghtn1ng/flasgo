@@ -1190,6 +1190,10 @@ class Flasgo(RouteDecorators):
         resolved_cors = self.cors if cors is None else None if cors is False else cors
         if response_model is not None:
             validate_response_model(response_model)
+            unwrapped = get_args(response_model)[0] if get_origin(response_model) is Annotated else response_model
+            if unwrapped is tuple or get_origin(unwrapped) is tuple:
+                # A returned (1, 2) would be read as (body, status), so a tuple body can never be returned as-is.
+                raise TypeError("Route response models cannot be tuples; use a list or a dataclass instead.")
         plan = compile_endpoint_plan(endpoint, path, dependencies=dependencies)
         route = Route(
             path,
