@@ -1117,3 +1117,19 @@ def test_after_request_runs_for_routing_and_auth_denials() -> None:
 
     assert seen == [("/open", 200), ("/missing", 404), ("/open", 405), ("/private", 401)]
     assert all(response.headers["x-after"] == "1" for response in responses)
+
+
+def test_http_exception_behaves_like_a_normal_exception() -> None:
+    import pickle
+
+    from flasgo import HTTPException, abort
+
+    first, second = HTTPException(404), HTTPException(404)
+    assert first != second
+    assert len({first, second}) == 2
+    with pytest.raises(HTTPException) as raised:
+        abort(403, "no", {"retry-after": "5"})
+    assert str(raised.value) == "no"
+    assert raised.value.args == (403, "no")
+    restored = pickle.loads(pickle.dumps(raised.value))
+    assert (restored.status_code, restored.detail, restored.headers) == (403, "no", {"retry-after": "5"})

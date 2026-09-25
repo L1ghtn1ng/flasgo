@@ -56,6 +56,9 @@
   already active.
 - Duplicate explicit route names are rejected when the route is added (HTTP and WebSocket alike). Previously they were
   accepted and then caused the next, unrelated blueprint registration to fail.
+- `HTTPException` is hashable and compared by identity like other exceptions, `str(abort(403, "no"))` is `"no"`
+  instead of empty, it pickles with its headers, and `abort()` is annotated `-> Never` so type checkers treat the code
+  after it as unreachable.
 
 ## [0.9.1] - 2026-09-06
 
