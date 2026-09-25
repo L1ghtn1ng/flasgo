@@ -445,7 +445,10 @@ def test_openapi_accepts_supported_local_security_scheme_types(scheme: dict[str,
     def private() -> str:
         return "ok"
 
-    validate(app.openapi_spec(), cls=OpenAPIV32SpecValidator)
+    spec = app.openapi_spec()
+    validate(spec, cls=OpenAPIV32SpecValidator)
+    assert spec["components"]["securitySchemes"]["customAuth"] == scheme
+    assert spec["paths"]["/private"]["get"]["security"] == [{"customAuth": []}]
 
 
 @pytest.mark.parametrize(

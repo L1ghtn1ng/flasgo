@@ -1158,3 +1158,22 @@ def test_tuple_responses_validate_status_and_headers_like_responses() -> None:
     assert (response.status_code, response.headers["x-id"], response.headers["content-length"]) == (201, "7", "7")
     with pytest.raises(ValueError, match="between 100 and 599"):
         to_response(("body", 999))
+
+
+@pytest.mark.parametrize("method", ["put", "patch", "delete"])
+def test_csrf_protects_every_unsafe_method_decorator(method: str) -> None:
+    app = Flasgo()
+
+    @app.get("/seed")
+    def seed() -> str:
+        return "seed"
+
+    getattr(app, method)("/item")(lambda: "ok")
+
+    client = TestClient(app)
+    token = extract_cookie(client.get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    assert token is not None
+    send = getattr(client, method)
+    assert send("/item", headers={"origin": "http://localhost"}).status_code == 403
+    allowed = send("/item", headers={"cookie": f"flasgo-csrf={token}", "x-csrf-token": token, "origin": "http://localhost"})
+    assert allowed.status_code == 200

@@ -7,7 +7,7 @@ import textwrap
 import threading
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import cast
+from typing import Any, cast
 
 import jwt
 import pytest
@@ -441,3 +441,27 @@ def test_owned_tracer_provider_keeps_exporting_across_lifespan_cycles(monkeypatc
 
     assert len(exporter.get_finished_spans()) >= 2
     provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"subject": ""}, "subject must not be empty"),
+        ({"expires_in": 0}, "expires_in must be greater than 0"),
+        ({"scopes": ["read", " "]}, "must not contain empty values"),
+        ({"issuer": ""}, "issuer must not be empty"),
+        ({"audience": ""}, "audience must not be empty"),
+    ],
+)
+def test_encode_jwt_rejects_invalid_configuration(kwargs: dict[str, object], message: str) -> None:
+    options: dict[str, Any] = {"subject": "alice", "issuer": "issuer", "audience": "audience", **kwargs}
+    subject = options.pop("subject")
+    with pytest.raises(ValueError, match=message):
+        encode_jwt(subject, _JWT_SECRET, **options)
+
+
+def test_jwt_backend_rejects_empty_issuer_and_audience() -> None:
+    with pytest.raises(ValueError, match="issuer must not be empty"):
+        jwt_backend(_JWT_SECRET, issuer="", audience="audience")
+    with pytest.raises(ValueError, match="audience must not be empty"):
+        jwt_backend(_JWT_SECRET, issuer="issuer", audience="")
