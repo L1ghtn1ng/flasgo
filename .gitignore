@@ -10,3 +10,10 @@ dist/
 build/
 .idea/
 .junie/
+.vscode/
+.claude/settings.local.json
+.mcp.json
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
