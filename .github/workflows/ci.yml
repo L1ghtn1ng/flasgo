@@ -47,6 +47,7 @@ jobs:
         with:
           python-version: "3.14"
 
+      # setup-uv reads its version manifest from raw.githubusercontent.com, so every job's egress allowlist needs it.
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
@@ -121,6 +122,7 @@ jobs:
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
+            raw.githubusercontent.com:443
             release-assets.githubusercontent.com:443
 
       - name: Checkout
@@ -164,6 +166,7 @@ jobs:
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
+            raw.githubusercontent.com:443
             release-assets.githubusercontent.com:443
 
       - name: Checkout
