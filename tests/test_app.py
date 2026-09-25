@@ -224,6 +224,56 @@ def test_ratelimit_rejects_new_keys_without_evicting_active_quotas(monkeypatch: 
     asyncio.run(run_checks())
 
 
+def _limiter_request() -> Request:
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request({"headers": [], "client": ("127.0.0.1", 5000)}, receive)
+
+
+def test_ratelimit_check_keeps_history_for_longer_windows_sharing_a_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short-window check must not discard history that a longer-window rule in the same scope still counts."""
+    limiter = RateLimiter()
+    now = 0.0
+    long_rule = RateLimitRule(3, window_seconds=100, scope="shared")
+    short_rule = RateLimitRule(10, window_seconds=1, scope="shared")
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def run_checks() -> None:
+        nonlocal now
+        for _ in range(3):
+            assert (await limiter.check(long_rule, _limiter_request(), endpoint_id="long")).allowed
+        assert not (await limiter.check(long_rule, _limiter_request(), endpoint_id="long")).allowed
+        now = 2.0
+        assert (await limiter.check(short_rule, _limiter_request(), endpoint_id="short")).allowed
+        assert not (await limiter.check(long_rule, _limiter_request(), endpoint_id="long")).allowed
+
+    asyncio.run(run_checks())
+
+
+def test_ratelimit_retry_after_accounts_for_entries_beyond_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With more entries than the limit in a shared scope, Retry-After must cover every entry that has to expire."""
+    limiter = RateLimiter()
+    now = 0.0
+    generous = RateLimitRule(100, window_seconds=60, scope="shared")
+    strict = RateLimitRule(5, window_seconds=60, scope="shared")
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def run_checks() -> None:
+        nonlocal now
+        for second in range(50):
+            now = float(second)
+            assert (await limiter.check(generous, _limiter_request(), endpoint_id="generous")).allowed
+        now = 50.0
+        denied = await limiter.check(strict, _limiter_request(), endpoint_id="strict")
+        assert not denied.allowed
+        assert denied.retry_after == 55
+        now = 50.0 + denied.retry_after
+        assert (await limiter.check(strict, _limiter_request(), endpoint_id="strict")).allowed
+
+    asyncio.run(run_checks())
+
+
 def test_ratelimit_batch_capacity_denial_is_atomic(monkeypatch: pytest.MonkeyPatch) -> None:
     limiter = RateLimiter(max_keys=1)
     existing_rule = RateLimitRule(3, window_seconds=60, scope="shared-api", key_func=lambda _req: "existing")

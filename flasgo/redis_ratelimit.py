@@ -37,7 +37,11 @@ for i = 1, n do
     local reset = math.max(1, math.ceil(((tonumber(first[2]) or now) + window - now) / 1000))
     if count >= limit then
         allowed = false
-        results[i] = {0, limit, 0, reset, reset}
+        -- A shared scope can hold more entries than this rule's limit, so wait for the entry whose expiry
+        -- brings the count back under the limit rather than the oldest one.
+        local blocking = redis.call('ZRANGEBYSCORE', key, '(' .. (now-window), '+inf', 'WITHSCORES', 'LIMIT', count - limit, 1)
+        local retry = math.max(1, math.ceil(((tonumber(blocking[2]) or now) + window - now) / 1000))
+        results[i] = {0, limit, 0, retry, retry}
     else
         results[i] = {1, limit, math.max(0, limit-count-1), reset, 0}
     end

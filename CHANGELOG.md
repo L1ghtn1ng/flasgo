@@ -37,6 +37,10 @@
 - Rate-limit response headers now report the most restrictive quota across the pre-authentication and
   post-authentication phases. Previously a generous per-user limit overwrote a nearly exhausted per-IP limit, so
   clients saw `ratelimit-remaining: 49` right before a 429.
+- The in-memory `RateLimiter.check()` no longer discards history that a longer-window rule sharing the same `scope`
+  still counts, which let clients exceed the longer quota. Retry-After for a denied request in a shared scope (in
+  memory and Redis) now waits until enough entries expire to fall under that rule's limit instead of only the oldest
+  one, so clients that honour it are not immediately denied again.
 
 ## [0.9.1] - 2026-09-06
 

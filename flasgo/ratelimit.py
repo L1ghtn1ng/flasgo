@@ -81,47 +81,12 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     async def check(self, rule: RateLimitRule, req: Request, *, endpoint_id: str) -> RateLimitDecision:
-        """Evaluate one rule using a monotonic window and mark any limiter-capacity denial."""
-        now = time.monotonic()
-        client_key = _rate_limit_key(rule, req)
-        scope = rule.scope or endpoint_id
-        bucket_key = (scope, client_key)
+        """Evaluate one rule with the same bucket semantics as :meth:`check_batch`.
 
-        async with self._lock:
-            if bucket_key not in self._buckets and len(self._buckets) >= self.max_keys:
-                self._prune(now)
-                if len(self._buckets) >= self.max_keys:
-                    req.scope["flasgo.rate_limit_capacity"] = True
-                    return self._capacity_decision(rule, now=now)
-
-            request_times = self._buckets.setdefault(bucket_key, deque())
-            # Track the maximum window for this bucket across all rules
-            current_window = self._bucket_windows.get(bucket_key, 0.0)
-            self._bucket_windows[bucket_key] = max(current_window, rule.window_seconds)
-            self._drop_expired_requests(request_times, rule=rule, now=now)
-
-            # Read-only evaluation: check if request would be allowed
-            if len(request_times) >= rule.requests:
-                retry_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
-                return RateLimitDecision(
-                    allowed=False,
-                    limit=rule.requests,
-                    remaining=0,
-                    reset_after=retry_after,
-                    retry_after=retry_after,
-                )
-
-            # Request is allowed - now mutate state by appending timestamp
-            request_times.append(now)
-            remaining = max(0, rule.requests - len(request_times))
-            reset_after = _seconds_until_reset(request_times[0], rule=rule, now=now)
-            return RateLimitDecision(
-                allowed=True,
-                limit=rule.requests,
-                remaining=remaining,
-                reset_after=reset_after,
-                retry_after=0,
-            )
+        Buckets can be shared through ``scope`` by rules with different windows, so expiry must honour the longest
+        window ever applied to the bucket rather than this rule's window.
+        """
+        return (await self.check_batch([(rule, endpoint_id)], req))[0]
 
     async def check_batch(
         self,
@@ -190,7 +155,10 @@ class RateLimiter:
                 cutoff = now - rule.window_seconds
                 recent_times = [timestamp for timestamp in request_times if timestamp > cutoff]
                 if len(recent_times) >= rule.requests:
-                    retry_after = _seconds_until_reset(recent_times[0], rule=rule, now=now)
+                    # A shared scope can hold more entries than this rule allows; the request becomes possible once
+                    # enough of them expire to bring the count below the limit, not when the oldest one expires.
+                    blocking = recent_times[len(recent_times) - rule.requests]
+                    retry_after = _seconds_until_reset(blocking, rule=rule, now=now)
                     evaluations.append(
                         (
                             bucket_key,
@@ -239,17 +207,6 @@ class RateLimiter:
                     request_times.append(now)
 
             return [decision for _, _, _, decision in evaluations]
-
-    def _drop_expired_requests(
-        self,
-        request_times: deque[float],
-        *,
-        rule: RateLimitRule,
-        now: float,
-    ) -> None:
-        cutoff = now - rule.window_seconds
-        while request_times and request_times[0] <= cutoff:
-            request_times.popleft()
 
     def _prune(self, now: float) -> None:
         """Remove only buckets whose complete quota state has expired."""
