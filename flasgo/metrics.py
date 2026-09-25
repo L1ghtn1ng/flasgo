@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
+from ._otel import current_trace_ids
 from .exceptions import HTTPException
 
 if TYPE_CHECKING:
@@ -26,17 +27,8 @@ def _framework_version() -> str:
 
 def _trace_exemplar() -> dict[str, str] | None:
     """Return trace identifiers only when an optional OpenTelemetry span is active."""
-    try:
-        from opentelemetry import trace
-    except ImportError:
-        return None
-    context = trace.get_current_span().get_span_context()
-    if not context.is_valid:
-        return None
-    return {
-        "trace_id": format(context.trace_id, "032x"),
-        "span_id": format(context.span_id, "016x"),
-    }
+    ids = current_trace_ids()
+    return None if ids is None else {"trace_id": ids[0], "span_id": ids[1]}
 
 
 def normalize_http_method(method: str) -> str:

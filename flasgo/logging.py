@@ -4,6 +4,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any, TextIO, override
 
+from ._otel import current_trace_ids
+
 _FIELD_RE = re.compile(r"[^a-zA-Z0-9_.:/@+\\-]")
 _OWNED_HANDLER = "_flasgo_owned_handler"
 _STANDARD_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
@@ -103,16 +105,13 @@ def log_event(
     event: str,
     **fields: object,
 ) -> None:
+    if not logger.isEnabledFor(level):
+        # Skip sanitizing fields for records that would be discarded (for example before configure_logging).
+        return
     safe_fields: dict[str, object] = {"event": sanitize_log_value(event, limit=64)}
-    try:
-        from opentelemetry import trace
-
-        span_context = trace.get_current_span().get_span_context()
-        if span_context.is_valid:
-            safe_fields["trace_id"] = format(span_context.trace_id, "032x")
-            safe_fields["span_id"] = format(span_context.span_id, "016x")
-    except ImportError:
-        pass
+    trace_ids = current_trace_ids()
+    if trace_ids is not None:
+        safe_fields["trace_id"], safe_fields["span_id"] = trace_ids
     for key, value in fields.items():
         if value is None:
             continue
