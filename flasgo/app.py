@@ -511,6 +511,7 @@ class Flasgo(RouteDecorators):
                 if background is not response.background:
                     observation.close()
             sent = False
+            client_disconnected = False
             route = str(req.scope.get("route_template", "<unmatched>"))
             streaming = isinstance(response, StreamingResponse)
             observed_send = _CountingSend(
@@ -536,7 +537,10 @@ class Flasgo(RouteDecorators):
                             self._metrics.streams.labels(route=route, outcome=response._metrics_outcome).inc()
             except Exception as exc:
                 await self._close_request_dependencies(req, dependencies, exc)
-                self._log_security_event(logging.ERROR, "response-send-failed", req=req)
+                client_disconnected = isinstance(response, StreamingResponse) and response._metrics_outcome == "client_disconnect"
+                if not client_disconnected:
+                    # A client closing a stream (routine for SSE) is not a server failure worth an ERROR.
+                    self._log_security_event(logging.ERROR, "response-send-failed", req=req)
             else:
                 await self._close_request_dependencies(req, dependencies)
 
@@ -547,7 +551,7 @@ class Flasgo(RouteDecorators):
             log_event(
                 self._access_logger,
                 logging.INFO,
-                "http-request-complete" if sent else "http-response-send-failed",
+                "http-request-complete" if sent else "http-client-disconnected" if client_disconnected else "http-response-send-failed",
                 request_id=req.request_id,
                 method=req.method,
                 route=route,

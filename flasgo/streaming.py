@@ -402,6 +402,9 @@ class EventSourceResponse(StreamingResponse):
             max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
         """
         _positive_timeout(heartbeat, "heartbeat")
+        if heartbeat >= idle_timeout:
+            # Heartbeats are the only output of a quiet stream, so the idle timeout would close it before the first ping.
+            raise ValueError("SSE heartbeat must be shorter than idle_timeout.")
         validate_response_model(item_model)
         source = aiter(events)
 

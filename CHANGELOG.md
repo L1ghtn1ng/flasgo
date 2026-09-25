@@ -76,6 +76,9 @@
   `.tar.bz2` and `.xz` are served as downloads with their archive type instead of a `Content-Encoding` browsers cannot
   decode; the content type comes from the requested name rather than a symlink target; and path resolution and
   `stat()` run off the event loop.
+- A client disconnecting from a streaming or SSE response is logged as `http-client-disconnected` at INFO instead of
+  an ERROR-level `response-send-failed` event, and `EventSourceResponse` rejects a `heartbeat` that is not shorter
+  than `idle_timeout` (which would close quiet streams before the first ping).
 
 ## [0.9.1] - 2026-09-06
 
