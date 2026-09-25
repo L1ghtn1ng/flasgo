@@ -619,7 +619,6 @@ class Flasgo(RouteDecorators):
             message = await receive()
             message_type = message.get("type")
             if message_type == "lifespan.startup":
-                configure_logging(format=self.settings.LOG_FORMAT, level=self.settings.LOG_LEVEL)
                 if self._lifespan_active:
                     await send(
                         {
@@ -629,6 +628,7 @@ class Flasgo(RouteDecorators):
                     )
                     return
                 try:
+                    configure_logging(format=self.settings.LOG_FORMAT, level=self.settings.LOG_LEVEL)
                     if self._lifespan_handler is not None:
                         iterator = self._lifespan_handler(self)
                         await anext(iterator)
@@ -642,6 +642,7 @@ class Flasgo(RouteDecorators):
                         self._metrics.observe_lifespan("startup", "success")
                     await send({"type": "lifespan.startup.complete"})
                 except Exception:
+                    self._lifespan_active = False
                     if self._lifespan_iterator is not None:
                         await self._lifespan_iterator.aclose()
                         self._lifespan_iterator = None
@@ -664,6 +665,8 @@ class Flasgo(RouteDecorators):
                         except StopAsyncIteration:
                             pass
                         else:
+                            # Run the handler's remaining cleanup now rather than leaving it to garbage collection.
+                            await self._lifespan_iterator.aclose()
                             raise RuntimeError("A Flasgo lifespan handler must yield exactly once.")
                     self._lifespan_iterator = None
                     self._lifespan_active = False

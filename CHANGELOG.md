@@ -51,6 +51,9 @@
   fail every connection, the connection can be received under any parameter name annotated `WebSocket` (including
   `Annotated[WebSocket, ...]`), and a handler that returns without accepting is recorded with the outcome
   `not_accepted` instead of `success`.
+- A lifespan handler that yields more than once now has its cleanup run immediately at shutdown instead of at garbage
+  collection, and a startup failure after the handler started no longer leaves the app reporting that its lifespan is
+  already active.
 
 ## [0.9.1] - 2026-09-06
 

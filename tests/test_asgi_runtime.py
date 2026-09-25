@@ -388,3 +388,54 @@ def test_websocket_handler_that_never_accepts_is_not_logged_as_success(caplog: p
 
     outcomes = [getattr(record, "outcome", None) for record in caplog.records if getattr(record, "event", None) == "websocket-complete"]
     assert outcomes == ["not_accepted"]
+
+
+async def _drive_lifespan(app: Flasgo, *events: str) -> list[str]:
+    incoming = [{"type": f"lifespan.{event}"} for event in events]
+    sent: list[str] = []
+
+    async def receive() -> dict[str, str]:
+        return incoming.pop(0)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(str(message["type"]))
+
+    await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+    return sent
+
+
+def test_lifespan_handler_that_yields_twice_is_closed_immediately() -> None:
+    app = Flasgo()
+    events: list[str] = []
+
+    @app.lifespan
+    async def lifespan(_app: Flasgo) -> AsyncGenerator[None]:
+        try:
+            yield
+            yield
+        finally:
+            events.append("cleanup")
+
+    async def run() -> None:
+        assert await _drive_lifespan(app, "startup", "shutdown") == ["lifespan.startup.complete", "lifespan.shutdown.failed"]
+        assert events == ["cleanup"]
+
+    asyncio.run(run())
+
+
+def test_lifespan_can_start_again_after_a_failed_startup() -> None:
+    app = Flasgo()
+    attempts: list[int] = []
+
+    @app.lifespan
+    async def lifespan(_app: Flasgo) -> AsyncGenerator[None]:
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise RuntimeError("first start fails")
+        yield
+
+    async def run() -> None:
+        assert await _drive_lifespan(app, "startup") == ["lifespan.startup.failed"]
+        assert await _drive_lifespan(app, "startup", "shutdown") == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+
+    asyncio.run(run())
