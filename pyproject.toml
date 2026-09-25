@@ -151,3 +151,12 @@ pythonpath = ["."]
 strict = true
 filterwarnings = ["error"]
 faulthandler_timeout = 60
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.src]
+include = ["flasgo", "tests", "benchmarks"]
+
+[tool.ty.terminal]
+error-on-warning = true
