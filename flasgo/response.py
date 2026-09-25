@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
 from urllib.parse import urlsplit
@@ -91,13 +91,14 @@ class Response:
     status_code: int = 200
     headers: dict[str, str] = field(default_factory=dict)
     cookies: list[str] = field(default_factory=list)
-    content_type: str = "text/plain; charset=utf-8"
+    # Only an initializer argument; afterwards ``content_type`` is a property backed by the header (defined below).
+    content_type: InitVar[str] = "text/plain; charset=utf-8"
     allow_public_cache: bool = False
     background: BackgroundTasks | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, content_type: str) -> None:
         self.headers = ResponseHeaders(self.headers)
-        self.headers.setdefault("content-type", self.content_type)
+        self.headers.setdefault("content-type", content_type)
         self.prepare()
 
     def prepare(self) -> None:
@@ -106,7 +107,14 @@ class Response:
         if not isinstance(self.headers, ResponseHeaders):
             # Callers may replace the mapping wholesale; re-normalize so mixed-case names cannot duplicate.
             self.headers = ResponseHeaders(self.headers)
-        self.headers["content-length"] = str(len(self.body))
+        if not status_allows_body(self.status_code):
+            # RFC 9110 forbids content on 1xx/204/304, and a 304's content headers would overwrite cached metadata.
+            if self.body:
+                raise ValueError(f"HTTP {self.status_code} responses must not have a body.")
+            self.headers.pop("content-length", None)
+            self.headers.pop("content-type", None)
+        else:
+            self.headers["content-length"] = str(len(self.body))
         for key, value in self.headers.items():
             _validate_header(key, value)
         for cookie in self.cookies:
@@ -278,6 +286,26 @@ class Response:
         self.background.add_task(func, *args, **kwargs)
 
 
+def _get_content_type(self: Response) -> str:
+    return self.headers.get("content-type", "")
+
+
+def _set_content_type(self: Response, value: str) -> None:
+    self.headers["content-type"] = value
+
+
+Response.content_type = property(  # ty: ignore[invalid-assignment]
+    _get_content_type,
+    _set_content_type,
+    doc="The ``content-type`` header; assigning it updates the header that is sent.",
+)
+
+
+def status_allows_body(status_code: int) -> bool:
+    """Return whether an HTTP status may carry content (not 1xx, 204, or 304)."""
+    return status_code >= 200 and status_code not in {204, 304}
+
+
 ResponseValue = Response | DataclassResponse | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
 
 
@@ -332,10 +360,8 @@ def _tuple_to_response(
     if headers:
         if not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
             raise TypeError("Response tuple headers must be a mapping of string names to string values.")
-        response.headers.update({str(key).lower(): str(value) for key, value in headers.items()})
-        for key, value in response.headers.items():
-            _validate_header(key, value)
-    response.headers["content-length"] = str(len(response.body))
+        response.headers.update(headers)
+    response.prepare()
     return response
 
 

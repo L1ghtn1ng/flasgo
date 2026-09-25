@@ -63,6 +63,9 @@
   decoding them as UTF-8 and silently replacing bad bytes with U+FFFD.
 - `Request.cookies` now reads every `Cookie` header, with the first value winning for a repeated name, matching
   `cookie_values()`. Previously only the last header was parsed.
+- 1xx, 204 and 304 responses no longer send `content-length` or `content-type` (RFC 9110), and constructing one with a
+  body raises `ValueError`. `Response.content_type` is now backed by the header, so assigning it after construction
+  changes what is sent. Tuple responses such as `("body", 999)` are validated like any other response.
 
 ## [0.9.1] - 2026-09-06
 

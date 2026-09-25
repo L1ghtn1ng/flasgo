@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .contracts import project_response, validate_response_model
-from .response import Response
+from .response import Response, status_allows_body
 from .types import Receive, Send
 from .validation import ValidationBudget
 
@@ -95,7 +95,7 @@ class StreamingResponse(Response):
     def prepare(self) -> None:
         """Prepare the streaming response headers and validate that the status permits a response body."""
         super().prepare()
-        if self.status_code < 200 or self.status_code in {204, 304}:
+        if not status_allows_body(self.status_code):
             raise ValueError("Streaming responses require a status that permits a response body.")
         self.headers.pop("content-length", None)
         self.headers.pop("transfer-encoding", None)

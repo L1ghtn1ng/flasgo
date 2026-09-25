@@ -1133,3 +1133,34 @@ def test_http_exception_behaves_like_a_normal_exception() -> None:
     assert raised.value.args == (403, "no")
     restored = pickle.loads(pickle.dumps(raised.value))
     assert (restored.status_code, restored.detail, restored.headers) == (403, "no", {"retry-after": "5"})
+
+
+def test_bodyless_statuses_omit_content_headers() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.delete("/items/<int:item_id>")
+    def remove(item_id: int) -> None:
+        return None
+
+    response = TestClient(app).delete("/items/1")
+    assert response.status_code == 204
+    assert "content-length" not in response.headers
+    assert "content-type" not in response.headers
+    with pytest.raises(ValueError, match="must not have a body"):
+        Response(b"stale", status_code=304)
+
+
+def test_response_content_type_attribute_tracks_the_header() -> None:
+    response = Response.text("{}")
+    response.content_type = "application/json"
+    assert response.headers["content-type"] == "application/json"
+    assert Response(b"", headers={"Content-Type": "text/csv"}).content_type == "text/csv"
+
+
+def test_tuple_responses_validate_status_and_headers_like_responses() -> None:
+    from flasgo.response import to_response
+
+    response = to_response(("created", 201, {"X-Id": "7"}))
+    assert (response.status_code, response.headers["x-id"], response.headers["content-length"]) == (201, "7", "7")
+    with pytest.raises(ValueError, match="between 100 and 599"):
+        to_response(("body", 999))
