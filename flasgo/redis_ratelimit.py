@@ -2,7 +2,7 @@ import json
 import math
 from uuid import uuid4
 
-from .ratelimit import RateLimitDecision, RateLimitRule, _rate_limit_key
+from .ratelimit import RateLimitDecision, RateLimitRule, rate_limit_key
 from .request import Request
 from .stores import RedisStore, StoreUnavailable
 
@@ -118,7 +118,7 @@ class RedisRateLimiter:
         keys = [self.store.prefix + "ratelimit-registry"]
         args: list[str | int] = [self.max_keys, uuid4().hex]
         for rule, endpoint_id in rules:
-            identity = _rate_limit_key(rule, req)
+            identity = rate_limit_key(rule, req)
             key = self.store.key("ratelimit:" + json.dumps([rule.scope or endpoint_id, identity]))
             keys.extend((key, key + ":window"))
             args.extend((rule.requests, math.ceil(rule.window_seconds * 1000)))

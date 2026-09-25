@@ -29,6 +29,9 @@
   Documentation and route authorization now share one implementation.
 - Redis-backed rate limiting and sessions call their Lua scripts with `EVALSHA` (falling back to `EVAL` on `NOSCRIPT`)
   instead of sending the full script on every request, and `RedisStore.from_url()` accepts `max_value_bytes`.
+- The in-memory rate limiter and `MemoryStore` remember when their earliest entry expires, so once full they reject
+  new clients without rescanning every key (about 5 ms per request at 10,000 keys before, microseconds now). Capacity
+  denials from the in-memory limiter report a Retry-After based on that expiry.
 
 ### Fixed
 

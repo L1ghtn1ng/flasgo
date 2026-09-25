@@ -367,3 +367,24 @@ def test_redis_concurrent_session_writes_and_revocation_are_atomic(redis_url: st
             await store.aclose()
 
     asyncio.run(run())
+
+
+def test_memory_store_capacity_recovers_when_the_earliest_entry_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    import flasgo.stores as stores_module
+
+    now = 0.0
+    monkeypatch.setattr(stores_module.time, "monotonic", lambda: now)
+    store = MemoryStore(max_keys=2)
+
+    async def run() -> None:
+        nonlocal now
+        assert await store.create("long", b"1", ttl=100)
+        assert await store.create("short", b"2", ttl=100)
+        # Shortening an entry's lifetime must be tracked, or the full store would stay closed until t=100.
+        assert await store.replace("short", b"2", b"3", ttl=5)
+        with pytest.raises(StoreUnavailable):
+            await store.create("new", b"4", ttl=100)
+        now = 6.0
+        assert await store.create("new", b"4", ttl=100)
+
+    asyncio.run(run())

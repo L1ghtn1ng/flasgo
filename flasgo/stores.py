@@ -88,6 +88,7 @@ class MemoryStore:
             raise ValueError("max_keys must be a positive integer.")
         self.max_keys = max_keys
         self._values: dict[str, tuple[bytes, float]] = {}
+        self._next_expiry = 0.0
         self._lock = asyncio.Lock()
 
     def _get(self, key: str) -> bytes | None:
@@ -135,13 +136,32 @@ class MemoryStore:
         async with self._lock:
             if self._get(key) is not None:
                 return False
+            now = time.monotonic()
+            if len(self._values) >= self.max_keys and now >= self._next_expiry:
+                self._sweep(now)
             if len(self._values) >= self.max_keys:
-                for existing in tuple(self._values):
-                    self._get(existing)
-                if len(self._values) >= self.max_keys:
-                    raise _StoreCapacityExceeded("Session store capacity reached.")
-            self._values[key] = (value, time.monotonic() + ttl)
+                raise _StoreCapacityExceeded("Session store capacity reached.")
+            self._store(key, value, ttl)
             return True
+
+    def _store(self, key: str, value: bytes, ttl: int) -> None:
+        expires = time.monotonic() + ttl
+        self._values[key] = (value, expires)
+        self._next_expiry = min(self._next_expiry, expires)
+
+    def _sweep(self, now: float) -> None:
+        """Drop expired entries and record when the next one expires.
+
+        Until then a full store can reject new keys without rescanning every entry. Every write lowers the recorded
+        time when needed, so it can be early (causing an extra sweep) but never late.
+        """
+        next_expiry = math.inf
+        for existing, (_value, expires) in tuple(self._values.items()):
+            if expires <= now:
+                del self._values[existing]
+            else:
+                next_expiry = min(next_expiry, expires)
+        self._next_expiry = next_expiry
 
     async def replace(self, key: str, expected: bytes, value: bytes, ttl: int) -> bool:
         """Replace a stored value when its current value matches the expected value.
@@ -158,7 +178,7 @@ class MemoryStore:
         async with self._lock:
             if self._get(key) != expected:
                 return False
-            self._values[key] = (value, time.monotonic() + ttl)
+            self._store(key, value, ttl)
             return True
 
     async def rotate(self, key: str, expected: bytes, new_key: str, value: bytes, ttl: int) -> bool:
@@ -174,7 +194,7 @@ class MemoryStore:
         async with self._lock:
             if self._get(key) != expected or self._get(new_key) is not None:
                 return False
-            self._values[new_key] = (value, time.monotonic() + ttl)
+            self._store(new_key, value, ttl)
             del self._values[key]
             return True
 
