@@ -30,6 +30,10 @@
 - CSRF trusted origins are compared in canonical form, so `https://partner.example/` and `https://partner.example:443`
   match. Bare host and `.example.com` suffix entries now only trust the request's own scheme, so an HTTPS app no
   longer trusts `http://evil.example.com`. Use `https://*.example.com` to trust subdomains explicitly.
+- JWT scopes must be RFC 6749 scope tokens. `encode_jwt(scopes=["read admin"])` previously produced a token that
+  decoded as the two scopes `read` and `admin`, and list-form scope claims with whitespace are now rejected. A NaN or
+  infinite `leeway` is rejected instead of silently disabling expiry checks, and `additional_claims` may now use
+  `scope` when a different `scope_claim` is configured.
 
 ## [0.9.1] - 2026-09-06
 

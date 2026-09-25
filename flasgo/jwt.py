@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -7,7 +9,9 @@ from typing import Any, cast
 from .auth import AuthBackend, AuthResult, User, extract_bearer_token, set_auth_backend_openapi_scheme
 from .request import Request
 
-_RESERVED_CLAIMS = frozenset({"alg", "aud", "exp", "iat", "iss", "nbf", "scope", "sub"})
+_RESERVED_CLAIMS = frozenset({"aud", "exp", "iat", "iss", "nbf", "sub"})
+# RFC 6749 section 3.3 scope-token: printable ASCII except space, double quote, and backslash.
+_SCOPE_TOKEN_RE = re.compile(r"[\x21\x23-\x5b\x5d-\x7e]+")
 _FORBIDDEN_SCOPE_CLAIMS = frozenset({"alg", "aud", "exp", "iat", "iss", "jti", "nbf", "sub"})
 
 
@@ -82,6 +86,9 @@ def encode_jwt(
     normalized_scopes = frozenset(str(scope).strip() for scope in scopes)
     if "" in normalized_scopes:
         raise ValueError("JWT scopes must not contain empty values.")
+    if not all(_SCOPE_TOKEN_RE.fullmatch(scope) for scope in normalized_scopes):
+        # The claim is space-delimited, so "read admin" would decode as two scopes and grant "admin".
+        raise ValueError("JWT scopes must be RFC 6749 scope tokens without whitespace, quotes, or backslashes.")
     extra = dict(additional_claims or {})
     conflict = (_RESERVED_CLAIMS | {scope_claim}).intersection(extra)
     if conflict:
@@ -115,8 +122,9 @@ def _validate_configuration(
         raise ValueError("JWT issuer must not be empty.")
     if not audience:
         raise ValueError("JWT audience must not be empty.")
-    if leeway < 0:
-        raise ValueError("JWT leeway must not be negative.")
+    if isinstance(leeway, bool) or not isinstance(leeway, int | float) or not math.isfinite(leeway) or leeway < 0:
+        # NaN or infinity would silently disable exp/nbf/iat enforcement.
+        raise ValueError("JWT leeway must be a finite, non-negative number of seconds.")
     return key
 
 
@@ -130,7 +138,7 @@ def _validate_scope_claim(scope_claim: str) -> None:
 def _normalize_scopes(value: object) -> frozenset[str] | None:
     if isinstance(value, str):
         return frozenset(item for item in value.split() if item)
-    if isinstance(value, list | tuple | set) and all(isinstance(item, str) and item for item in value):
+    if isinstance(value, list | tuple | set) and all(isinstance(item, str) and _SCOPE_TOKEN_RE.fullmatch(item) for item in value):
         return frozenset(cast(Iterable[str], value))
     if value is None or value == ():
         return frozenset()

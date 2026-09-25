@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
@@ -91,6 +92,38 @@ def test_jwt_backend_rejects_weak_secrets_and_reserved_claim_overrides() -> None
         assert "reserved claims" in str(exc)
     else:
         raise AssertionError("A reserved JWT claim was overridden.")
+
+
+@pytest.mark.parametrize("scope", ["read admin", "read\tadmin", 'say"hi"', "back\\slash", "caf\u00e9"])
+def test_encode_jwt_rejects_scopes_that_would_split_or_break_the_scope_claim(scope: str) -> None:
+    """The scope claim is space-delimited, so "read admin" would otherwise decode as the two scopes read and admin."""
+    with pytest.raises(ValueError, match="RFC 6749 scope tokens"):
+        encode_jwt("alice", _JWT_SECRET, issuer="issuer", audience="audience", scopes=[scope])
+
+
+def test_jwt_backend_rejects_list_scope_claims_containing_whitespace() -> None:
+    app = Flasgo()
+    app.register_auth_backend("jwtAuth", jwt_backend(_JWT_SECRET, issuer="issuer", audience="audience"))
+
+    @app.get("/me")
+    @app.authorize(IsAuthenticated(), backend="jwtAuth")
+    def me() -> str:
+        return "ok"
+
+    now = datetime.now(UTC)
+    claims = {"sub": "alice", "iss": "issuer", "aud": "audience", "iat": now, "exp": now + timedelta(minutes=5)}
+    client = app.test_client()
+    listed = jwt.encode({**claims, "scope": ["read", "write"]}, _JWT_SECRET, algorithm="HS256")
+    smuggled = jwt.encode({**claims, "scope": ["read admin"]}, _JWT_SECRET, algorithm="HS256")
+    assert client.get("/me", headers={"authorization": f"Bearer {listed}"}).status_code == 200
+    assert client.get("/me", headers={"authorization": f"Bearer {smuggled}"}).status_code == 401
+
+
+@pytest.mark.parametrize("leeway", [float("nan"), float("inf"), -1, True])
+def test_jwt_backend_rejects_leeway_that_disables_expiry(leeway: float) -> None:
+    """NaN or infinite leeway would make PyJWT accept long-expired tokens."""
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        jwt_backend(_JWT_SECRET, issuer="issuer", audience="audience", leeway=leeway)
 
 
 @pytest.mark.parametrize("scope_claim", ["sub", "iss", "aud", "exp", "iat", "nbf", "jti", "alg"])
