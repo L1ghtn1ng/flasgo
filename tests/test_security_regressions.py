@@ -1101,3 +1101,59 @@ def test_suffix_host_patterns_allow_real_subdomains(host: str) -> None:
         return "ok"
 
     assert app.test_client().get("/", headers={"host": host}).status_code == 200
+
+
+def test_mixed_case_response_headers_replace_instead_of_duplicating() -> None:
+    """Flask-style header assignment must not emit conflicting framing or security headers."""
+    app = Flasgo()
+
+    @app.get("/")
+    def home() -> Response:
+        response = Response.html("<p>hi</p>", headers={"X-Frame-Options": "SAMEORIGIN"})
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Content-Length"] = "999"
+        return response
+
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"host", b"localhost")],
+        "client": ("127.0.0.1", 1),
+        "server": ("localhost", 80),
+        "root_path": "",
+    }
+    asyncio.run(app(scope, receive, send))
+
+    names = [name.lower() for name, _ in sent[0]["headers"]]
+    assert len(names) == len(set(names))
+    headers = dict(sent[0]["headers"])
+    assert headers[b"content-type"] == b"application/json"
+    assert headers[b"content-length"] == b"9"
+    assert headers[b"x-frame-options"] == b"SAMEORIGIN"
+
+
+def test_response_headers_are_case_insensitive() -> None:
+    response = Response.text("ok", headers={"X-Custom": "1"})
+    response.headers.update({"x-CUSTOM": "2"})
+    response.headers |= {"X-Other": "3"}
+    assert response.headers["X-CUSTOM"] == "2"
+    assert "X-OTHER" in response.headers
+    assert response.headers.pop("X-Other") == "3"
+    response.headers = {"Content-Type": "text/csv"}
+    response.prepare()
+    assert response.headers["content-type"] == "text/csv"
+    assert list(response.headers) == ["content-type", "content-length"]

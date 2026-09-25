@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
 from urllib.parse import urlsplit
 
 from .types import Send
@@ -18,6 +18,58 @@ if TYPE_CHECKING:
 
 Headers = Mapping[str, str]
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
+class ResponseHeaders(dict[str, str]):
+    """Response header mapping that stores names lowercased.
+
+    HTTP header names are case-insensitive, so ``headers["Content-Type"] = ...`` must replace the
+    existing ``content-type`` entry rather than emit a second, conflicting header.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, data: Mapping[str, str] | Iterable[tuple[str, str]] = (), /) -> None:
+        super().__init__()
+        self.update(data)
+
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(key.lower(), value)
+
+    def __getitem__(self, key: str) -> str:
+        return super().__getitem__(key.lower())
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key.lower())
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and super().__contains__(key.lower())
+
+    def __ior__(self, other: Any, /) -> Self:
+        self.update(other)
+        return self
+
+    def __or__(self, other: Any, /) -> ResponseHeaders:
+        merged = ResponseHeaders(self)
+        merged.update(other)
+        return merged
+
+    def get(self, key: str, default: Any = None, /) -> Any:  # ty: ignore[invalid-method-override]
+        return super().get(key.lower(), default)
+
+    def pop(self, key: str, /, *default: Any) -> Any:  # ty: ignore[invalid-method-override]
+        return super().pop(key.lower(), *default)
+
+    def setdefault(self, key: str, default: str, /) -> str:
+        return super().setdefault(key.lower(), default)
+
+    def update(self, other: Any = (), /, **kwargs: str) -> None:
+        items: Iterable[tuple[str, str]] = other.items() if isinstance(other, Mapping) else other
+        for key, value in [*items, *kwargs.items()]:
+            self[key] = value
+
+    def copy(self) -> ResponseHeaders:
+        return ResponseHeaders(self)
 
 
 class DataclassResponse(Protocol):
@@ -44,13 +96,16 @@ class Response:
     background: BackgroundTasks | None = None
 
     def __post_init__(self) -> None:
-        self.headers = {key.lower(): value for key, value in self.headers.items()}
+        self.headers = ResponseHeaders(self.headers)
         self.headers.setdefault("content-type", self.content_type)
         self.prepare()
 
     def prepare(self) -> None:
         if not 100 <= self.status_code <= 599:
             raise ValueError("HTTP response status codes must be between 100 and 599.")
+        if not isinstance(self.headers, ResponseHeaders):
+            # Callers may replace the mapping wholesale; re-normalize so mixed-case names cannot duplicate.
+            self.headers = ResponseHeaders(self.headers)
         self.headers["content-length"] = str(len(self.body))
         for key, value in self.headers.items():
             _validate_header(key, value)
