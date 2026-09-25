@@ -154,6 +154,8 @@
   validation.
 - When the Redis rate limiter is at key capacity, `Retry-After` reflects when the earliest bucket expires instead of a
   fixed 1 second, avoiding a retry storm against Redis.
+- Receiving from a WebSocket after the client disconnected raises `WebSocketDisconnect` with the client's close code,
+  instead of a `RuntimeError` telling the handler to accept the socket first.
 
 ## [0.9.1] - 2026-09-06
 

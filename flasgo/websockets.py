@@ -245,10 +245,11 @@ class WebSocket:
                 return
 
     async def _receive_message(self) -> Message:
+        if self._client_state is _ClientState.DISCONNECTED:
+            # Checked first: the peer already left, so report that rather than a generic "closed" error.
+            raise WebSocketDisconnect(self.close_code or 1000, self.close_reason)
         if self._application_state is not _ApplicationState.ACCEPTED:
             raise RuntimeError(self._not_open_message("receiving"))
-        if self._client_state is _ClientState.DISCONNECTED:
-            raise WebSocketDisconnect
         message = await self._receive()
         message_type = message.get("type")
         if message_type == "websocket.disconnect":
