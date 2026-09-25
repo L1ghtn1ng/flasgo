@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import inspect
 import re
 from annotationlib import Format, ForwardRef
@@ -180,7 +178,9 @@ def _compile_callable(
         chain = " -> ".join(getattr(item, "__name__", repr(item)) for item in (*stack, endpoint))
         raise TypeError(f"Dependency cycle detected: {chain}")
 
-    signature = inspect.signature(endpoint)
+    # FORWARDREF: under PEP 649 the default VALUE format raises NameError for any unresolvable annotation
+    # (for example a TYPE_CHECKING-only import) before the resolution fallback below can run.
+    signature = inspect.signature(endpoint, annotation_format=Format.FORWARDREF)
     try:
         hints = get_type_hints(inspect.unwrap(endpoint), include_extras=True)
     except (NameError, TypeError) as exc:
