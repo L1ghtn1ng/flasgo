@@ -1,8 +1,11 @@
+import asyncio
 import os
 import shlex
+import signal
+import subprocess
 import sys
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -88,20 +91,60 @@ async def arun_with_reload(
     *,
     reload_dirs: Sequence[str | Path] | None = None,
 ) -> None:
-    """Run the current command under the file reloader from the event loop thread."""
+    """Run the current command under the file reloader from the event loop thread.
+
+    The child server is always stopped when this returns, including on cancellation (Ctrl+C) and SIGTERM.
+    ``watchfiles.arun_process`` skips that cleanup when cancelled, which could orphan a server holding its port.
+    """
     try:
-        from watchfiles import arun_process
+        from watchfiles import awatch
     except ImportError as exc:
         raise RuntimeError(_WATCHFILES_MISSING) from exc
 
-    with _reload_environment(reload_dirs) as (watch_paths, command):
-        await arun_process(
-            *watch_paths,
-            target=command,
-            target_type="command",
-            callback=log_reload_changes,
-            ignore_permission_denied=True,
-        )
+    with _reload_environment(reload_dirs) as (watch_paths, command), _cancel_on_sigterm():
+        process = await asyncio.to_thread(_start_reload_child, command)
+        try:
+            async for changes in awatch(*watch_paths, ignore_permission_denied=True):
+                log_reload_changes(changes)
+                await asyncio.to_thread(_stop_reload_child, process)
+                process = await asyncio.to_thread(_start_reload_child, command)
+        finally:
+            await asyncio.to_thread(_stop_reload_child, process)
+
+
+def _start_reload_child(command: str) -> subprocess.Popen[bytes]:
+    # The command is this process's own argv (see build_reload_command), not external input.
+    return subprocess.Popen(shlex.split(command))  # noqa: S603
+
+
+def _stop_reload_child(process: subprocess.Popen[bytes], *, grace_seconds: float = 5) -> None:
+    """Ask the child to shut down like Ctrl+C would, then kill it if it does not exit in time."""
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGINT)
+    try:
+        process.wait(grace_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+@contextmanager
+def _cancel_on_sigterm() -> Iterator[None]:
+    """Turn SIGTERM (docker stop, IDE stop buttons) into cancellation so reload cleanup runs."""
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    installed = False
+    if task is not None:
+        # Not available on Windows event loops or outside the main thread; the default SIGTERM handling applies.
+        with suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(signal.SIGTERM, task.cancel)
+            installed = True
+    try:
+        yield
+    finally:
+        if installed:
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 @contextmanager

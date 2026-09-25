@@ -256,6 +256,13 @@ def validate_app_config(settings: Settings, security: SecurityConfig) -> None:
     for origin in settings.WEBSOCKET_ALLOWED_ORIGINS:
         if canonical_origin(origin) is None:
             raise ValueError("WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths.")
+    for entry in security.csrf_trusted_origins:
+        if not _valid_csrf_trusted_origin(entry):
+            # An entry that can never match would otherwise silently reject every request from that origin.
+            raise ValueError(
+                f"CSRF_TRUSTED_ORIGINS entry {entry!r} is not supported. Use an http(s) origin such as "
+                "'https://partner.example', a wildcard such as 'https://*.example.com', a host, or a '.example.com' suffix."
+            )
     if not settings.METRICS_PATH.startswith("/"):
         raise ValueError("METRICS_PATH must start with '/'.")
     if not isinstance(settings.METRICS_EVENT_LOOP_ENABLED, bool):
@@ -269,3 +276,15 @@ def validate_app_config(settings: Settings, security: SecurityConfig) -> None:
             raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled.")
         if settings.METRICS_PATH in {settings.DOCS_PATH, settings.OPENAPI_PATH}:
             raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
+
+
+def _valid_csrf_trusted_origin(entry: object) -> bool:
+    """Accept only the entry forms that CSRF origin matching understands."""
+    if not isinstance(entry, str):
+        return False
+    text = entry.strip().lower()
+    if "://" not in text:
+        return allowed_host_pattern(text) is not None
+    scheme, _, authority = text.partition("://")
+    authority = authority.removeprefix("*.")
+    return canonical_origin(f"{scheme}://{authority}") is not None

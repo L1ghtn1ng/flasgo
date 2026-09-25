@@ -2,6 +2,7 @@ import ipaddress
 import re
 import secrets
 import time
+from annotationlib import Format
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -97,7 +98,12 @@ def default_secret_key() -> str:
 
 @cache
 def _bool_fields(cls: type) -> frozenset[str]:
-    return frozenset(name for name, annotation in get_type_hints(cls).items() if annotation is bool)
+    try:
+        hints = get_type_hints(cls)
+    except NameError, TypeError:
+        # A TYPE_CHECKING-only annotation on one field must not make the whole class unconstructible.
+        hints = get_type_hints(cls, format=Format.FORWARDREF)
+    return frozenset(name for name, annotation in hints.items() if annotation is bool)
 
 
 class StrictBoolFields:

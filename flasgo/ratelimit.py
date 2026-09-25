@@ -1,4 +1,5 @@
 import asyncio
+import heapq
 import math
 import time
 from collections import deque
@@ -76,9 +77,9 @@ class RateLimiter:
         self.max_keys = max_keys
         self._buckets: dict[tuple[str, str], deque[float]] = {}
         self._bucket_windows: dict[tuple[str, str], float] = {}
-        # No bucket can expire before this monotonic time, so a full limiter can skip the O(n) prune until then.
-        # It may underestimate (buckets only ever expire later than recorded), which just prunes earlier.
-        self._next_expiry = 0.0
+        # Min-heap of (expiry, bucket) with lazy deletion: an entry is stale once its bucket was extended, widened,
+        # or removed. It finds expired buckets and the exact next expiry without scanning every bucket.
+        self._expiries: list[tuple[float, tuple[str, str]]] = []
         self._lock = asyncio.Lock()
 
     async def check(self, rule: RateLimitRule, req: Request, *, endpoint_id: str) -> RateLimitDecision:
@@ -114,11 +115,11 @@ class RateLimiter:
 
         async with self._lock:
             entries = [((rule.scope or endpoint_id, rate_limit_key(rule, req)), rule) for rule, endpoint_id in rules]
-            if self._over_capacity(entries) and now >= self._next_expiry:
-                self._prune(now)
             if self._over_capacity(entries):
-                req.scope["flasgo.rate_limit_capacity"] = True
-                return [self._capacity_decision(rule, now=now) for _bucket_key, rule in entries]
+                next_expiry = self._expire(now)
+                if self._over_capacity(entries):
+                    req.scope["flasgo.rate_limit_capacity"] = True
+                    return [self._capacity_decision(rule, next_expiry=next_expiry, now=now) for _bucket_key, rule in entries]
 
             # Each bucket keeps history for the longest window any rule has applied to it.
             windows: dict[tuple[str, str], float] = {}
@@ -136,10 +137,12 @@ class RateLimiter:
                     request_times.append(now)
                     self._buckets[bucket_key] = request_times
                     self._bucket_windows[bucket_key] = windows[bucket_key]
-                    self._next_expiry = min(self._next_expiry, now + windows[bucket_key])
+                    self._track_expiry(bucket_key)
             else:
                 for bucket_key in buckets.keys() & self._buckets.keys():
-                    self._bucket_windows[bucket_key] = windows[bucket_key]
+                    if self._bucket_windows.get(bucket_key) != windows[bucket_key]:
+                        self._bucket_windows[bucket_key] = windows[bucket_key]
+                        self._track_expiry(bucket_key)
             return decisions
 
     def _over_capacity(self, entries: list[tuple[tuple[str, str], RateLimitRule]]) -> bool:
@@ -165,20 +168,52 @@ class RateLimiter:
             retry_after=0,
         )
 
-    def _prune(self, now: float) -> None:
-        """Remove only buckets whose complete quota state has expired, and record the next expiry."""
-        next_expiry = math.inf
-        for key, request_times in list(self._buckets.items()):
-            expires = request_times[-1] + self._bucket_windows.get(key, 86_400) if request_times else now
-            if expires <= now:
-                self._buckets.pop(key, None)
-                self._bucket_windows.pop(key, None)
-            else:
-                next_expiry = min(next_expiry, expires)
-        self._next_expiry = next_expiry
+    def _bucket_expiry(self, key: tuple[str, str]) -> float | None:
+        request_times = self._buckets.get(key)
+        if not request_times:
+            return None
+        return request_times[-1] + self._bucket_windows.get(key, 86_400)
 
-    def _capacity_decision(self, rule: RateLimitRule, *, now: float) -> RateLimitDecision:
-        retry_after = _seconds_until(self._next_expiry, now=now) if math.isfinite(self._next_expiry) else 1
+    def _track_expiry(self, key: tuple[str, str]) -> None:
+        """Record a bucket's current expiry; any earlier heap entry for it becomes stale."""
+        expiry = self._bucket_expiry(key)
+        if expiry is not None:
+            heapq.heappush(self._expiries, (expiry, key))
+        if len(self._expiries) > 2 * len(self._buckets) + 1024:
+            # Every request pushes an entry, so rebuild from live buckets before stale entries pile up.
+            for bucket_key in [bucket_key for bucket_key, times in self._buckets.items() if not times]:
+                self._remove_bucket(bucket_key)
+            self._expiries = [
+                (times[-1] + self._bucket_windows.get(bucket_key, 86_400), bucket_key) for bucket_key, times in self._buckets.items()
+            ]
+            heapq.heapify(self._expiries)
+
+    def _expire(self, now: float) -> float:
+        """Remove every expired bucket and return the exact earliest remaining expiry (``inf`` if none)."""
+        heap = self._expiries
+        while heap:
+            expiry, key = heap[0]
+            if key in self._buckets and not self._buckets[key]:
+                # Trimmed empty without a new request: it holds no quota, so free its capacity.
+                heapq.heappop(heap)
+                self._remove_bucket(key)
+                continue
+            if self._bucket_expiry(key) != expiry:
+                heapq.heappop(heap)
+                continue
+            if expiry > now:
+                return expiry
+            heapq.heappop(heap)
+            self._remove_bucket(key)
+        return math.inf
+
+    def _remove_bucket(self, key: tuple[str, str]) -> None:
+        self._buckets.pop(key, None)
+        self._bucket_windows.pop(key, None)
+
+    @staticmethod
+    def _capacity_decision(rule: RateLimitRule, *, next_expiry: float, now: float) -> RateLimitDecision:
+        retry_after = _seconds_until(next_expiry, now=now) if math.isfinite(next_expiry) else 1
         return RateLimitDecision(
             allowed=False,
             limit=rule.requests,

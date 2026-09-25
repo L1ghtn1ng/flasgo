@@ -317,8 +317,9 @@ def _path_parameters(path: str, bindings: Sequence[ParameterBinding], *, registr
         elif converter == "float":
             schema = {"type": "number"}
         elif converter is None and name in annotations:
-            # Untyped segments are coerced to the handler's annotation, so document that type.
-            schema = registry.schema_for(annotations[name])
+            # Untyped segments are coerced to the handler's annotation, so document that type. Without an
+            # annotation (or with Any) the value stays a string.
+            schema = registry.schema_for(annotations[name]) or {"type": "string"}
         else:
             schema = {"type": "string"}
         parameters.append({"name": name, "in": "path", "required": True, "schema": schema})

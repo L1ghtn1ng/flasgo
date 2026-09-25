@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,21 @@ def test_async_templates_render_from_async_handlers(tmp_path: Path) -> None:
 
     client = app.test_client()
     assert client.get("/async").text == "Hello &lt;b&gt;"
-    with pytest.raises(RuntimeError, match="enable_async=True"):
-        app.render_template("greet.html", {"name": "x"})
+    # Inside the server's event loop the synchronous helper cannot drive an async template.
     assert client.get("/sync").status_code == 500
+
+    async def render_inside_loop() -> None:
+        with pytest.raises(RuntimeError, match="enable_async=True"):
+            app.render_template("greet.html", {"name": "x"})
+
+    asyncio.run(render_inside_loop())
+
+
+def test_sync_render_of_async_templates_works_outside_an_event_loop(tmp_path: Path) -> None:
+    """Scripts and the module-level render_template(enable_async=True) helper have no running loop."""
+    (tmp_path / "greet.html").write_text("Hello {{ name }}", encoding="utf-8")
+    app = Flasgo()
+    app.configure_templates(tmp_path, enable_async=True)
+
+    assert app.render_template("greet.html", {"name": "<b>"}) == "Hello &lt;b&gt;"
+    assert render_template("greet.html", template_dirs=tmp_path, context={"name": "x"}, enable_async=True) == "Hello x"

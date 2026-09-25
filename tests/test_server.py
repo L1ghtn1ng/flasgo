@@ -1,8 +1,10 @@
 import asyncio
 import os
+import subprocess
+import sys
 import threading
 import types
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -47,28 +49,69 @@ def test_run_with_reload_spawns_current_command(monkeypatch: pytest.MonkeyPatch,
     assert calls["ignore_permission_denied"] is True
 
 
-def test_dev_server_reload_runs_watchfiles_on_the_event_loop_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """watchfiles installs a SIGTERM handler, which fails outside the main thread, so it must not run via to_thread."""
-    calls: dict[str, object] = {}
+def test_dev_server_reload_watches_on_the_loop_and_restarts_the_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The reloader runs on the event loop thread and restarts (then finally stops) the server child."""
+    events: list[tuple[str, object]] = []
 
-    async def fake_arun_process(*paths: str, target: str, **kwargs: object) -> int:
-        calls["thread"] = threading.current_thread()
-        calls["paths"] = paths
-        calls["target"] = target
-        calls["env"] = os.environ.get(server_module._RELOAD_ENV)
-        return 0
+    async def fake_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        events.append(("watch", (paths, threading.current_thread() is threading.main_thread(), ignore_permission_denied)))
+        yield {(1, str(tmp_path / "app.py"))}
 
-    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(arun_process=fake_arun_process))
+    def fake_start(command: str) -> str:
+        events.append(("start", (command, os.environ.get(server_module._RELOAD_ENV))))
+        return f"child-{sum(kind == 'start' for kind, _ in events)}"
+
+    def fake_stop(process: object, **_: object) -> None:
+        events.append(("stop", process))
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=fake_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", fake_start)
+    monkeypatch.setattr(server_module, "_stop_reload_child", fake_stop)
     monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
     monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
 
     asyncio.run(server_module.run_dev_server(Flasgo(), "127.0.0.1", 0, reload=True, reload_dirs=[tmp_path]))
 
-    assert calls["thread"] is threading.main_thread()
-    assert calls["paths"] == (str(tmp_path.resolve()),)
-    assert calls["target"] == "/usr/bin/python3 app.py"
-    assert calls["env"] == "true"
+    assert events == [
+        ("start", ("/usr/bin/python3 app.py", "true")),
+        ("watch", ((str(tmp_path.resolve()),), True, True)),
+        ("stop", "child-1"),
+        ("start", ("/usr/bin/python3 app.py", "true")),
+        ("stop", "child-2"),
+    ]
     assert server_module._RELOAD_ENV not in os.environ
+
+
+def test_cancelling_the_reloader_stops_the_server_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """watchfiles.arun_process skipped child cleanup on cancellation, leaving a server holding its port."""
+    started: list[subprocess.Popen[bytes]] = []
+    child_running = threading.Event()
+    real_start = server_module._start_reload_child
+
+    def start(command: str) -> subprocess.Popen[bytes]:
+        process = real_start(command)
+        started.append(process)
+        child_running.set()
+        return process
+
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", start)
+    monkeypatch.setattr(server_module.sys, "orig_argv", [sys.executable, "-c", "import time; time.sleep(60)"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        assert await asyncio.to_thread(child_running.wait, 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert started[0].poll() is not None
 
 
 def test_app_run_uses_debug_reload_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

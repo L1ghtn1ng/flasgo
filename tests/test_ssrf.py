@@ -263,3 +263,11 @@ def test_ipv6_site_local_addresses_are_private() -> None:
 
     assert _ip_is_disallowed(ipaddress.ip_address("fec0::1"), allow_private_networks=False)
     assert not _ip_is_disallowed(ipaddress.ip_address("fec0::1"), allow_private_networks=True)
+
+
+@pytest.mark.parametrize("entry", ["bücher.example", ".bücher.example", "xn--bcher-kva.example"])
+def test_unicode_allowlist_entries_match_their_ascii_request_hosts(monkeypatch: pytest.MonkeyPatch, entry: str) -> None:
+    """Request hosts are IDNA-normalized, so Unicode allowlist entries must be normalized the same way."""
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo(expected_host="xn--bcher-kva.example"))
+    guard = SSRFGuard(SSRFConfig(allowed_hosts={entry}))
+    assert guard.resolve_url("https://bücher.example/path").hostname == "xn--bcher-kva.example"

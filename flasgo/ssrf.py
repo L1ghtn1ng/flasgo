@@ -200,13 +200,23 @@ def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:
         if pattern == "*":
             return True
         if pattern.startswith("."):
-            suffix = pattern[1:]
-            if host == suffix or host.endswith(pattern):
+            suffix = _ascii_pattern(pattern[1:])
+            if suffix is not None and (host == suffix or host.endswith(f".{suffix}")):
                 return True
             continue
-        if host == pattern:
+        if host == _ascii_pattern(pattern):
             return True
     return False
+
+
+def _ascii_pattern(pattern: str) -> str | None:
+    """IDNA-encode an allowlist entry so it compares equal to the ASCII form request hosts are normalized to."""
+    if pattern.isascii():
+        return pattern
+    try:
+        return pattern.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None  # an entry that is not a valid hostname can never match
 
 
 def _parse_ip_literal(host: str) -> IPAddress | None:

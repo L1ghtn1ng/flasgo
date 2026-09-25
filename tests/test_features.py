@@ -488,3 +488,30 @@ def test_safe_relative_path(value: str, allow_dotfiles: bool, expected: str | No
 
     result = safe_relative_path(value, allow_dotfiles=allow_dotfiles)
     assert (None if result is None else str(result)) == expected
+
+
+@pytest.mark.parametrize("location", ["http://localhost:80/next", "http://localhost/next", "/next"])
+def test_test_client_follows_same_origin_redirects_with_default_ports(location: str) -> None:
+    app = Flasgo()
+
+    @app.get("/start")
+    def start() -> Response:
+        return redirect(location)
+
+    @app.get("/next")
+    def next_page() -> str:
+        return "arrived"
+
+    response = app.test_client().get("/start", follow_redirects=True)
+    assert response.text == "arrived"
+    assert [item.status_code for item in response.history] == [302]
+
+
+def test_test_client_does_not_follow_redirects_to_another_port() -> None:
+    app = Flasgo()
+
+    @app.get("/start")
+    def start() -> Response:
+        return redirect("http://localhost:8080/next")
+
+    assert app.test_client().get("/start", follow_redirects=True).status_code == 302

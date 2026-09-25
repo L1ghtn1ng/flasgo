@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from http.cookies import Morsel, SimpleCookie
 from typing import Any, Self, cast
-from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import SplitResult, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 from .testing_stream import AsyncTestStream
@@ -52,6 +52,22 @@ def _target_scope(target: str) -> dict[str, Any]:
         "raw_path": raw_path.encode("ascii"),
         "query_string": quote(parsed.query, safe=_QUERY_SAFE).encode("ascii"),
     }
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def _same_authority(target: SplitResult, host: str) -> bool:
+    """Compare a redirect target with the Host the client sent, treating default ports as implicit.
+
+    ``http://localhost:80/next`` and ``https://localhost/next`` both stay on host ``localhost``.
+    """
+    default_port = _DEFAULT_PORTS.get(target.scheme)
+    try:
+        requested = urlsplit(f"//{host}")
+        return target.hostname == requested.hostname and (target.port or default_port) == (requested.port or default_port)
+    except ValueError:
+        return False
 
 
 def _header_value(headers: RequestHeaders | None, name: str) -> str | None:
@@ -550,7 +566,7 @@ class TestClient:
                 return current_response
             current_url = urljoin(current_url, location)
             target = urlsplit(current_url)
-            if target.netloc.lower() != host:
+            if not _same_authority(target, host):
                 # A redirect to another origin leaves the application under test; do not replay it locally.
                 current_response.history = history
                 return current_response

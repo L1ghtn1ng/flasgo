@@ -1177,3 +1177,38 @@ def test_csrf_protects_every_unsafe_method_decorator(method: str) -> None:
     assert send("/item", headers={"origin": "http://localhost"}).status_code == 403
     allowed = send("/item", headers={"cookie": f"flasgo-csrf={token}", "x-csrf-token": token, "origin": "http://localhost"})
     assert allowed.status_code == 200
+
+
+def test_ratelimit_capacity_retry_after_tracks_extended_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry-After at capacity must follow the true earliest expiry even after an active bucket is extended."""
+    limiter = RateLimiter(max_keys=2)
+    now = 0.0
+    rule = RateLimitRule(5, window_seconds=10, key_func=lambda req: req.headers.get("x-key"))
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    def request(key: str) -> Request:
+        return Request({"headers": [(b"x-key", key.encode("ascii"))], "client": ("127.0.0.1", 5000)}, receive)
+
+    async def run_checks() -> None:
+        nonlocal now
+        assert (await limiter.check(rule, request("alpha"), endpoint_id="endpoint")).allowed
+        now = 1.0
+        assert (await limiter.check(rule, request("beta"), endpoint_id="endpoint")).allowed
+        now = 2.0
+        early = await limiter.check(rule, request("gamma"), endpoint_id="endpoint")
+        assert not early.allowed
+        assert early.retry_after == 8  # alpha expires first, at 10
+        now = 5.0
+        assert (await limiter.check(rule, request("alpha"), endpoint_id="endpoint")).allowed  # alpha now expires at 15
+        now = 9.5
+        denied = await limiter.check(rule, request("gamma"), endpoint_id="endpoint")
+        assert not denied.allowed
+        assert denied.retry_after == 2  # beta, at 11, is now the earliest; a cached 10 would say 1
+        now = 9.5 + denied.retry_after
+        assert (await limiter.check(rule, request("gamma"), endpoint_id="endpoint")).allowed
+        assert set(limiter._buckets) == {("endpoint", "alpha"), ("endpoint", "gamma")}
+
+    asyncio.run(run_checks())

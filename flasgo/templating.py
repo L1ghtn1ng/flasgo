@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, cast, override
@@ -77,6 +78,14 @@ class SecureTemplateLoader(BaseLoader):
         raise TemplateNotFound(template)
 
 
+def _event_loop_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def create_template_environment(
     template_dirs: str | Path | Sequence[str | Path],
     *,
@@ -126,8 +135,9 @@ class JinjaTemplates:
         return self.environment.get_template(template_name)
 
     def render(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
-        if self.environment.is_async:
-            # Jinja would call asyncio.run() here, which fails inside the server's running event loop.
+        if self.environment.is_async and _event_loop_running():
+            # Jinja drives async templates with asyncio.run(), which cannot run inside an already running loop.
+            # Outside a loop (scripts, the module-level render_template helper) that works fine.
             raise RuntimeError("Templates were configured with enable_async=True; use `await render_async(...)` instead.")
         template = self.get_template(template_name)
         return template.render({} if context is None else dict(context))

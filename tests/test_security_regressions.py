@@ -1368,3 +1368,56 @@ def test_suffix_patterns_never_match_ipv6_literals() -> None:
 
     assert not host_is_allowed("[::1]", allowed_hosts={".example.com"})
     assert host_is_allowed("[::1]", allowed_hosts={"::1"})
+
+
+def test_settings_subclass_with_type_checking_only_annotation_can_be_constructed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One unresolvable field annotation must not stop the strict bool checks (or construction) from working."""
+    import importlib.util
+    import sys
+    import textwrap
+
+    module_path = tmp_path / "forward_settings.py"
+    module_path.write_text(
+        textwrap.dedent(
+            """
+            from dataclasses import dataclass
+            from typing import TYPE_CHECKING
+
+            from flasgo import Settings
+
+            if TYPE_CHECKING:
+                from decimal import Decimal
+
+
+            @dataclass
+            class AppSettings(Settings):
+                PRICE: "Decimal | None" = None
+                FEATURE_ENABLED: bool = False
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("forward_settings", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+
+    settings = module.AppSettings()
+    with pytest.raises(TypeError, match="FEATURE_ENABLED must be a bool"):
+        setattr(settings, "FEATURE_ENABLED", "yes")  # noqa: B010 - bypass static typing on purpose
+
+
+@pytest.mark.parametrize(
+    "entry", ["chrome-extension://abcdef", "https://partner.example/app", "https://partner.example?x=1", "*", "partner example"]
+)
+def test_csrf_trusted_origins_rejects_entries_that_can_never_match(entry: str) -> None:
+    with pytest.raises(ValueError, match="CSRF_TRUSTED_ORIGINS entry"):
+        Flasgo(settings={"CSRF_TRUSTED_ORIGINS": {entry}})
+
+
+@pytest.mark.parametrize(
+    "entry", ["https://partner.example", "https://partner.example/", "https://*.example.com", "partner.example:8443", ".example.com"]
+)
+def test_csrf_trusted_origins_accepts_supported_entries(entry: str) -> None:
+    Flasgo(settings={"CSRF_TRUSTED_ORIGINS": {entry}})

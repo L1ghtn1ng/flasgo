@@ -624,3 +624,14 @@ def test_openapi_documents_runtime_status_media_types_and_operation_ids(tmp_path
     assert app.test_client().get("/raw").headers["content-type"].startswith("text/plain")
     operation_ids = [operation["operationId"] for item in spec["paths"].values() for operation in item.values()]
     assert all(re.fullmatch(r"[A-Za-z0-9_]+", operation_id) for operation_id in operation_ids)
+
+
+def test_unannotated_path_parameters_are_documented_as_strings() -> None:
+    app = Flasgo(settings={"ENABLE_DOCS": True})
+
+    @app.get("/items/<item_id>")
+    def item(item_id):  # deliberately unannotated
+        return str(item_id)
+
+    parameter = app.openapi_spec()["paths"]["/items/{item_id}"]["get"]["parameters"][0]
+    assert parameter["schema"] == {"type": "string"}

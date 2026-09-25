@@ -3,9 +3,9 @@ import importlib
 import json
 import os
 import re
+import secrets
 import stat
 import sys
-import tempfile
 import traceback
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
@@ -267,23 +267,21 @@ def _atomic_write(path: Path, value: str) -> None:
     parent = absolute.parent.resolve()
     parent.mkdir(parents=True, exist_ok=True)
     destination = parent / absolute.name
-    mode = _output_mode(destination)
+    try:
+        existing_mode: int | None = stat.S_IMODE(destination.stat().st_mode)
+    except FileNotFoundError:
+        existing_mode = None
     temporary: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=parent,
-            prefix=f".{destination.name}.",
-            delete=False,
-        ) as handle:
-            # Record the path first so a failed write or fsync still removes the temporary file.
-            temporary = Path(handle.name)
+        # Created with 0o666 so the kernel applies the current umask; reading or changing the process umask
+        # would briefly widen permissions for files other threads create meanwhile.
+        temporary, descriptor = _create_temporary(parent, destination.name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
-        # NamedTemporaryFile creates files as 0600; keep the existing file's mode or apply the usual umask.
-        temporary.chmod(mode)
+        if existing_mode is not None:
+            temporary.chmod(existing_mode)
         temporary.replace(destination)
         temporary = None
     finally:
@@ -291,13 +289,15 @@ def _atomic_write(path: Path, value: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _output_mode(destination: Path) -> int:
-    try:
-        return stat.S_IMODE(destination.stat().st_mode)
-    except FileNotFoundError:
-        umask = os.umask(0)
-        os.umask(umask)
-        return 0o666 & ~umask
+def _create_temporary(parent: Path, name: str) -> tuple[Path, int]:
+    """Exclusively create a hidden sibling file for an atomic replace."""
+    for _attempt in range(100):
+        candidate = parent / f".{name}.{secrets.token_hex(8)}"
+        try:
+            return candidate, os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"Could not create a temporary file next to {parent / name}.")
 
 
 def _db_command(args: argparse.Namespace) -> int:

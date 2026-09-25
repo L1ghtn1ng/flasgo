@@ -158,6 +158,20 @@
   fixed 1 second, avoiding a retry storm against Redis.
 - Receiving from a WebSocket after the client disconnected raises `WebSocketDisconnect` with the client's close code,
   instead of a `RuntimeError` telling the handler to accept the socket first.
+- `CSRF_TRUSTED_ORIGINS` entries are validated at startup. Entries that can never match (non-http(s) schemes such as
+  `chrome-extension://`, or origins with a path or query) now raise a clear `ValueError` instead of silently rejecting
+  every request from that origin.
+- Synchronous rendering of templates configured with `enable_async=True` (including the module-level
+  `render_template(..., enable_async=True)`) works again outside a running event loop; it only raises inside one.
+- The async dev-server reloader always stops the server child process, including on Ctrl+C and SIGTERM, instead of
+  leaving it running and holding its port.
+- The in-memory rate limiter reports an exact `Retry-After` at key capacity, even after the earliest-expiring client
+  made another request.
+- Unicode entries in `SSRF_ALLOWED_HOSTS` match requests to the same internationalized host.
+- The test client follows same-origin redirects whose `Location` spells out the default port (for example
+  `http://localhost:80/`).
+- Unannotated path parameters are documented as strings in OpenAPI again.
+- CLI file output no longer temporarily changes the process umask to decide the new file's permissions.
 
 ## [0.9.1] - 2026-09-06
 

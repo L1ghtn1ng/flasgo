@@ -77,9 +77,14 @@ jobs:
         run: uv build
 
       - name: Smoke-test the wheel
+        # Run outside the checkout: Python puts the working directory first on sys.path, so running from the
+        # repository would import flasgo from the source tree instead of the built wheel.
+        working-directory: ${{ runner.temp }}
         run: >
-          uv run --isolated --no-project --with dist/*.whl python -c
-          "import importlib.resources as r, flasgo;
+          uv run --isolated --no-project --with "$GITHUB_WORKSPACE"/dist/*.whl python -c
+          "import importlib.resources as r, os, flasgo;
+          source = os.path.realpath(flasgo.__file__);
+          assert not source.startswith(os.path.realpath(os.environ['GITHUB_WORKSPACE']) + os.sep), source;
           assert (r.files('flasgo') / 'py.typed').is_file();
           assert (r.files('flasgo') / 'debug_templates' / 'debug_error.html').is_file()"
 
