@@ -1091,3 +1091,29 @@ def test_authorize_rejects_empty_backend_name() -> None:
     app = Flasgo()
     with pytest.raises(ValueError):
         app.authorize(IsAuthenticated(), backend="  ")
+
+
+def test_after_request_runs_for_routing_and_auth_denials() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+    seen: list[tuple[str, int]] = []
+
+    @app.after_request
+    def record(req: Request, response: Response) -> Response:
+        seen.append((req.path, response.status_code))
+        response.headers["x-after"] = "1"
+        return response
+
+    @app.get("/open")
+    def open_route() -> str:
+        return "ok"
+
+    @app.get("/private")
+    @app.authorize(IsAuthenticated())
+    def private() -> str:
+        return "secret"
+
+    client = TestClient(app)
+    responses = [client.get("/open"), client.get("/missing"), client.post("/open"), client.get("/private")]
+
+    assert seen == [("/open", 200), ("/missing", 404), ("/open", 405), ("/private", 401)]
+    assert all(response.headers["x-after"] == "1" for response in responses)

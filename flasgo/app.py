@@ -1052,6 +1052,12 @@ class Flasgo(RouteDecorators):
         return fn
 
     def after_request(self, fn: AfterMiddleware) -> AfterMiddleware:
+        """Register a hook that can inspect or replace the response.
+
+        After-request hooks run for every response produced once the before-request hooks have started: handler
+        responses, before-request short-circuits, 404/405 responses, authentication and authorization denials, and
+        rate-limit rejections. Responses from error handlers, CSRF and host rejections do not pass through them.
+        """
         self._after.append(fn)
         return fn
 
@@ -1811,16 +1817,18 @@ class Flasgo(RouteDecorators):
             route_template = self._otel_route_template(req.path)
             if route_template is not None:
                 req.scope["route_template"] = route_template
-            return Response.text(
+            not_allowed = Response.text(
                 f"Method Not Allowed. Use one of: {', '.join(sorted(allowed_methods))}.",
                 status_code=405,
                 headers={"allow": ", ".join(sorted(allowed_methods))},
             )
+            return await self._run_after_middleware(req, not_allowed)
         if match is None:
-            return Response.text(
+            not_found = Response.text(
                 f"No route matches {req.path!r}. Check the URL or register a handler for this path.",
                 status_code=404,
             )
+            return await self._run_after_middleware(req, not_found)
 
         req.scope["route_template"] = match.route_path
         req.scope["flasgo.route_id"] = json.dumps([match.route_path, sorted(match.methods)])
@@ -1836,7 +1844,7 @@ class Flasgo(RouteDecorators):
 
         auth_response = await self._authorize_request(req, match.endpoint)
         if auth_response is not None:
-            return auth_response
+            return await self._run_after_middleware(req, auth_response)
 
         if route_auth is not None:
             authenticated_rate_limit = await self._check_rate_limits(req, match.endpoint, phase="post_auth")

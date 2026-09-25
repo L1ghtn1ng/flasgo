@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `after_request` hooks now also run for 404 and 405 responses and for authentication and authorization denials,
+  matching the existing behaviour for rate-limit rejections and before-request short-circuits. Error-handler responses
+  and CSRF or host rejections still bypass them.
+
 ### Fixed
 
 - `ALLOWED_HOSTS` now accepts only DNS names and IP literals in the Host header, so URL delimiters such as `?`, `#`, or
