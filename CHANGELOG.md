@@ -146,6 +146,8 @@
   raise a clear `ValueError`; previously they raised `re.PatternError` or registered silently as literal paths.
 - `dict[str, T]` validation reports every invalid value instead of stopping at the first, matching list and model
   validation.
+- When the Redis rate limiter is at key capacity, `Retry-After` reflects when the earliest bucket expires instead of a
+  fixed 1 second, avoiding a retry storm against Redis.
 
 ## [0.9.1] - 2026-09-06
 

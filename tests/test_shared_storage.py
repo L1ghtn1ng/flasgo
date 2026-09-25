@@ -256,7 +256,10 @@ def test_redis_capacity_pressure_preserves_active_quotas(redis_url: str) -> None
         rule = RateLimitRule(1, 60)
         try:
             assert (await limiter.check(rule, request_for("one"), endpoint_id="route")).allowed
-            assert not (await limiter.check(rule, request_for("two"), endpoint_id="route")).allowed
+            capacity = await limiter.check(rule, request_for("two"), endpoint_id="route")
+            assert not capacity.allowed
+            # Retry-After tracks the earliest bucket expiry (about the 60 s window), not a fixed 1 second.
+            assert 50 <= capacity.retry_after <= 60
             assert not (await limiter.check(rule, request_for("one"), endpoint_id="route")).allowed
         finally:
             await store.aclose()

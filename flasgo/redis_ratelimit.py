@@ -23,7 +23,11 @@ for i = 1, n do
         if not redis.call('ZSCORE', KEYS[1], key) then missing = missing + 1 end
     end
 end
-if redis.call('ZCARD', KEYS[1]) + missing > max_keys then return {} end
+if redis.call('ZCARD', KEYS[1]) + missing > max_keys then
+    -- Registry scores are bucket expiry times, so the lowest one is when capacity next frees up.
+    local earliest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+    return {{-1, math.max(1, math.ceil(((tonumber(earliest[2]) or (now + 1000)) - now) / 1000))}}
+end
 local results, allowed = {}, true
 for i = 1, n do
     local key = KEYS[2*i]
@@ -123,9 +127,10 @@ class RedisRateLimiter:
             keys.extend((key, key + ":window"))
             args.extend((rule.requests, math.ceil(rule.window_seconds * 1000)))
         rows = await self.store.evaluate(_LIMIT_SCRIPT, keys, args)
-        if rows == []:
+        if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], list) and rows[0][:1] == [-1]:
             req.scope["flasgo.rate_limit_capacity"] = True
-            return [RateLimitDecision(False, rule.requests, 0, 1, 1) for rule, _ in rules]
+            wait = max(1, int(rows[0][1]))
+            return [RateLimitDecision(False, rule.requests, 0, wait, wait) for rule, _ in rules]
         if not isinstance(rows, list) or len(rows) != len(rules):
             raise StoreUnavailable("Shared limiter returned invalid accounting data.")
         try:
