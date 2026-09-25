@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import logging
 import textwrap
 import time
 from collections.abc import AsyncGenerator
@@ -377,13 +378,19 @@ def test_websocket_handler_that_never_accepts_is_not_logged_as_success(caplog: p
     async def noaccept(websocket: WebSocket) -> None:
         return None
 
-    with (
-        caplog.at_level("INFO", logger="flasgo.websocket"),
-        app.test_client() as client,
-        pytest.raises(WebSocketHandshakeError),
-        client.websocket_connect("/noaccept"),
-    ):
-        pass
+    # Lifespan startup disables propagation on the "flasgo" logger, so capture on the logger itself.
+    websocket_logger = logging.getLogger("flasgo.websocket")
+    websocket_logger.addHandler(caplog.handler)
+    try:
+        with (
+            caplog.at_level("INFO", logger="flasgo.websocket"),
+            app.test_client() as client,
+            pytest.raises(WebSocketHandshakeError),
+            client.websocket_connect("/noaccept"),
+        ):
+            pass
+    finally:
+        websocket_logger.removeHandler(caplog.handler)
 
     outcomes = [getattr(record, "outcome", None) for record in caplog.records if getattr(record, "event", None) == "websocket-complete"]
     assert outcomes == ["not_accepted"]

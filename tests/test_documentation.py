@@ -5,9 +5,12 @@ from pathlib import Path
 import flasgo
 from flasgo.settings import Settings
 
+# Resolve documents from the repository root so the tests pass from any working directory.
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_readme_mentions_new_runtime_features() -> None:
-    readme = Path("README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "await request.form()" in readme
     assert "static_folder=" in readme
@@ -41,14 +44,14 @@ def test_readme_mentions_new_runtime_features() -> None:
 
 
 def test_readme_lists_every_public_export() -> None:
-    readme = Path("README.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     missing = [name for name in flasgo.__all__ if f"`{name}`" not in readme]
     assert missing == []
 
 
 def test_migration_guide_covers_canonical_flask_examples() -> None:
-    guide = Path("MIGRATING_FROM_FLASK.md").read_text(encoding="utf-8")
+    guide = (ROOT / "MIGRATING_FROM_FLASK.md").read_text(encoding="utf-8")
 
     assert "# Flask to Flasgo migration guide" in guide
     assert "## HTML template route" in guide
@@ -68,8 +71,8 @@ def test_migration_guide_covers_canonical_flask_examples() -> None:
 
 
 def test_security_and_release_guides_cover_current_hardening() -> None:
-    security = Path("SECURITY.md").read_text(encoding="utf-8")
-    release = Path("release.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    release = (ROOT / "release.md").read_text(encoding="utf-8")
     normalized_security = " ".join(security.split())
 
     assert "DOCS_AUTH_BACKEND" in security
@@ -84,7 +87,7 @@ def test_security_and_release_guides_cover_current_hardening() -> None:
 
 
 def test_changelog_tracks_unreleased_and_tagged_releases() -> None:
-    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     normalized_changelog = " ".join(changelog.split())
 
     assert "## [0.3.0] - 2026-02-28" in changelog
@@ -98,7 +101,7 @@ def test_changelog_tracks_unreleased_and_tagged_releases() -> None:
 
 
 def test_local_documentation_links_exist() -> None:
-    for path in map(Path, ("README.md", "SECURITY.md", "MIGRATING_FROM_FLASK.md", "CHANGELOG.md", "release.md")):
+    for path in (ROOT / name for name in ("README.md", "SECURITY.md", "MIGRATING_FROM_FLASK.md", "CHANGELOG.md", "release.md")):
         text = path.read_text(encoding="utf-8")
         for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", text):
             if "://" in target or target.startswith("#"):
@@ -109,11 +112,11 @@ def test_local_documentation_links_exist() -> None:
 
 def test_release_version_is_consistent_across_framework_and_docs() -> None:
     """Keep source metadata, runtime defaults, and release documentation on the same version."""
-    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     version = project["project"]["version"]
 
     assert version == "0.9.1"
     assert version == Settings.API_VERSION
-    assert f"current framework release is `{version}`" in Path("README.md").read_text(encoding="utf-8")
-    assert f"## [{version}] - 2026-09-06" in Path("CHANGELOG.md").read_text(encoding="utf-8")
-    assert "Latest `0.9.x` release" in Path("SECURITY.md").read_text(encoding="utf-8")
+    assert f"current framework release is `{version}`" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert f"## [{version}] - 2026-09-06" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Latest `0.9.x` release" in (ROOT / "SECURITY.md").read_text(encoding="utf-8")

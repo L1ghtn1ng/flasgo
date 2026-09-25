@@ -22,13 +22,7 @@ from flasgo.ratelimit import RateLimiter, RateLimitRule
 from flasgo.security import SecurityConfig
 from flasgo.testing import TestClient
 
-
-def _extract_cookie(set_cookie_header: str, name: str) -> str | None:
-    for line in set_cookie_header.split("\n"):
-        raw = line.strip()
-        if raw.startswith(f"{name}="):
-            return raw.split(";", 1)[0].split("=", 1)[1]
-    return None
+from _helpers import extract_cookie
 
 
 def test_async_route_and_json_response() -> None:
@@ -437,7 +431,7 @@ def test_csrf_accepts_double_submit_token() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     response = client.post(
@@ -466,7 +460,7 @@ def test_csrf_rejects_unsigned_fixed_token_when_origin_checks_are_disabled() -> 
         },
     )
 
-    replacement = _extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf")
+    replacement = extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert response.status_code == 403
     assert replacement is not None
     assert replacement.startswith("v1.")
@@ -487,7 +481,7 @@ def test_csrf_rejects_non_ascii_tokens_without_raising() -> None:
         },
     )
     assert response.status_code == 403
-    assert _extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf") is not None
+    assert extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf") is not None
 
 
 @pytest.mark.parametrize("part", ["nonce", "signature"])
@@ -502,7 +496,7 @@ def test_csrf_rejects_tampered_signed_tokens(part: str) -> None:
     def submit() -> str:
         return "ok"
 
-    token = _extract_cookie(app.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    token = extract_cookie(app.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
     assert token is not None
     version, nonce, signature = token.split(".")
     if part == "nonce":
@@ -529,7 +523,7 @@ def test_csrf_token_is_invalid_under_a_different_secret() -> None:
     def seed() -> str:
         return "seed"
 
-    token = _extract_cookie(source.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    token = extract_cookie(source.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
     assert token is not None
 
     target = Flasgo(settings={"SECRET_KEY": "b" * 32})
@@ -571,7 +565,7 @@ def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> Non
         return "logged out"
 
     seed_response = app.test_client().get("/seed")
-    old_csrf = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    old_csrf = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert old_csrf is not None
 
     login_response = app.test_client().post(
@@ -582,8 +576,8 @@ def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> Non
             "origin": "http://localhost",
         },
     )
-    session_cookie = _extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-session")
-    new_csrf = _extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    session_cookie = extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-session")
+    new_csrf = extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert login_response.status_code == 200
     assert session_cookie is not None
     assert new_csrf is not None
@@ -616,7 +610,7 @@ def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> Non
             "origin": "http://localhost",
         },
     )
-    logged_out_csrf = _extract_cookie(logout_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    logged_out_csrf = extract_cookie(logout_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert logout_response.status_code == 200
     assert logged_out_csrf is not None
     assert logged_out_csrf != new_csrf
@@ -655,7 +649,7 @@ def test_signed_session_cookie_round_trip() -> None:
 
     first = client.get("/counter")
     assert first.json() == {"count": 1}
-    session_cookie = _extract_cookie(first.headers.get("set-cookie", ""), "flasgo-session")
+    session_cookie = extract_cookie(first.headers.get("set-cookie", ""), "flasgo-session")
     assert session_cookie is not None
 
     second = client.get("/counter", headers={"cookie": f"flasgo-session={session_cookie}"})
@@ -757,7 +751,7 @@ def test_csrf_rejects_mismatched_origin() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     response = client.post(
@@ -784,7 +778,7 @@ def test_csrf_trusted_origin_scheme_is_case_insensitive() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     trusted = client.post(

@@ -114,4 +114,8 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -ra"
+pythonpath = ["."]
+strict = true
+filterwarnings = ["error"]
+faulthandler_timeout = 60

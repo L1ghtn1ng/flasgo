@@ -11,6 +11,11 @@ from flasgo import cli as cli_module
 from openapi_spec_validator import OpenAPIV32SpecValidator, validate
 
 
+@pytest.fixture(autouse=True)
+def _isolate_imports(restore_import_state: None) -> None:
+    """Every CLI test imports throwaway modules such as ``app`` that must not leak into later tests."""
+
+
 def test_load_app_from_python_file(tmp_path: Path) -> None:
     (tmp_path / "helpers.py").write_text("TITLE = 'sibling import'\n", encoding="utf-8")
     app_file = tmp_path / "app.py"

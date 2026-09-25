@@ -698,6 +698,7 @@ def test_validation_issue_responses_are_capped() -> None:
         list[Annotated[str, Query()]],
         Annotated[int, Cookie()] | Annotated[str, Cookie()],
     ],
+    ids=["optional-header", "list-of-query", "union-of-cookies"],
 )
 def test_nested_markers_are_rejected_instead_of_silently_becoming_query(annotation: Any) -> None:
     """A marker hidden inside a union or generic would otherwise be dropped and the value read from the query string."""

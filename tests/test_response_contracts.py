@@ -89,6 +89,7 @@ def test_response_contract_rejects_unsupported_nested_types_at_registration() ->
         list[dict[int, str]],
         dict[str, dict[int, str]],
     ],
+    ids=str,
 )
 def test_mapping_key_models_fail_before_route_registration(model: object) -> None:
     app = Flasgo()
@@ -106,7 +107,7 @@ def test_dataclass_mapping_key_models_fail_at_registration() -> None:
         Flasgo().get("/", response_model=Model)(dict)
 
 
-@pytest.mark.parametrize("model", [dict[str, PublicUser], Mapping[str, PublicUser], dict[Any, PublicUser]])
+@pytest.mark.parametrize("model", [dict[str, PublicUser], Mapping[str, PublicUser], dict[Any, PublicUser]], ids=str)
 def test_supported_mapping_models_project_values_and_reject_non_string_output_keys(model: object) -> None:
     app = Flasgo()
     value = {"id": 1, "display_name": "A", "password_hash": "secret"}
@@ -127,7 +128,7 @@ def test_stream_mapping_model_is_rejected_before_source_consumption(response_typ
         response_type(source(), item_model=dict[int, str])
 
 
-@pytest.mark.parametrize("model", [tuple[int, int], tuple, tuple[int, ...]])
+@pytest.mark.parametrize("model", [tuple[int, int], tuple, tuple[int, ...]], ids=str)
 def test_tuple_route_response_models_are_rejected(model: object) -> None:
     """A tuple body would be read as (body, status), so such a route could only ever return 500."""
     app = Flasgo()

@@ -21,12 +21,8 @@ from prometheus_client import Counter, Gauge, Histogram
 from prometheus_client.openmetrics.parser import text_string_to_metric_families as parse_openmetrics
 from prometheus_client.parser import text_string_to_metric_families as parse_prometheus
 
-_TOKEN = "observability-test-" + "m" * 32
-
-
-def _app(**settings: Any) -> Flasgo:
-    """Build a metrics-enabled app with overridable security and sampler settings."""
-    return Flasgo(settings={"METRICS_ENABLED": True, "METRICS_BEARER_TOKEN": _TOKEN, "CSRF_ENABLED": False, **settings})
+from _helpers import METRICS_TOKEN as _TOKEN
+from _helpers import metrics_app as _app
 
 
 def _sample(app: Flasgo, name: str, **labels: str) -> float | None:
