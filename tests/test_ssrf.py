@@ -239,3 +239,28 @@ def test_ssrf_can_allow_unresolvable_hosts(monkeypatch: pytest.MonkeyPatch) -> N
     resolved = app.resolve_outbound_url("https://unresolvable.invalid")
     assert resolved.url == "https://unresolvable.invalid"
     assert resolved.address is None
+
+
+@pytest.mark.parametrize("url", ["http://" + "a" * 64 + ".com/", "http://a..b/", "http://[::1", "http://exa mple.com/"])
+def test_malformed_urls_raise_ssrf_violation_not_other_errors(url: str) -> None:
+    """Callers that only catch SSRFViolation must not see ValueError or UnicodeError leak out as a 500."""
+    guard = SSRFGuard(SSRFConfig(allow_unresolvable_hosts=True))
+    with pytest.raises(SSRFViolation):
+        guard.resolve_url(url)
+
+
+def test_internationalized_hosts_use_their_ascii_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _public_getaddrinfo(expected_host="xn--bcher-kva.example"))
+    guard = SSRFGuard(SSRFConfig(allowed_hosts={"xn--bcher-kva.example"}))
+    resolved = guard.resolve_url("https://bücher.example/path")
+    assert resolved.hostname == "xn--bcher-kva.example"
+    assert resolved.host_header == "xn--bcher-kva.example"
+
+
+def test_ipv6_site_local_addresses_are_private() -> None:
+    import ipaddress
+
+    from flasgo.ssrf import _ip_is_disallowed
+
+    assert _ip_is_disallowed(ipaddress.ip_address("fec0::1"), allow_private_networks=False)
+    assert not _ip_is_disallowed(ipaddress.ip_address("fec0::1"), allow_private_networks=True)

@@ -102,6 +102,10 @@
 - `flasgo openapi -o` and other CLI file outputs keep an existing file's permissions (or use the umask for new files)
   instead of always writing `0600`, and a failed write no longer leaves a hidden temporary file behind. The `openapi`
   command also rejects NaN/Infinity like the other JSON commands.
+- SSRF guard: malformed URLs and invalid hostnames (unterminated IPv6 literals, empty or over-long labels, spaces)
+  raise `SSRFViolation` instead of leaking `ValueError`/`UnicodeError`; internationalized hosts are converted to their
+  IDNA ASCII form for allowlist matching, resolution and `host_header`; and IPv6 site-local addresses (`fec0::/10`)
+  are treated as private.
 
 ## [0.9.1] - 2026-09-06
 
