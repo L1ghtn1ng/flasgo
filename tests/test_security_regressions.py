@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
-from typing import Any, get_type_hints
+from typing import Any, cast, get_type_hints
 
 import flasgo.app as app_module
 import flasgo.streaming as streaming_module
@@ -1245,3 +1245,50 @@ def test_disabling_no_store_cache_is_honoured_by_every_config_path(app_factory: 
     assert "pragma" not in response.headers
     assert response.headers["x-frame-options"] == "DENY"
     assert SecurityConfig().security_headers == Settings().SECURITY_HEADERS
+
+
+@pytest.mark.parametrize(
+    ("trusted", "origin", "expected"),
+    [
+        ("https://partner.example.com", "https://partner.example.com", True),
+        ("https://partner.example.com/", "https://partner.example.com", True),
+        ("https://partner.example.com:443", "https://partner.example.com", True),
+        ("https://partner.example.com", "http://partner.example.com", False),
+        ("https://*.example.com", "https://api.example.com", True),
+        ("https://*.example.com", "http://api.example.com", False),
+        ("https://*.example.com", "https://example.com", False),
+        (".example.com", "https://api.example.com", True),
+        (".example.com", "http://evil.example.com", False),
+        ("partner.example.com", "https://partner.example.com", True),
+        ("partner.example.com", "http://partner.example.com", False),
+    ],
+)
+def test_csrf_trusted_origins_respect_scheme_and_canonical_form(trusted: str, origin: str, expected: bool) -> None:
+    """Bare entries must not trust plain-HTTP origins on an HTTPS app, and exact entries tolerate a trailing slash."""
+    from types import SimpleNamespace
+
+    from flasgo.security import _origin_matches_request
+
+    request = SimpleNamespace(scheme="https", headers={"host": "app.example.org"})
+    config = SecurityConfig(csrf_trusted_origins={trusted})
+    assert _origin_matches_request(origin, cast(Any, request), config) is expected
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ("https://app.example.org", True),
+        ("https://app.example.org:443", True),
+        ("https://app.example.org/some/referer?path", True),
+        ("http://app.example.org", False),
+        ("null", False),
+        ("https://[::1", False),
+    ],
+)
+def test_csrf_same_origin_comparison_is_canonical(origin: str, expected: bool) -> None:
+    from types import SimpleNamespace
+
+    from flasgo.security import _origin_matches_request
+
+    request = SimpleNamespace(scheme="https", headers={"host": "APP.example.org"})
+    assert _origin_matches_request(origin, cast(Any, request), SecurityConfig()) is expected

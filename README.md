@@ -260,6 +260,9 @@ unsupported; enforce public-to-private network boundaries at a trusted proxy or 
 
 - Host header allowlist (`localhost`, `127.0.0.1` by default).
 - HMAC-signed, session-bound CSRF double-submit cookie defense for unsafe methods.
+- CSRF Origin/Referer checks. `CSRF_TRUSTED_ORIGINS` accepts exact origins (`https://partner.example`),
+  scheme-qualified wildcards (`https://*.example.com`), bare hosts (`partner.example`), and bare suffixes
+  (`.example.com`). Bare entries only trust the request's own scheme, so an HTTPS app never trusts a plain-HTTP origin.
 - Signed session cookies (HMAC-SHA256).
 - No-store cache headers by default to reduce sensitive data caching (CWE-524 mitigation).
 - Static file path traversal and symlink escape protections.

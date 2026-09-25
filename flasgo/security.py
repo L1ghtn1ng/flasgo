@@ -330,26 +330,42 @@ def _csrf_origin_is_valid(request: Request, config: SecurityConfig) -> bool:
 
 
 def _origin_matches_request(origin_value: str, request: Request, config: SecurityConfig) -> bool:
-    parsed = urlsplit(origin_value)
+    try:
+        parsed = urlsplit(origin_value)
+    except ValueError:
+        return False
     if not parsed.scheme or not parsed.netloc:
         return False
-    origin_scheme = parsed.scheme.lower()
-    origin_host = parsed.netloc.lower()
-    request_scheme = request.scheme
-    request_host = (request.headers.get("host") or "").strip().lower()
-    if request_host and origin_host == request_host and origin_scheme == request_scheme:
+    # Referer carries a path, so compare only its scheme and authority.
+    origin = _canonical_origin(f"{parsed.scheme}://{parsed.netloc}")
+    if origin is None:
+        return False
+    request_host = (request.headers.get("host") or "").strip()
+    if request_host and origin == _canonical_origin(f"{request.scheme}://{request_host}"):
         return True
-    for trusted in config.csrf_trusted_origins:
-        normalized = trusted.strip().lower()
-        if "://" in normalized:
-            if f"{origin_scheme}://{origin_host}" == normalized:
-                return True
-            continue
-        if origin_host == normalized:
-            return True
-        if normalized.startswith(".") and origin_host.split(":", 1)[0].endswith(normalized):
-            return True
-    return False
+    return any(_trusted_origin_matches(trusted, origin, request_scheme=request.scheme) for trusted in config.csrf_trusted_origins)
+
+
+def _trusted_origin_matches(trusted: str, origin: tuple[str, str, int], *, request_scheme: str) -> bool:
+    """Match one ``CSRF_TRUSTED_ORIGINS`` entry against a canonical request origin.
+
+    Entries may be exact origins (``https://partner.example``), scheme-qualified wildcards
+    (``https://*.example.com``), bare hosts (``partner.example``), or bare suffixes (``.example.com``).
+    Bare entries only trust the request's own scheme, so an HTTPS app never trusts a plain-HTTP origin.
+    """
+    scheme, host, port = origin
+    normalized = trusted.strip().lower()
+    if "://" in normalized:
+        trusted_scheme, _, authority = normalized.partition("://")
+        if authority.startswith("*."):
+            wildcard = _canonical_origin(f"{trusted_scheme}://{authority[2:]}")
+            return wildcard is not None and (scheme, port) == (wildcard[0], wildcard[2]) and host.endswith(f".{wildcard[1]}")
+        return origin == _canonical_origin(normalized)
+    if scheme != request_scheme:
+        return False
+    if normalized.startswith("."):
+        return host.endswith(normalized)
+    return origin == _canonical_origin(f"{scheme}://{normalized}")
 
 
 def websocket_origin_is_allowed(

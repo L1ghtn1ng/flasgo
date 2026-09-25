@@ -27,6 +27,9 @@
 - A JSON integer too large for a `float` field now returns a 422 validation error instead of an unhandled
   `OverflowError` (500).
 - `methods="POST"` now raises `TypeError` instead of registering the single-character methods `P`, `O`, `S` and `T`.
+- CSRF trusted origins are compared in canonical form, so `https://partner.example/` and `https://partner.example:443`
+  match. Bare host and `.example.com` suffix entries now only trust the request's own scheme, so an HTTPS app no
+  longer trusts `http://evil.example.com`. Use `https://*.example.com` to trust subdomains explicitly.
 
 ## [0.9.1] - 2026-09-06
 
