@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `ALLOWED_HOSTS` now accepts only DNS names and IP literals in the Host header, so URL delimiters such as `?`, `#`, or
+  spaces can no longer smuggle an attacker host past a suffix pattern like `.example.com`.
+
 ## [0.9.1] - 2026-09-06
 
 ### Added

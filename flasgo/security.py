@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,8 @@ def _format_http_date(value: datetime) -> str:
     return value.strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 
+_HOST_LABEL = r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
+_HOSTNAME_RE = re.compile(rf"(?=.{{1,253}}$){_HOST_LABEL}(?:\.{_HOST_LABEL})*")
 _SAME_SITE_VALUES = {"lax": "Lax", "strict": "Strict", "none": "None"}
 _COOKIE_NAME_PUNCTUATION = frozenset("!#$%&'*+-.^_`|~")
 
@@ -171,7 +174,7 @@ def _host_header_hostname(host: str | None) -> str | None:
     if host is None:
         return None
     raw = host.strip().lower()
-    if not raw or any(char in raw for char in ("\x00", "\r", "\n", "/", "\\", "@")):
+    if not raw:
         return None
     if raw.startswith("["):
         end = raw.find("]")
@@ -181,7 +184,10 @@ def _host_header_hostname(host: str | None) -> str | None:
         remainder = raw[end + 1 :]
         if remainder and (not remainder.startswith(":") or not remainder[1:].isdigit()):
             return None
-        return hostname.rstrip(".") or None
+        try:
+            return str(ipaddress.IPv6Address(hostname))
+        except ValueError:
+            return None
     if raw.count(":") > 1:
         return None
     if ":" in raw:
@@ -190,21 +196,26 @@ def _host_header_hostname(host: str | None) -> str | None:
             return None
     else:
         hostname = raw
-    return hostname.rstrip(".") or None
+    hostname = hostname.removesuffix(".")
+    # Only DNS names and IPv4 literals are valid here; anything else (``?``, ``#``, spaces, userinfo, paths)
+    # could let a suffix pattern such as ``.example.com`` match a host that actually names another server.
+    if _HOSTNAME_RE.fullmatch(hostname) is None:
+        return None
+    return hostname
 
 
 def _allowed_host_pattern(pattern: str) -> str | None:
-    normalized = _host_header_hostname(pattern)
+    raw = pattern.strip().lower()
+    if raw.startswith("."):
+        suffix = raw.removesuffix(".")
+        return suffix if _HOSTNAME_RE.fullmatch(suffix[1:]) is not None else None
+    normalized = _host_header_hostname(raw)
     if normalized is not None:
         return normalized
-    raw = pattern.strip().lower().rstrip(".")
     try:
-        return str(ipaddress.ip_address(raw))
+        return str(ipaddress.IPv6Address(raw))
     except ValueError:
-        pass
-    if raw.startswith(".") and raw.count(":") == 0:
-        return raw
-    return None
+        return None
 
 
 def ensure_csrf_cookie(

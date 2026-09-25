@@ -1067,3 +1067,37 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
         assert all(response._closed for response in responses)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "attacker.com?.example.com",
+        "attacker.com#.example.com",
+        "attacker.com .example.com",
+        "attacker.com%2f.example.com",
+        "[evil].example.com",
+        "example.com",
+    ],
+)
+def test_suffix_host_patterns_reject_url_delimiter_smuggling(host: str) -> None:
+    """Only real DNS names may match a suffix pattern; URL delimiters must not smuggle in another host."""
+    app = Flasgo(settings={"ALLOWED_HOSTS": {".example.com"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    assert app.test_client().get("/", headers={"host": host}).status_code == 400
+
+
+@pytest.mark.parametrize("host", ["api.example.com", "API.Example.com:8443", "a.b.example.com.", "my_service.example.com"])
+def test_suffix_host_patterns_allow_real_subdomains(host: str) -> None:
+    """Keep matching ordinary subdomains, ports, trailing dots, and underscore service names."""
+    app = Flasgo(settings={"ALLOWED_HOSTS": {".example.com"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    assert app.test_client().get("/", headers={"host": host}).status_code == 200
