@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, overload
 from urllib.parse import parse_qs
 
 from .exceptions import HTTPException, _RequestRejection
@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from .auth import User
     from .session import Session
 
-_T = TypeVar("_T")
 
 DEFAULT_MAX_MULTIPART_PARTS = 1_000
 DEFAULT_MAX_FORM_FIELDS = 1_000
@@ -146,7 +145,7 @@ class FormData(Mapping[str, str]):
     def get(self, key: object, /) -> str | None: ...
 
     @overload
-    def get(self, key: object, /, default: _T) -> str | _T: ...
+    def get[T](self, key: object, /, default: T) -> str | T: ...
 
     def get(self, key: object, /, default: object = None) -> str | object:
         values = self._fields.get(key)

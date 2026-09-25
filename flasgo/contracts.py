@@ -1,5 +1,4 @@
 import inspect
-import types
 from collections.abc import Mapping
 from dataclasses import MISSING, fields, is_dataclass
 from datetime import date, datetime
@@ -76,7 +75,7 @@ def validate_response_model(model: object, *, _seen: set[type[Any]] | None = Non
         for value in get_args(model):
             validate_response_model(type(value), _seen=_seen)
         return
-    if origin in {list, tuple, set, frozenset, dict, Mapping, Union, types.UnionType}:
+    if origin in {list, tuple, set, frozenset, dict, Mapping, Union}:
         args = get_args(model)
         if origin in {dict, Mapping} and args and args[0] not in {str, Any}:
             raise TypeError("Response model mappings must use str or Any keys.")
@@ -191,7 +190,7 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
         return result
     origin = get_origin(model)
     args = get_args(model)
-    if origin in {Union, types.UnionType}:
+    if origin is Union:
         for member in args:
             try:
                 return _project(member, value, budget, depth + 1)

@@ -18,6 +18,8 @@
   uvicorn` header.
 - Removed `from __future__ import annotations` throughout the package, tests and benchmarks; Python 3.14 evaluates
   annotations lazily (PEP 649/749).
+- Internal type aliases use `type` statements and generics use PEP 695 syntax; union checks rely on `typing.Union is
+  types.UnionType` (3.14).
 
 ### Fixed
 

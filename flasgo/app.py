@@ -99,10 +99,10 @@ if TYPE_CHECKING:
     from .blueprints import Blueprint
     from .testing import TestClient
 
-BeforeMiddleware = Callable[[Request], ResponseValue | Awaitable[ResponseValue] | None]
-AfterMiddleware = Callable[[Request, Response], ResponseValue | Awaitable[ResponseValue]]
-ErrorHandler = Callable[[Request, Exception], ResponseValue | Awaitable[ResponseValue]]
-LifespanHandler = Callable[["Flasgo"], AsyncGenerator[None]]
+type BeforeMiddleware = Callable[[Request], ResponseValue | Awaitable[ResponseValue] | None]
+type AfterMiddleware = Callable[[Request, Response], ResponseValue | Awaitable[ResponseValue]]
+type ErrorHandler = Callable[[Request, Exception], ResponseValue | Awaitable[ResponseValue]]
+type LifespanHandler = Callable[[Flasgo], AsyncGenerator[None]]
 
 _request_ctx: ContextVar[Request | None] = ContextVar("flasgo_request", default=None)
 _session_ctx: ContextVar[Session | None] = ContextVar("flasgo_session", default=None)

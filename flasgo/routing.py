@@ -9,8 +9,8 @@ if TYPE_CHECKING:
     from .cors import CORSConfig
     from .params import EndpointPlan
 
-Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
-WebSocketEndpoint = Callable[..., Awaitable[None] | None]
+type Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
+type WebSocketEndpoint = Callable[..., Awaitable[None] | None]
 
 _CONVERTERS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "str": (r"[^/]+", str),

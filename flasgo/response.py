@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .background import BackgroundTasks
     from .templating import JinjaTemplates
 
-Headers = Mapping[str, str]
+type Headers = Mapping[str, str]
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 

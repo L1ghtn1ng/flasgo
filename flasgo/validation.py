@@ -314,7 +314,7 @@ class SchemaRegistry:
             values = list(args)
             base = _enum_type_schema(values, registry=self, input_model=input_model)
             return {**base, "enum": values}
-        if origin in {Union, types.UnionType}:
+        if origin is Union:
             return {"anyOf": [self.schema_for(arg, input_model=input_model) for arg in args]}
         return {}
 
@@ -442,7 +442,7 @@ def _validate_value(
 
     origin = get_origin(annotation)
     args = get_args(annotation)
-    if origin in {Union, types.UnionType}:
+    if origin is Union:
         failures: list[_InvalidValue] = []
         for member in args:
             try:
@@ -706,7 +706,7 @@ def _uploaded_file_annotation(annotation: object) -> object | None:
         return annotation
     origin = get_origin(annotation)
     args = get_args(annotation)
-    if origin in {Union, types.UnionType}:
+    if origin is Union:
         non_null = tuple(item for item in args if item not in {None, type(None)})
         if len(non_null) == 1:
             return _uploaded_file_annotation(non_null[0])

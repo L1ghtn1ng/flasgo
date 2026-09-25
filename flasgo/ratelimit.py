@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from .request import Request
 from .response import Response
 
-RateLimitKeyFunc = Callable[[Request], str | None]
+type RateLimitKeyFunc = Callable[[Request], str | None]
 
 
 @dataclass(frozen=True, slots=True)
