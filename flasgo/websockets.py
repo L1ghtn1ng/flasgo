@@ -246,7 +246,7 @@ class WebSocket:
 
     async def _receive_message(self) -> Message:
         if self._application_state is not _ApplicationState.ACCEPTED:
-            raise RuntimeError("Accept the WebSocket before receiving messages.")
+            raise RuntimeError(self._not_open_message("receiving"))
         if self._client_state is _ClientState.DISCONNECTED:
             raise WebSocketDisconnect()
         message = await self._receive()
@@ -278,8 +278,13 @@ class WebSocket:
 
     async def _send_message(self, message: Message) -> None:
         if self._application_state is not _ApplicationState.ACCEPTED:
-            raise RuntimeError("Accept the WebSocket before sending messages.")
+            raise RuntimeError(self._not_open_message("sending"))
         await self._safe_send(message)
+
+    def _not_open_message(self, action: str) -> str:
+        if self._application_state is _ApplicationState.CONNECTING:
+            return f"Accept the WebSocket before {action} messages."
+        return f"The WebSocket is closed; it can no longer be used for {action} messages."
 
     async def _safe_send(self, message: Message) -> None:
         try:

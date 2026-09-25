@@ -218,7 +218,8 @@ class StreamingResponse(Response):
                         break
                     if not isinstance(chunk, bytes | str):
                         raise TypeError("Stream chunks must be bytes or str.")
-                    if len(chunk) > self.max_chunk_bytes:
+                    if isinstance(chunk, str) and len(chunk) > self.max_chunk_bytes:
+                        # Cheap early reject before encoding: UTF-8 is never shorter than the character count.
                         raise ValueError("Stream chunk exceeds max_chunk_bytes.")
                     payload = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
                     if len(payload) > self.max_chunk_bytes:
