@@ -22,6 +22,8 @@
 - The default text log format now includes exception tracebacks and stack info, which were silently dropped.
 - `LOG_LEVEL` is case-insensitive at runtime as well as in validation; `LOG_LEVEL="info"` no longer crashes startup.
 - Calling `configure_logging(stream=...)` again now switches the Flasgo handler to the new stream.
+- Untyped path segments such as `/items/<item_id>` are now coerced from text, so `item_id: int` accepts `/items/5`
+  instead of returning 422.
 
 ## [0.9.1] - 2026-09-06
 

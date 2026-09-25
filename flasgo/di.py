@@ -153,12 +153,13 @@ async def _resolve_plan(
             if binding.source == "request":
                 value = request
             elif binding.source == "path":
-                value = validate_value(
-                    binding.annotation,
-                    path_params[binding.name],
-                    location=("path", binding.name),
-                    budget=budget,
-                )
+                raw = path_params[binding.name]
+                # Untyped ``<name>`` segments arrive as text and need text coercion (``"5"`` -> ``5``), while
+                # converter segments such as ``<int:name>`` are already typed.
+                if isinstance(raw, str):
+                    value = validate_text_values(binding.annotation, [raw], location=("path", binding.name), budget=budget)
+                else:
+                    value = validate_value(binding.annotation, raw, location=("path", binding.name), budget=budget)
             elif binding.source == "query":
                 key = binding_wire_name(binding)
                 values = request.query_params.get(key, [])

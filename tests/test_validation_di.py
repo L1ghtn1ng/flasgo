@@ -715,3 +715,23 @@ def test_outer_marker_with_optional_type_reads_the_header() -> None:
     client = app.test_client()
     assert client.get("/header?x_token=query", headers={"x-token": "header"}).json() == {"value": "header"}
     assert client.get("/header?x_token=query").json() == {"value": None}
+
+
+def test_untyped_path_segments_are_coerced_from_text() -> None:
+    """``/items/<item_id>`` with ``item_id: int`` must accept ``/items/5`` rather than rejecting the string."""
+    app = Flasgo()
+
+    @app.get("/items/<item_id>")
+    async def item(item_id: int) -> dict[str, int]:
+        return {"item_id": item_id}
+
+    @app.get("/flags/<flag>")
+    async def flag(flag: bool) -> dict[str, bool]:
+        return {"flag": flag}
+
+    client = app.test_client()
+    assert client.get("/items/5").json() == {"item_id": 5}
+    assert client.get("/flags/false").json() == {"flag": False}
+    invalid = client.get("/items/five")
+    assert invalid.status_code == 422
+    assert cast(Any, invalid.json())["errors"][0]["location"] == ["path", "item_id"]
