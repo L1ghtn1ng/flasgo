@@ -99,6 +99,9 @@
 - The synchronous test client runs its worker loop with `asyncio.Runner`, so leftover tasks, async generators and the
   default executor are shut down cleanly, and a lifespan that crashes now raises its own error immediately instead of
   a 5-second timeout.
+- `flasgo openapi -o` and other CLI file outputs keep an existing file's permissions (or use the umask for new files)
+  instead of always writing `0600`, and a failed write no longer leaves a hidden temporary file behind. The `openapi`
+  command also rejects NaN/Infinity like the other JSON commands.
 
 ## [0.9.1] - 2026-09-06
 

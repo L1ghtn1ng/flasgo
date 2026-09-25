@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -404,6 +406,32 @@ def test_atomic_write_replaces_symlink_entry_without_following_target(tmp_path: 
     assert target.read_text(encoding="utf-8") == "keep"
     assert not output.is_symlink()
     assert output.read_text(encoding="utf-8") == "generated"
+
+
+def test_atomic_write_uses_umask_for_new_files_and_keeps_existing_modes(tmp_path: Path) -> None:
+    previous = os.umask(0o022)
+    try:
+        created = tmp_path / "new.json"
+        cli_module._atomic_write(created, "{}")
+        assert stat.S_IMODE(created.stat().st_mode) == 0o644
+
+        existing = tmp_path / "existing.json"
+        existing.write_text("old", encoding="utf-8")
+        existing.chmod(0o640)
+        cli_module._atomic_write(existing, "new")
+        assert stat.S_IMODE(existing.stat().st_mode) == 0o640
+    finally:
+        os.umask(previous)
+
+
+def test_atomic_write_removes_the_temporary_file_when_writing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_fsync(_fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_module.os, "fsync", failing_fsync)
+    with pytest.raises(OSError, match="disk full"):
+        cli_module._atomic_write(tmp_path / "out.json", "{}")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_check_fails_when_app_registration_rejects_duplicate_routes(

@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import traceback
@@ -157,7 +158,7 @@ def _routes_command(args: argparse.Namespace) -> int:
 
 def _openapi_command(args: argparse.Namespace) -> int:
     app = load_app(args.target, app_name=args.app)
-    document = json.dumps(app.openapi_spec(), indent=2, sort_keys=True) + "\n"
+    document = json.dumps(app.openapi_spec(), indent=2, sort_keys=True, allow_nan=False) + "\n"
     if args.output is None:
         print(document, end="")
     else:
@@ -268,6 +269,7 @@ def _atomic_write(path: Path, value: str) -> None:
     parent = absolute.parent.resolve()
     parent.mkdir(parents=True, exist_ok=True)
     destination = parent / absolute.name
+    mode = _output_mode(destination)
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -277,14 +279,27 @@ def _atomic_write(path: Path, value: str) -> None:
             prefix=f".{destination.name}.",
             delete=False,
         ) as handle:
+            # Record the path first so a failed write or fsync still removes the temporary file.
+            temporary = Path(handle.name)
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
-            temporary = Path(handle.name)
-        os.replace(temporary, destination)
+        # NamedTemporaryFile creates files as 0600; keep the existing file's mode or apply the usual umask.
+        temporary.chmod(mode)
+        temporary.replace(destination)
+        temporary = None
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _output_mode(destination: Path) -> int:
+    try:
+        return stat.S_IMODE(destination.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
 
 
 def _db_command(args: argparse.Namespace) -> int:
