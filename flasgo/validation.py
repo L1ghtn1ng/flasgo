@@ -561,15 +561,15 @@ def _validate_value(
                 pass
         raise _problem(location, "type_error", "Expected an integer.")
     if annotation is float:
-        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value)):
-            return float(value)
-        if from_text and isinstance(value, str):
-            try:
+        parsed: float | None = None
+        try:
+            # JSON integers are unbounded, so float() can overflow; treat that like any other non-finite number.
+            if (isinstance(value, int | float) and not isinstance(value, bool)) or (from_text and isinstance(value, str)):
                 parsed = float(value)
-                if math.isfinite(parsed):
-                    return parsed
-            except ValueError:
-                pass
+        except OverflowError, ValueError:
+            parsed = None
+        if parsed is not None and math.isfinite(parsed):
+            return parsed
         raise _problem(location, "type_error", "Expected a finite number.")
     if annotation is UUID:
         try:

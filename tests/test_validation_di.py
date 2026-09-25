@@ -735,3 +735,17 @@ def test_untyped_path_segments_are_coerced_from_text() -> None:
     invalid = client.get("/items/five")
     assert invalid.status_code == 422
     assert cast(Any, invalid.json())["errors"][0]["location"] == ["path", "item_id"]
+
+
+@pytest.mark.parametrize("payload", [b'{"value": 1' + b"0" * 400 + b"}", b'{"value": 1e400}'])
+def test_huge_json_numbers_for_float_fields_are_validation_errors(payload: bytes) -> None:
+    """An unbounded JSON integer overflows float(); that must be a 422, not an unhandled 500."""
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/numbers")
+    async def numbers(body: Annotated[dict[str, float], Body()]) -> dict[str, float]:
+        return body
+
+    response = app.test_client().post("/numbers", body=payload, headers={"content-type": "application/json"})
+    assert response.status_code == 422
+    assert cast(Any, response.json())["errors"][0]["message"] == "Expected a finite number."

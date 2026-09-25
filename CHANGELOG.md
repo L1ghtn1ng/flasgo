@@ -24,6 +24,8 @@
 - Calling `configure_logging(stream=...)` again now switches the Flasgo handler to the new stream.
 - Untyped path segments such as `/items/<item_id>` are now coerced from text, so `item_id: int` accepts `/items/5`
   instead of returning 422.
+- A JSON integer too large for a `float` field now returns a 422 validation error instead of an unhandled
+  `OverflowError` (500).
 
 ## [0.9.1] - 2026-09-06
 
