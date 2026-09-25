@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from flasgo import Flasgo
 from flasgo.testing import TestClient
 from jinja2.exceptions import TemplateNotFound, TemplateSyntaxError

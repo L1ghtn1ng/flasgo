@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import inspect
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager

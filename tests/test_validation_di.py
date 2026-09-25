@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import importlib.util
 import sys
 import textwrap
@@ -352,9 +350,11 @@ def test_unresolved_local_return_annotation_does_not_block_route_registration() 
         class LocalPayload:
             pass
 
-        def endpoint(payload: Annotated[LocalPayload, Body()]) -> str:
+        def endpoint(payload: Annotated[LocalPayload, Body()]) -> str:  # noqa: F821 - deleted below on purpose
             return str(payload)
 
+        # Annotations are evaluated lazily (PEP 649), so removing the name makes this one genuinely unresolvable.
+        del LocalPayload
         return endpoint
 
     with pytest.raises(TypeError, match="marked annotation"):
@@ -882,3 +882,21 @@ def test_one_unresolvable_model_annotation_does_not_break_the_other_fields(tmp_p
 
     assert not _issues(module.Inner, {"x": 2})
     assert _issues(module.Inner, {"x": "two"}) == [(("body", "x"), "Expected an integer.")]
+
+
+def test_endpoint_with_unresolvable_return_annotation_still_registers() -> None:
+    """Under PEP 649 an unresolvable annotation used to raise NameError from inspect.signature at registration."""
+    app = Flasgo()
+
+    def build_endpoint():
+        class Hidden(dict[str, int]):
+            pass
+
+        def endpoint(value: Annotated[int, Query()]) -> Hidden:  # noqa: F821 - deleted below on purpose
+            return cast(Any, {"value": value})
+
+        del Hidden
+        return endpoint
+
+    app.add_route("/hidden", build_endpoint())
+    assert app.test_client().get("/hidden?value=3").json() == {"value": 3}

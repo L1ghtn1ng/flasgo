@@ -16,6 +16,8 @@
 - The built-in development server uses uvicorn's `websockets-sansio` WebSocket implementation instead of the
   deprecated legacy `websockets` one (which logged a deprecation warning at startup), and no longer sends a `server:
   uvicorn` header.
+- Removed `from __future__ import annotations` throughout the package, tests and benchmarks; Python 3.14 evaluates
+  annotations lazily (PEP 649/749).
 
 ### Fixed
 
