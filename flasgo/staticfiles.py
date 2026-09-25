@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from stat import S_ISREG
 from typing import BinaryIO, cast, override
 
+from ._paths import require_directory, safe_relative_path
 from .exceptions import HTTPException
 from .request import Request
 from .response import Response
@@ -89,18 +90,8 @@ def _etag(stat: os.stat_result) -> str:
 
 
 def _normalize_static_path(value: str) -> PurePosixPath:
-    if not value or any(char in value for char in ("\x00", "\r", "\n")):
-        raise HTTPException(404, "Not Found")
-
-    normalized = value.replace("\\", "/")
-    candidate = PurePosixPath(normalized)
-    if candidate.is_absolute():
-        raise HTTPException(404, "Not Found")
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        raise HTTPException(404, "Not Found")
-    if any(part.startswith(".") for part in candidate.parts):
-        raise HTTPException(404, "Not Found")
-    if candidate.parts and candidate.parts[0].endswith(":"):
+    candidate = safe_relative_path(value, allow_dotfiles=False)
+    if candidate is None:
         raise HTTPException(404, "Not Found")
     return candidate
 
@@ -113,13 +104,7 @@ class StaticDirectory:
 
 
 def resolve_static_directory(directory: str | Path, *, url_path: str, cache_max_age: int) -> StaticDirectory:
-    root = Path(directory).expanduser().resolve()
-    if not root.exists():
-        msg = f"Static directory does not exist: {root}"
-        raise ValueError(msg)
-    if not root.is_dir():
-        msg = f"Static directory is not a directory: {root}"
-        raise ValueError(msg)
+    root = require_directory(directory, "Static")
     if not url_path.startswith("/"):
         raise ValueError("Static url_path must start with '/'.")
     if url_path.endswith("/") and url_path != "/":

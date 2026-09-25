@@ -5,6 +5,8 @@ from typing import Any, cast, override
 from jinja2 import BaseLoader, StrictUndefined, Template, TemplateNotFound, select_autoescape
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
+from ._paths import require_directory, safe_relative_path
+
 _DEFAULT_MAX_TEMPLATE_BYTES = 262_144
 
 
@@ -14,30 +16,12 @@ def _coerce_search_paths(template_dirs: str | Path | Sequence[str | Path]) -> tu
     if not raw_paths:
         raise ValueError("At least one template directory must be configured.")
 
-    resolved_paths: list[Path] = []
-    for raw_path in raw_paths:
-        resolved = Path(raw_path).expanduser().resolve()
-        if not resolved.exists():
-            msg = f"Template directory does not exist: {resolved}"
-            raise ValueError(msg)
-        if not resolved.is_dir():
-            msg = f"Template directory is not a directory: {resolved}"
-            raise ValueError(msg)
-        resolved_paths.append(resolved)
-    return tuple(resolved_paths)
+    return tuple(require_directory(raw_path, "Template") for raw_path in raw_paths)
 
 
 def _normalize_template_name(template_name: str) -> PurePosixPath:
-    if not template_name or any(char in template_name for char in ("\x00", "\r", "\n")):
-        raise TemplateNotFound(template_name)
-
-    normalized = template_name.replace("\\", "/")
-    candidate = PurePosixPath(normalized)
-    if candidate.is_absolute():
-        raise TemplateNotFound(template_name)
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        raise TemplateNotFound(template_name)
-    if candidate.parts and candidate.parts[0].endswith(":"):
+    candidate = safe_relative_path(template_name, allow_dotfiles=True)
+    if candidate is None:
         raise TemplateNotFound(template_name)
     return candidate
 
@@ -67,7 +51,7 @@ class SecureTemplateLoader(BaseLoader):
             try:
                 resolved = candidate.resolve(strict=True)
                 resolved.relative_to(root)
-            except FileNotFoundError, OSError, ValueError:
+            except OSError, ValueError:
                 continue
             if not resolved.is_file():
                 continue

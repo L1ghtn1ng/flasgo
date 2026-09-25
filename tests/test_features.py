@@ -464,3 +464,26 @@ def test_test_client_cookie_jar_honours_expiry() -> None:
     assert client.cookies["theme"] == "dark"
     client.get("/expire")
     assert "theme" not in client.cookies
+
+
+@pytest.mark.parametrize(
+    ("value", "allow_dotfiles", "expected"),
+    [
+        ("css/site.css", False, "css/site.css"),
+        ("css//./site.css", False, "css/site.css"),
+        ("css\\site.css", False, "css/site.css"),
+        ("../secret", True, None),
+        ("a/../b", True, None),
+        ("/etc/passwd", True, None),
+        ("C:/windows", True, None),
+        (".env", False, None),
+        (".env", True, ".env"),
+        ("a\x00b", True, None),
+        ("", True, None),
+    ],
+)
+def test_safe_relative_path(value: str, allow_dotfiles: bool, expected: str | None) -> None:
+    from flasgo._paths import safe_relative_path
+
+    result = safe_relative_path(value, allow_dotfiles=allow_dotfiles)
+    assert (None if result is None else str(result)) == expected

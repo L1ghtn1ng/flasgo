@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import uvicorn
 
+from ._paths import require_directory
 from .types import ASGIApp
 
 if TYPE_CHECKING:
@@ -120,18 +121,11 @@ def _reload_environment(reload_dirs: Sequence[str | Path] | None) -> Iterator[tu
 
 
 def resolve_reload_dir(path: str | Path) -> Path:
-    resolved = Path(path).expanduser().resolve()
-    if not resolved.exists():
-        msg = f"Reload directory does not exist: {resolved}"
-        raise ValueError(msg)
-    if not resolved.is_dir():
-        msg = f"Reload directory is not a directory: {resolved}"
-        raise ValueError(msg)
-    return resolved
+    return require_directory(path, "Reload")
 
 
 def build_reload_command() -> str:
-    argv = list(getattr(sys, "orig_argv", []))
+    argv = list(sys.orig_argv)
     if not argv:
         argv = [sys.executable, *sys.argv]
     if len(argv) < 2 and not Path(argv[0]).exists():
