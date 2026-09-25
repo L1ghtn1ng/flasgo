@@ -900,3 +900,10 @@ def test_endpoint_with_unresolvable_return_annotation_still_registers() -> None:
 
     app.add_route("/hidden", build_endpoint())
     assert app.test_client().get("/hidden?value=3").json() == {"value": 3}
+
+
+def test_dict_validation_reports_every_invalid_value() -> None:
+    assert _issues(dict[str, int], {"a": "x", "b": 1, "c": "y"}) == [
+        (("body", "a"), "Expected an integer."),
+        (("body", "c"), "Expected an integer."),
+    ]

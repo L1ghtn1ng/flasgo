@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal, Union, cast, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 from uuid import UUID
 
 from .request import FormData, UploadedFile
@@ -219,8 +219,10 @@ def to_jsonable(value: object) -> object:
         }
     if isinstance(value, Enum):
         return to_jsonable(value.value)
-    if isinstance(value, (UUID, date, datetime)):
-        return value.isoformat() if not isinstance(value, UUID) else str(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, date):  # also covers datetime
+        return value.isoformat()
     if isinstance(value, Mapping):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -523,17 +525,28 @@ def _validate_value(
         key_type, item_type = args if len(args) == 2 else (str, Any)
         if key_type is not str:
             raise _problem(location, "type_error", "Only string-keyed mappings are supported.")
-        return {
-            str(key): _validate_value(
-                item_type,
-                item,
-                location=(*location, _safe_location_part(key)),
-                from_text=from_text,
-                budget=budget,
-                depth=depth + 1,
-            )
-            for key, item in value.items()
-        }
+        result: dict[str, object] = {}
+        issues = []
+        for key, item in value.items():
+            if _issues_truncated(issues):
+                break
+            try:
+                result[str(key)] = _validate_value(
+                    item_type,
+                    item,
+                    location=(*location, _safe_location_part(key)),
+                    from_text=from_text,
+                    budget=budget,
+                    depth=depth + 1,
+                )
+            except _InvalidValue as exc:
+                if _has_validation_limit(exc.issues):
+                    raise
+                # Report every bad value, as list and model validation do, not only the first.
+                extend_validation_issues(issues, exc.issues, location=location, budget=budget)
+        if issues:
+            raise _InvalidValue(issues)
+        return result
 
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         if from_text and isinstance(value, str):
@@ -725,8 +738,6 @@ def _collection_value(origin: object, values: Sequence[object]) -> object:
 
 
 def _unwrap_annotated(annotation: object) -> object:
-    from typing import Annotated
-
     return get_args(annotation)[0] if get_origin(annotation) is Annotated else annotation
 
 

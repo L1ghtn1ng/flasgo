@@ -144,6 +144,8 @@
   `flasgo.blueprints`).
 - Route paths with a repeated parameter name, an unknown converter, or a malformed placeholder such as `<int: id>` now
   raise a clear `ValueError`; previously they raised `re.PatternError` or registered silently as literal paths.
+- `dict[str, T]` validation reports every invalid value instead of stopping at the first, matching list and model
+  validation.
 
 ## [0.9.1] - 2026-09-06
 

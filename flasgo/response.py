@@ -1,7 +1,7 @@
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self, override
 from urllib.parse import urlsplit
@@ -346,8 +346,6 @@ def to_response(value: ResponseValue) -> Response:
         if len(value) == 3:
             body, status_code, headers = value
             return _tuple_to_response(body, status_code, headers)
-    from dataclasses import is_dataclass
-
     if is_dataclass(value) and not isinstance(value, type):
         from .validation import to_jsonable
 

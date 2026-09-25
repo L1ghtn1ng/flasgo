@@ -141,8 +141,7 @@ def compile_endpoint_plan(
         )
     plan = replace(plan, dependencies=tuple(extra))
     _validate_dependency_scopes(plan)
-    body_sources = _body_sources(plan, seen=set())
-    if len(body_sources) > 1:
+    if sum(binding.source in {"body", "form"} for binding in walk_bindings(plan)) > 1:
         endpoint_name = _callable_name(endpoint)
         raise TypeError(
             f"Endpoint {endpoint_name!r} declares multiple Body()/Form() inputs across its dependency graph. "
@@ -289,30 +288,6 @@ def _has_nested_marker(annotation: object) -> bool:
 
 def _contains_forward_ref(annotation: object) -> bool:
     return isinstance(annotation, ForwardRef) or any(_contains_forward_ref(item) for item in get_args(annotation))
-
-
-def _body_sources(plan: EndpointPlan, *, seen: set[int]) -> set[tuple[int, str, str]]:
-    """
-    Collect body and form parameter sources from an endpoint plan and its dependencies.
-
-    Parameters:
-        plan (EndpointPlan): The endpoint plan to inspect.
-        seen (set[int]): Endpoint identifiers already visited during traversal.
-
-    Returns:
-        set[tuple[int, str, str]]: Body and form sources identified by endpoint, source type, and parameter name.
-    """
-    endpoint_id = id(plan.endpoint)
-    if endpoint_id in seen:
-        return set()
-    seen.add(endpoint_id)
-    sources: set[tuple[int, str, str]] = set()
-    for binding in (*plan.dependencies, *plan.bindings):
-        if binding.source in {"body", "form"}:
-            sources.add((endpoint_id, binding.source, binding.name))
-        elif binding.dependency is not None:
-            sources.update(_body_sources(binding.dependency, seen=seen))
-    return sources
 
 
 def walk_bindings(plan: EndpointPlan) -> tuple[ParameterBinding, ...]:

@@ -268,7 +268,6 @@ class Request:
     headers: dict[str, str] = field(init=False)
     _body: bytes | None = field(default=None, init=False)
     _form: FormData | None = field(default=None, init=False)
-    _form_loaded: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.headers = _decode_headers(self.scope.get("headers", []))
@@ -396,8 +395,8 @@ class Request:
 
     async def form(self) -> FormData:
         """Parse supported form encodings while retaining bounded diagnostic rejection reasons."""
-        if self._form_loaded:
-            return self._form or FormData()
+        if self._form is not None:
+            return self._form
 
         max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
         content_type, params = _parse_content_type(self.headers.get("content-type"))
@@ -435,5 +434,4 @@ class Request:
             form = FormData()
 
         self._form = form
-        self._form_loaded = True
         return form
