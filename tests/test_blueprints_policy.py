@@ -173,3 +173,10 @@ def test_duplicate_route_names_are_rejected_at_registration() -> None:
     unrelated.add_route("/c", lambda: "c", name="c")
     app.register_blueprint(unrelated)
     assert app.url_for("other.c") == "/other/c"
+
+
+def test_url_for_encodes_literal_segments_and_skips_none_query_values() -> None:
+    app = Flasgo()
+    app.get("/café/<int:item_id>", name="item")(lambda item_id: str(item_id))
+
+    assert app.url_for("item", item_id=3, q=None, sort="a b") == "/caf%C3%A9/3?sort=a+b"

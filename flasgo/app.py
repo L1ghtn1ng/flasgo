@@ -67,6 +67,7 @@ from .routing import (
     WebSocketEndpoint,
     WebSocketMatchResult,
     WebSocketRoute,
+    build_url,
     routes_overlap,
 )
 from .security import (
@@ -1298,8 +1299,6 @@ class Flasgo(RouteDecorators):
         Raises:
                 ValueError: If the endpoint does not identify exactly one route.
         """
-        from .blueprints import build_url
-
         routes = [
             route
             for route in (*self._routes, *self._websocket_routes)

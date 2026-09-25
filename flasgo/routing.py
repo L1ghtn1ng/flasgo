@@ -3,6 +3,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, urlencode
 
 from .response import ResponseValue
 
@@ -306,3 +307,56 @@ def _match_path(
             # limit) means the value is not a valid match, not a server error.
             return None
     return params
+
+
+def build_url(path: str, values: dict[str, Any]) -> str:
+    """
+    Build a safe relative URL by substituting validated route parameters and encoding remaining values as query parameters.
+
+    Literal path text is percent-encoded, and query values of ``None`` are omitted (as in Werkzeug).
+
+    Parameters:
+        path (str): Route path containing optional parameter placeholders.
+        values (dict[str, Any]): Values for route parameters and query parameters.
+
+    Returns:
+        str: The resulting relative URL.
+
+    Raises:
+        ValueError: If a required parameter is missing, invalid, or unsafe, or if the resulting URL is not a safe relative URL.
+    """
+    if path.startswith("//") or any(char in _PARAM_PATTERN.sub("", path) for char in "\\?#"):
+        raise ValueError("Route cannot be reversed to a safe relative URL.")
+    values = dict(values)
+    pieces: list[str] = []
+    position = 0
+    for match in _PARAM_PATTERN.finditer(path):
+        pieces.append(quote(path[position : match.start()], safe=_URL_LITERAL_SAFE))
+        pieces.append(_url_parameter(match, values))
+        position = match.end()
+    pieces.append(quote(path[position:], safe=_URL_LITERAL_SAFE))
+    result = "".join(pieces)
+    if result.startswith("//"):
+        raise ValueError("Route cannot be reversed to a safe relative URL.")
+    query = {key: value for key, value in values.items() if value is not None}
+    return result + ("?" + urlencode(query, doseq=True) if query else "")
+
+
+# Keep "%" so already-encoded literals (such as an ASGI root_path) are not double-encoded.
+_URL_LITERAL_SAFE = "/%:@!$&'()*+,;=-._~"
+
+
+def _url_parameter(match: re.Match[str], values: dict[str, Any]) -> str:
+    name = match.group("name")
+    if name not in values:
+        raise ValueError(f"Missing URL parameter: {name}")
+    value = values.pop(name)
+    converter = match.group("converter") or "str"
+    text = str(value)
+    pattern, cast = _CONVERTERS[converter]
+    if not re.fullmatch(pattern, text):
+        raise ValueError(f"Invalid URL parameter: {name}")
+    cast(text)
+    if any(part in {".", ".."} for part in text.split("/")) or "\\" in text:
+        raise ValueError(f"Unsafe URL parameter: {name}")
+    return quote(text, safe="/" if converter == "path" else "")

@@ -139,6 +139,9 @@
 - Endpoints whose annotations cannot be resolved at runtime (for example names imported only under `TYPE_CHECKING`, in
   modules without `from __future__ import annotations`) no longer fail registration with a raw `NameError` from
   `inspect.signature`; unmarked parameters and return types fall back to forward references as intended.
+- `url_for()` percent-encodes literal path text (for example `/café`) and omits query values that are `None` instead
+  of rendering `?q=None`. The helper now lives in `flasgo.routing.build_url` (still importable from
+  `flasgo.blueprints`).
 
 ## [0.9.1] - 2026-09-06
 
