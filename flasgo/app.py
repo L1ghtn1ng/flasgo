@@ -15,7 +15,6 @@ from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints, override
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .auth import (
@@ -71,18 +70,16 @@ from .routing import (
 from .security import (
     SecurityConfig,
     SecurityFailureThrottle,
-    allowed_host_pattern,
     apply_security_headers,
     csrf_is_valid,
     ensure_csrf_cookie,
     host_is_allowed,
-    validate_cookie_name,
     websocket_origin_is_allowed,
 )
 from .server import run_dev_server
 from .server_sessions import ServerSideSessions
 from .session import Session, SessionSigner
-from .settings import SettingsInput, load_settings
+from .settings import SettingsInput, load_settings, validate_app_config
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
 from .stores import StoreUnavailable, _StoreCapacityExceeded
@@ -108,11 +105,9 @@ _request_ctx: ContextVar[Request | None] = ContextVar("flasgo_request", default=
 _session_ctx: ContextVar[Session | None] = ContextVar("flasgo_session", default=None)
 _user_ctx: ContextVar[User | None] = ContextVar("flasgo_user", default=None)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-_BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 # Stable HTTP server span known methods (RFC 9110 + PATCH + QUERY).
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
 _OTEL_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
-_INSECURE_SENTINEL = "dev-insecure-secret-change-this"
 # Set by __call__ so the head size is measured once per connection.
 _OVERSIZED_HEAD = "flasgo.oversized_head"
 _REJECTION_EVENTS = {
@@ -288,7 +283,7 @@ class Flasgo(RouteDecorators):
         self.settings = load_settings(settings)
         self.security = security or self.settings.to_security_config()
         self.security._validate_boolean_fields()
-        self._validate_security_config()
+        validate_app_config(self.settings, self.security)
         if cors is not None and not isinstance(cors, CORSConfig):
             raise TypeError("cors must be a CORSConfig instance or None.")
         self.cors = cors
@@ -1635,105 +1630,6 @@ class Flasgo(RouteDecorators):
         self._openapi_dirty = False
         return spec
 
-    def _validate_security_config(self) -> None:
-        """Reject invalid security settings before the application serves requests."""
-        if not self.security.secret_key:
-            raise ValueError("SECRET_KEY must be configured. Set it to a long random value before starting Flasgo.")
-        if self.security.secret_key == _INSECURE_SENTINEL:
-            raise ValueError("SECRET_KEY uses an insecure default value. Replace it with a unique random secret.")
-        if len(self.security.secret_key) < 32:
-            raise ValueError("SECRET_KEY must be at least 32 characters.")
-        same_site = self.security.session_cookie_same_site.strip().lower()
-        if same_site not in {"lax", "strict", "none"}:
-            raise ValueError("SESSION_COOKIE_SAME_SITE must be one of 'Lax', 'Strict', or 'None'.")
-        if same_site == "none" and not self.security.session_cookie_secure:
-            raise ValueError("SESSION_COOKIE_SAME_SITE='None' requires SESSION_COOKIE_SECURE=True.")
-        validate_cookie_name(self.security.session_cookie_name)
-        validate_cookie_name(self.security.csrf_cookie_name)
-        max_age = self.security.session_cookie_max_age
-        if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
-            # Zero or negative values make every session cookie expire immediately.
-            raise ValueError("SESSION_COOKIE_MAX_AGE must be a positive number of seconds.")
-        for pattern in self.security.allowed_hosts:
-            if not isinstance(pattern, str) or allowed_host_pattern(pattern) is None:
-                raise ValueError(
-                    f"ALLOWED_HOSTS entry {pattern!r} is not a hostname, IP address, or '.suffix' pattern. "
-                    "Wildcards such as '*' are not supported; list each host or use '.example.com'."
-                )
-        if self.security.max_request_body_bytes <= 0:
-            raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0.")
-        if self.security.max_request_head_bytes <= 0:
-            raise ValueError("MAX_REQUEST_HEAD_BYTES must be greater than 0.")
-        if self.security.request_read_timeout_seconds <= 0:
-            raise ValueError("REQUEST_READ_TIMEOUT_SECONDS must be greater than 0.")
-        if self.security.max_multipart_parts <= 0:
-            raise ValueError("MAX_MULTIPART_PARTS must be greater than 0.")
-        if self.security.max_form_fields <= 0:
-            raise ValueError("MAX_FORM_FIELDS must be greater than 0.")
-        ssrf_timeout = self.settings.SSRF_RESOLUTION_TIMEOUT_SECONDS
-        if ssrf_timeout is not None and ssrf_timeout <= 0:
-            raise ValueError("SSRF_RESOLUTION_TIMEOUT_SECONDS must be greater than 0 or None.")
-        if self.security.max_validation_depth <= 0:
-            raise ValueError("MAX_VALIDATION_DEPTH must be greater than 0.")
-        if self.security.max_validation_work <= 0:
-            raise ValueError("MAX_VALIDATION_WORK must be greater than 0.")
-        if self.security.max_validation_issues < 2:
-            raise ValueError("MAX_VALIDATION_ISSUES must be at least 2.")
-        if self.security.security_failure_window_seconds <= 0:
-            raise ValueError("SECURITY_FAILURE_WINDOW_SECONDS must be greater than 0.")
-        if not self.settings.SSRF_ALLOWED_SCHEMES:
-            raise ValueError("SSRF_ALLOWED_SCHEMES must not be empty. Include at least one scheme such as 'https'.")
-        if not isinstance(self.settings.OTEL_SERVICE_NAME, str) or not self.settings.OTEL_SERVICE_NAME.strip():
-            raise ValueError("OTEL_SERVICE_NAME must not be empty.")
-        if self.settings.OTEL_SERVICE_VERSION is not None and not isinstance(self.settings.OTEL_SERVICE_VERSION, str):
-            raise ValueError("OTEL_SERVICE_VERSION must be a string or None.")
-        if (
-            isinstance(self.settings.OTEL_TRACE_SAMPLE_RATIO, bool)
-            or not isinstance(self.settings.OTEL_TRACE_SAMPLE_RATIO, int | float)
-            or not 0 <= self.settings.OTEL_TRACE_SAMPLE_RATIO <= 1
-        ):
-            raise ValueError("OTEL_TRACE_SAMPLE_RATIO must be between 0 and 1 inclusive.")
-        if any(not isinstance(path, str) or not path.startswith("/") for path in self.settings.OTEL_EXCLUDED_PATHS):
-            raise ValueError("Every OTEL_EXCLUDED_PATHS entry must start with '/'.")
-        if not self.settings.DOCS_PATH.startswith("/"):
-            raise ValueError("DOCS_PATH must start with '/'. Example: '/docs'.")
-        if not self.settings.OPENAPI_PATH.startswith("/"):
-            raise ValueError("OPENAPI_PATH must start with '/'. Example: '/openapi.json'.")
-        if self.settings.DOCS_PATH == self.settings.OPENAPI_PATH:
-            raise ValueError("DOCS_PATH and OPENAPI_PATH must be different so each endpoint has its own URL.")
-        if self.settings.DOCS_AUTH_BACKEND is not None and (
-            not isinstance(self.settings.DOCS_AUTH_BACKEND, str) or not self.settings.DOCS_AUTH_BACKEND.strip()
-        ):
-            raise ValueError("DOCS_AUTH_BACKEND must be a non-empty registered backend name or None.")
-        if any(not isinstance(url, str) or not url.strip() for url in self.settings.API_SERVERS):
-            raise ValueError("API_SERVERS entries must be non-empty URL strings.")
-        if self.settings.LOG_FORMAT.strip().lower() not in {"text", "json"}:
-            raise ValueError("LOG_FORMAT must be 'text' or 'json'.")
-        if self.settings.LOG_LEVEL.upper() not in logging.getLevelNamesMapping():
-            raise ValueError("LOG_LEVEL must be a standard Python logging level such as INFO or WARNING.")
-        if self.settings.WEBSOCKET_MAX_MESSAGE_BYTES <= 0:
-            raise ValueError("WEBSOCKET_MAX_MESSAGE_BYTES must be greater than 0.")
-        if self.settings.WEBSOCKET_MAX_MESSAGES_PER_MINUTE <= 0:
-            raise ValueError("WEBSOCKET_MAX_MESSAGES_PER_MINUTE must be greater than 0.")
-        if self.settings.SERVER_LIMIT_CONCURRENCY <= 0:
-            raise ValueError("SERVER_LIMIT_CONCURRENCY must be greater than 0.")
-        for origin in self.settings.WEBSOCKET_ALLOWED_ORIGINS:
-            if not _valid_websocket_origin(origin):
-                raise ValueError("WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths.")
-        if not self.settings.METRICS_PATH.startswith("/"):
-            raise ValueError("METRICS_PATH must start with '/'.")
-        if not isinstance(self.settings.METRICS_EVENT_LOOP_ENABLED, bool):
-            raise ValueError("METRICS_EVENT_LOOP_ENABLED must be a boolean.")
-        interval = self.settings.METRICS_EVENT_LOOP_INTERVAL_SECONDS
-        if isinstance(interval, bool) or not isinstance(interval, int | float) or not 0.01 <= interval <= 60:
-            raise ValueError("METRICS_EVENT_LOOP_INTERVAL_SECONDS must be between 0.01 and 60.")
-        if self.settings.METRICS_ENABLED:
-            token = self.settings.METRICS_BEARER_TOKEN
-            if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
-                raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled.")
-            if self.settings.METRICS_PATH in {self.settings.DOCS_PATH, self.settings.OPENAPI_PATH}:
-                raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
-
     async def _dispatch(self, req: Request) -> Response:
         """
         Dispatch an HTTP request through security checks, middleware, routing, authorization, rate limiting, and response processing.
@@ -2252,23 +2148,6 @@ def _normalize_auth_identity(identity: AuthIdentity) -> AuthResult:
     if isinstance(identity, User):
         return AuthResult(user=identity, challenge=None)
     return AuthResult(user=None, challenge=None)
-
-
-def _valid_websocket_origin(value: str) -> bool:
-    try:
-        parsed = urlsplit(value.strip())
-        _ = parsed.port
-    except ValueError:
-        return False
-    return bool(
-        parsed.scheme.lower() in {"http", "https"}
-        and parsed.netloc
-        and parsed.username is None
-        and parsed.password is None
-        and parsed.path in {"", "/"}
-        and not parsed.query
-        and not parsed.fragment
-    )
 
 
 def _single_cookie_value(req: Request, name: str) -> str | None:

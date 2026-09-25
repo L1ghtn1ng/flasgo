@@ -353,11 +353,11 @@ def _origin_matches_request(origin_value: str, request: Request, config: Securit
     if not parsed.scheme or not parsed.netloc:
         return False
     # Referer carries a path, so compare only its scheme and authority.
-    origin = _canonical_origin(f"{parsed.scheme}://{parsed.netloc}")
+    origin = canonical_origin(f"{parsed.scheme}://{parsed.netloc}")
     if origin is None:
         return False
     request_host = (request.headers.get("host") or "").strip()
-    if request_host and origin == _canonical_origin(f"{request.scheme}://{request_host}"):
+    if request_host and origin == canonical_origin(f"{request.scheme}://{request_host}"):
         return True
     return any(_trusted_origin_matches(trusted, origin, request_scheme=request.scheme) for trusted in config.csrf_trusted_origins)
 
@@ -374,14 +374,14 @@ def _trusted_origin_matches(trusted: str, origin: tuple[str, str, int], *, reque
     if "://" in normalized:
         trusted_scheme, _, authority = normalized.partition("://")
         if authority.startswith("*."):
-            wildcard = _canonical_origin(f"{trusted_scheme}://{authority[2:]}")
+            wildcard = canonical_origin(f"{trusted_scheme}://{authority[2:]}")
             return wildcard is not None and (scheme, port) == (wildcard[0], wildcard[2]) and host.endswith(f".{wildcard[1]}")
-        return origin == _canonical_origin(normalized)
+        return origin == canonical_origin(normalized)
     if scheme != request_scheme:
         return False
     if normalized.startswith("."):
         return host.endswith(normalized)
-    return origin == _canonical_origin(f"{scheme}://{normalized}")
+    return origin == canonical_origin(f"{scheme}://{normalized}")
 
 
 def websocket_origin_is_allowed(
@@ -393,16 +393,17 @@ def websocket_origin_is_allowed(
 ) -> bool:
     """Validate a WebSocket Origin using exact origins only."""
 
-    candidate = _canonical_origin(origin_value)
+    candidate = canonical_origin(origin_value)
     if candidate is None:
         return False
-    same_origin = _canonical_origin(f"{request_scheme}://{request_host}")
+    same_origin = canonical_origin(f"{request_scheme}://{request_host}")
     if candidate == same_origin:
         return True
-    return candidate in {_canonical_origin(item) for item in allowed_origins}
+    return candidate in {canonical_origin(item) for item in allowed_origins}
 
 
-def _canonical_origin(value: str) -> tuple[str, str, int] | None:
+def canonical_origin(value: str) -> tuple[str, str, int] | None:
+    """Return ``(scheme, host, port)`` for an exact http(s) origin, or ``None`` if it is not one."""
     try:
         parsed = urlsplit(value.strip())
         port = parsed.port
