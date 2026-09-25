@@ -214,15 +214,17 @@ class RedisStore:
         self.timeout = timeout
         self.max_value_bytes = max_value_bytes
         self._owns_client = False
+        self._script_digests: dict[str, str] = {}
 
     @classmethod
-    def from_url(cls, url: str, *, namespace: str = "flasgo", timeout: float = 2) -> RedisStore:
+    def from_url(cls, url: str, *, namespace: str = "flasgo", timeout: float = 2, max_value_bytes: int = 65_536) -> RedisStore:
         """Create a Redis-backed session store from a connection URL.
 
         Parameters:
             url (str): Redis connection URL.
             namespace (str): Namespace used to isolate stored keys.
             timeout (float): Connection and operation timeout in seconds.
+            max_value_bytes (int): Maximum permitted size of a stored value in bytes.
 
         Returns:
             RedisStore: A store configured with a client created from the URL.
@@ -235,7 +237,7 @@ class RedisStore:
         except ImportError as exc:
             raise ImportError("Redis storage requires the optional extra: install 'flasgo[redis]'.") from exc
         client = redis.Redis.from_url(url, socket_connect_timeout=timeout, socket_timeout=timeout, max_connections=100)
-        store = cls(client, namespace=namespace, timeout=timeout)
+        store = cls(client, namespace=namespace, timeout=timeout, max_value_bytes=max_value_bytes)
         store._owns_client = True
         return store
 
@@ -267,9 +269,19 @@ class RedisStore:
         Returns:
             Any: The result produced by the script.
         """
+        digest = self._script_digests.get(script)
+        if digest is None:
+            digest = self._script_digests[script] = hashlib.sha1(script.encode("utf-8"), usedforsecurity=False).hexdigest()
         try:
             async with asyncio.timeout(self.timeout):
-                return await self.client.eval(script, len(keys), *keys, *args)
+                try:
+                    # EVALSHA avoids resending the script body on every rate-limit or session call.
+                    return await self.client.evalsha(digest, len(keys), *keys, *args)
+                except Exception as exc:
+                    # redis-py raises NoScriptError; other clients surface the raw "NOSCRIPT ..." reply.
+                    if type(exc).__name__ != "NoScriptError" and "NOSCRIPT" not in str(exc):
+                        raise
+                    return await self.client.eval(script, len(keys), *keys, *args)
         except Exception as exc:
             raise StoreUnavailable("Shared storage is unavailable.") from exc
 

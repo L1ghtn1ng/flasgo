@@ -266,7 +266,7 @@ def test_redis_capacity_pressure_preserves_active_quotas(redis_url: str) -> None
 
 def test_redis_timeouts_are_bounded_and_fail_closed() -> None:
     class Client:
-        async def eval(self, *args):
+        async def evalsha(self, *args):
             """
             Wait indefinitely until the operation is cancelled.
             """

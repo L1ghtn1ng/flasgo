@@ -27,6 +27,8 @@
 - An authentication backend that raises now yields 500 for HTTP routes, matching the documentation page and WebSocket
   upgrades (previously HTTP routes returned 401, inviting clients to retry credentials that may have been valid).
   Documentation and route authorization now share one implementation.
+- Redis-backed rate limiting and sessions call their Lua scripts with `EVALSHA` (falling back to `EVAL` on `NOSCRIPT`)
+  instead of sending the full script on every request, and `RedisStore.from_url()` accepts `max_value_bytes`.
 
 ### Fixed
 
