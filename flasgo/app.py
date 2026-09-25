@@ -1,8 +1,6 @@
 import asyncio
 import copy
-import html
 import inspect
-import json
 import logging
 import re
 import secrets
@@ -43,6 +41,7 @@ from .cors import (
 )
 from .debug import Debug
 from .di import DependencyContext, resolve_endpoint_arguments
+from .docs import swagger_ui_response
 from .exceptions import HTTPException, _RequestRejection
 from .logging import configure_logging, log_event
 from .metrics import Metrics, normalize_http_method
@@ -136,9 +135,6 @@ _INTERNAL_ERROR_EVENTS = {
     "docs-auth-backend-missing": ("authentication", "backend_missing"),
     "permission-check-error": ("authorization", "permission_error"),
 }
-_SWAGGER_UI_VERSION = "5.32.12"
-_SWAGGER_UI_CSS_INTEGRITY = "sha384-9Q2fpS+xeS4ffJy6CagnwoUl+4ldAYhOs9pgZuEKxypVModhmZFzeMlvVsAjf7uT"
-_SWAGGER_UI_JS_INTEGRITY = "sha384-aPw2h1Un96ObRq1fD7AOgyf0r9jgkhMD51uBltHKtT0++4LsgMUkQD52RFNWcAil"
 
 
 class _DefaultAuthBackend:
@@ -1608,28 +1604,7 @@ class Flasgo(RouteDecorators):
         if req.path == openapi_path:
             return Response.json(self.openapi_spec())
 
-        nonce = secrets.token_urlsafe(16)
-        return Response.html(
-            _swagger_ui_html(
-                openapi_path=openapi_path,
-                title=self.settings.API_TITLE,
-                nonce=nonce,
-            ),
-            headers={
-                "content-security-policy": (
-                    "default-src 'self'; "
-                    f"script-src 'self' https://unpkg.com 'nonce-{nonce}'; "
-                    f"style-src 'self' https://unpkg.com 'nonce-{nonce}'; "
-                    "img-src 'self' data:; "
-                    "connect-src 'self'; "
-                    "font-src https://unpkg.com; "
-                    "object-src 'none'; "
-                    "base-uri 'none'; "
-                    "frame-ancestors 'none'; "
-                    "form-action 'self'"
-                )
-            },
-        )
+        return swagger_ui_response(openapi_path=openapi_path, title=self.settings.API_TITLE)
 
     async def _authorize_docs_request(self, req: Request) -> Response | None:
         """Apply configured documentation authentication, permissions, and failure throttling."""
@@ -2312,46 +2287,6 @@ class Flasgo(RouteDecorators):
         except Exception:
             self._log_security_event(logging.ERROR, "permission-check-error", req=req)
             return False
-
-
-def _swagger_ui_html(*, openapi_path: str, title: str, nonce: str) -> str:
-    safe_title = html.escape(title, quote=True)
-    safe_nonce = html.escape(nonce, quote=True)
-    openapi_path_json = json.dumps(openapi_path)
-    return f"""<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{safe_title} Docs</title>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@{_SWAGGER_UI_VERSION}/swagger-ui.css"
-      integrity="{_SWAGGER_UI_CSS_INTEGRITY}" crossorigin="anonymous" />
-    <style nonce="{safe_nonce}">
-      html, body {{
-        margin: 0;
-        padding: 0;
-      }}
-      #swagger-ui {{
-        min-height: 100vh;
-      }}
-    </style>
-  </head>
-  <body>
-    <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@{_SWAGGER_UI_VERSION}/swagger-ui-bundle.js"
-      integrity="{_SWAGGER_UI_JS_INTEGRITY}" crossorigin="anonymous"></script>
-    <script nonce="{safe_nonce}">
-      window.ui = SwaggerUIBundle({{
-        url: {openapi_path_json},
-        dom_id: "#swagger-ui",
-        deepLinking: true,
-        queryConfigEnabled: false,
-        validatorUrl: null,
-      }});
-    </script>
-  </body>
-</html>
-"""
 
 
 def _normalize_auth_identity(identity: AuthIdentity) -> AuthResult:
