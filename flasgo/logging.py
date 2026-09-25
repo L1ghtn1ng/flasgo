@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any, TextIO
+from typing import Any, TextIO, override
 
 _FIELD_RE = re.compile(r"[^a-zA-Z0-9_.:/@+\\-]")
 _OWNED_HANDLER = "_flasgo_owned_handler"
@@ -19,6 +19,7 @@ def sanitize_log_value(value: object, *, limit: int = 256) -> str:
 class FlasgoJSONFormatter(logging.Formatter):
     """Format bounded Flasgo event fields as one JSON object."""
 
+    @override
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
@@ -38,6 +39,7 @@ class FlasgoJSONFormatter(logging.Formatter):
 
 
 class _FlasgoTextFormatter(logging.Formatter):
+    @override
     def format(self, record: logging.LogRecord) -> str:
         pieces = [record.getMessage()]
         for key in (

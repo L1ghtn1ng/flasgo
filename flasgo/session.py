@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, override
 
 
 def b64encode(value: bytes) -> str:
@@ -52,6 +52,7 @@ class Session(MutableMapping[str, Any]):
         self._rotate = True
         self.modified = True
 
+    @override
     def __getitem__(self, key: str) -> Any:
         """Retrieve a value from the session by key.
 
@@ -63,26 +64,33 @@ class Session(MutableMapping[str, Any]):
         """
         return self.data[key]
 
+    @override
     def __setitem__(self, key: str, value: Any) -> None:
         self.data[key] = value
         self.modified = True
 
+    @override
     def __delitem__(self, key: str) -> None:
         del self.data[key]
         self.modified = True
 
+    @override
     def __iter__(self) -> Iterator[str]:
         return iter(self.data)
 
+    @override
     def __len__(self) -> int:
         return len(self.data)
 
+    @override
     def __contains__(self, key: object) -> bool:
         return key in self.data
 
+    @override
     def get(self, key: str, default: Any = None) -> Any:  # ty: ignore[invalid-method-override]
         return self.data.get(key, default)
 
+    @override
     def pop(self, key: str, default: Any = None) -> Any:
         """Remove and return ``key``, or ``default`` when absent. Only an actual removal marks the session modified."""
         if key not in self.data:
@@ -90,6 +98,7 @@ class Session(MutableMapping[str, Any]):
         self.modified = True
         return self.data.pop(key)
 
+    @override
     def clear(self) -> None:
         self.modified = True
         self.data.clear()

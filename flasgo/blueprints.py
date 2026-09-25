@@ -2,7 +2,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, override
 from urllib.parse import quote, urlencode
 
 from .auth import PermissionLike
@@ -82,6 +82,7 @@ class Blueprint(RouteDecorators):
         self.cors: CORSConfig | Literal[False] | None = cors
         self._registrations: list[_Registration | Blueprint] = []
 
+    @override
     def add_route(
         self,
         path: str,

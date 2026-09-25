@@ -3,7 +3,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self, override
 from urllib.parse import urlsplit
 
 from .types import Send
@@ -31,41 +31,52 @@ class ResponseHeaders(dict[str, str]):
         super().__init__()
         self.update(data)
 
+    @override
     def __setitem__(self, key: str, value: str) -> None:
         super().__setitem__(key.lower(), value)
 
+    @override
     def __getitem__(self, key: str) -> str:
         return super().__getitem__(key.lower())
 
+    @override
     def __delitem__(self, key: str) -> None:
         super().__delitem__(key.lower())
 
+    @override
     def __contains__(self, key: object) -> bool:
         return isinstance(key, str) and super().__contains__(key.lower())
 
+    @override
     def __ior__(self, other: Any, /) -> Self:
         self.update(other)
         return self
 
+    @override
     def __or__(self, other: Any, /) -> ResponseHeaders:
         merged = ResponseHeaders(self)
         merged.update(other)
         return merged
 
+    @override
     def get(self, key: str, default: Any = None, /) -> Any:  # ty: ignore[invalid-method-override]
         return super().get(key.lower(), default)
 
+    @override
     def pop(self, key: str, /, *default: Any) -> Any:  # ty: ignore[invalid-method-override]
         return super().pop(key.lower(), *default)
 
+    @override
     def setdefault(self, key: str, default: str, /) -> str:
         return super().setdefault(key.lower(), default)
 
+    @override
     def update(self, other: Any = (), /, **kwargs: str) -> None:
         items: Iterable[tuple[str, str]] = other.items() if isinstance(other, Mapping) else other
         for key, value in [*items, *kwargs.items()]:
             self[key] = value
 
+    @override
     def copy(self) -> ResponseHeaders:
         return ResponseHeaders(self)
 

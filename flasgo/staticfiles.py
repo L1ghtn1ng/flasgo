@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path, PurePosixPath
 from stat import S_ISREG
-from typing import BinaryIO, cast
+from typing import BinaryIO, cast, override
 
 from .exceptions import HTTPException
 from .request import Request
@@ -45,11 +45,13 @@ class StaticFileResponse(Response):
             allow_public_cache=True,
         )
 
+    @override
     def prepare(self) -> None:
         super().prepare()
         if not self.body:
             self.headers["content-length"] = str(self._size)
 
+    @override
     async def send(self, send: Send, *, head_only: bool = False) -> None:
         if self.body:
             await super().send(send, head_only=head_only)

@@ -4,7 +4,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, overload, override
 from urllib.parse import parse_qs
 
 from .exceptions import HTTPException, _RequestRejection
@@ -129,15 +129,18 @@ class FormData(Mapping[str, str]):
         self._fields = {key: list(values) for key, values in (fields or {}).items()}
         self._files = {key: list(values) for key, values in (files or {}).items()}
 
+    @override
     def __getitem__(self, key: str) -> str:
         values = self._fields.get(key)
         if not values:
             raise KeyError(key)
         return values[0]
 
+    @override
     def __iter__(self) -> Iterator[str]:
         return iter(self._fields)
 
+    @override
     def __len__(self) -> int:
         return len(self._fields)
 

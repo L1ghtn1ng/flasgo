@@ -1,6 +1,6 @@
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, cast, override
 
 from jinja2 import BaseLoader, StrictUndefined, Template, TemplateNotFound, select_autoescape
 from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -57,6 +57,7 @@ class SecureTemplateLoader(BaseLoader):
         self.encoding = encoding
         self.max_template_bytes = max_template_bytes
 
+    @override
     def get_source(self, environment: Any, template: str) -> tuple[str, str, Callable[[], bool]]:
         del environment
         normalized_template = _normalize_template_name(template)

@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin, get_type_hints, override
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -1135,6 +1135,7 @@ class Flasgo(RouteDecorators):
     ) -> Callable[[T], T]:
         return rate_limit(requests, per=per, scope=scope, key_func=key_func)
 
+    @override
     def add_route(
         self,
         path: str,

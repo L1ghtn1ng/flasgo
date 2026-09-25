@@ -2,7 +2,7 @@ import inspect
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from types import TracebackType
-from typing import Any
+from typing import Any, override
 
 from .params import (
     Cookie,
@@ -30,6 +30,7 @@ from .validation import (
 
 
 class _DependencyStack(AsyncExitStack):
+    @override
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,

@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from contextvars import Context, copy_context
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, override
 
 from .contracts import project_response, validate_response_model
 from .response import Response, status_allows_body
@@ -90,6 +90,7 @@ class StreamingResponse(Response):
         self._metrics_outcome = "producer_failure"
         super().__init__(body=b"", status_code=status_code, headers=dict(headers or {}), content_type=content_type)
 
+    @override
     def prepare(self) -> None:
         """Prepare the streaming response headers and validate that the status permits a response body."""
         super().prepare()
@@ -242,6 +243,7 @@ class StreamingResponse(Response):
                 return
             raise RuntimeError("Unexpected ASGI event after the request body was consumed.")
 
+    @override
     async def send(self, send: Send, *, head_only: bool = False) -> None:
         """
         Send the streaming response through ASGI and monitor the client connection.
