@@ -1075,8 +1075,10 @@ def test_auth_backend_exception_fails_closed() -> None:
 
     client = TestClient(app)
     response = client.get("/private")
-    assert response.status_code == 401
-    assert "Provide valid credentials" in response.text
+    # A crashing backend is a server fault: fail closed with 500 rather than asking for new credentials.
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert "backend exploded" not in response.text
 
 
 def test_register_auth_backend_rejects_empty_name() -> None:

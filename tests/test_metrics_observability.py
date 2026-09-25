@@ -617,7 +617,8 @@ def test_authentication_execution_is_separate_from_rejection(outcome: str) -> No
         return "ok"
 
     response = app.test_client().get("/private")
-    assert response.status_code == (200 if outcome == "authenticated" else 403 if outcome == "forbidden" else 401)
+    expected_status = {"authenticated": 200, "forbidden": 403, "anonymous": 401}.get(outcome, 500)
+    assert response.status_code == expected_status
     expected = outcome if outcome in {"timeout", "failure"} else "success"
     assert _sample(app, "backend_operations_total", component="authentication", operation="authenticate", outcome=expected) == 1
     if outcome in {"anonymous", "forbidden"}:

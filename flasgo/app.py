@@ -198,6 +198,19 @@ _default_auth_backend = _DefaultAuthBackend()
 
 
 @dataclass(slots=True, frozen=True)
+class _AuthEvents:
+    """Security event names logged by one authorization entry point."""
+
+    backend_missing: str
+    backend_error: str
+    denied: str
+
+
+_ROUTE_AUTH_EVENTS = _AuthEvents("auth-backend-missing", "auth-backend-error", "permission-denied")
+_DOCS_AUTH_EVENTS = _AuthEvents("docs-auth-backend-missing", "docs-auth-backend-error", "docs-auth-failed")
+
+
+@dataclass(slots=True, frozen=True)
 class RouteAuth:
     """Authentication backend and permissions required by one route."""
 
@@ -1617,31 +1630,9 @@ class Flasgo(RouteDecorators):
         backend_name = self.settings.DOCS_AUTH_BACKEND
         if backend_name is None:
             return None
-        backend = self._auth_backends.get(backend_name.strip())
-        if backend is None:
-            self._log_security_event(logging.ERROR, "docs-auth-backend-missing", req=req)
-            return Response.text("Internal Server Error", status_code=500)
-        if self._security_failure_is_limited(req):
-            self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
-            return _security_rate_limit_response()
-        try:
-            with self._backend_operation(req, "authentication", "authenticate"):
-                identity = await _maybe_await(backend(req))
-        except Exception:
-            self._log_security_event(logging.ERROR, "docs-auth-backend-error", req=req)
-            if self._register_security_failure(req):
-                return _security_rate_limit_response()
-            return Response.text("Internal Server Error", status_code=500)
-        auth_result = _normalize_auth_identity(identity)
-        resolved_user = auth_result.user or User.anonymous()
-        req.scope["user"] = resolved_user
-        _user_ctx.set(resolved_user)
-        if not resolved_user.is_authenticated:
-            self._log_security_event(logging.WARNING, "docs-auth-failed", req=req)
-            if self._register_security_failure(req):
-                return _security_rate_limit_response()
-            return _permission_denied_response(resolved_user, challenge=auth_result.challenge)
-        return None
+        auth = RouteAuth(backend_name.strip(), (IsAuthenticated(),))
+        denial = await self._authorize_with(req, auth, set_user_ctx=True, events=_DOCS_AUTH_EVENTS)
+        return None if denial is None else _auth_denial_response(denial)
 
     def openapi_spec(self) -> dict[str, Any]:
         """Return the cached OpenAPI document for the registered routes."""
@@ -2176,11 +2167,21 @@ class Flasgo(RouteDecorators):
         auth = self._route_auth.get(endpoint)
         if auth is None:
             return None
+        return await self._authorize_with(req, auth, set_user_ctx=set_user_ctx, events=_ROUTE_AUTH_EVENTS)
 
+    async def _authorize_with(
+        self,
+        req: Request,
+        auth: RouteAuth,
+        *,
+        set_user_ctx: bool,
+        events: _AuthEvents,
+    ) -> _AuthDenial | None:
+        """Authenticate with ``auth.backend`` and check its permissions, logging under ``events``' names."""
         anonymous = User.anonymous()
         backend = self._auth_backends.get(auth.backend)
         if backend is None:
-            self._log_security_event(logging.ERROR, "auth-backend-missing", req=req)
+            self._log_security_event(logging.ERROR, events.backend_missing, req=req)
             return _AuthDenial("backend-missing", anonymous, backend_name=auth.backend)
         if self._security_failure_is_limited(req):
             self._log_security_event(logging.WARNING, "security-failure-rate-limit-exceeded", req=req)
@@ -2190,7 +2191,7 @@ class Flasgo(RouteDecorators):
             with self._backend_operation(req, "authentication", "authenticate"):
                 authenticated = await _maybe_await(backend(req))
         except Exception:
-            self._log_security_event(logging.ERROR, "auth-backend-error", req=req)
+            self._log_security_event(logging.ERROR, events.backend_error, req=req)
             if self._register_security_failure(req):
                 return _AuthDenial("rate-limited", anonymous)
             return _AuthDenial("backend-error", anonymous)
@@ -2204,7 +2205,7 @@ class Flasgo(RouteDecorators):
         for permission in auth.permissions:
             allowed = await self._evaluate_permission(permission, req, resolved_user)
             if not allowed:
-                self._log_security_event(logging.WARNING, "permission-denied", req=req)
+                self._log_security_event(logging.WARNING, events.denied, req=req)
                 if self._register_security_failure(req):
                     return _AuthDenial("rate-limited", resolved_user)
                 return _AuthDenial("permission-denied", resolved_user, challenge=auth_result.challenge)
@@ -2212,21 +2213,7 @@ class Flasgo(RouteDecorators):
 
     async def _authorize_request(self, req: Request, endpoint: Endpoint) -> Response | None:
         denial = await self._authorize(req, endpoint, set_user_ctx=True)
-        if denial is None:
-            return None
-        if denial.reason == "backend-missing":
-            return Response.text(
-                f"Authentication backend {denial.backend_name!r} is not configured. Register it with app.register_auth_backend(...).",
-                status_code=500,
-            )
-        if denial.reason == "rate-limited":
-            return _security_rate_limit_response()
-        if denial.reason == "backend-error":
-            return Response.text(
-                "Authentication failed. Provide valid credentials and retry.",
-                status_code=401,
-            )
-        return _permission_denied_response(denial.user, challenge=denial.challenge)
+        return None if denial is None else _auth_denial_response(denial)
 
     def _register_security_failure(self, req: Request) -> bool:
         """Register a security failure and observe any resulting throttle decision."""
@@ -2339,19 +2326,8 @@ class Flasgo(RouteDecorators):
         req: Request,
         current_user: User,
     ) -> bool:
-        if isinstance(permission, Permission):
-            try:
-                check = permission.has_permission(req, current_user)
-            except Exception:
-                self._log_security_event(logging.ERROR, "permission-check-error", req=req)
-                return False
-        else:
-            try:
-                check = permission(req, current_user)
-            except Exception:
-                self._log_security_event(logging.ERROR, "permission-check-error", req=req)
-                return False
         try:
+            check = permission.has_permission(req, current_user) if isinstance(permission, Permission) else permission(req, current_user)
             return bool(await _maybe_await(check))
         except Exception:
             self._log_security_event(logging.ERROR, "permission-check-error", req=req)
@@ -2474,6 +2450,21 @@ def _security_rate_limit_response() -> Response:
         "Too many failed security checks from this client. Wait a moment before retrying.",
         status_code=429,
     )
+
+
+def _auth_denial_response(denial: _AuthDenial) -> Response:
+    """Build the HTTP response for a failed authorization check (routes and documentation alike)."""
+    if denial.reason == "rate-limited":
+        return _security_rate_limit_response()
+    if denial.reason == "backend-missing":
+        return Response.text(
+            f"Authentication backend {denial.backend_name!r} is not configured. Register it with app.register_auth_backend(...).",
+            status_code=500,
+        )
+    if denial.reason == "backend-error":
+        # A failing backend is a server fault; a 401 would invite clients to retry credentials that may be valid.
+        return Response.text("Internal Server Error", status_code=500)
+    return _permission_denied_response(denial.user, challenge=denial.challenge)
 
 
 def _websocket_parameter(endpoint: WebSocketEndpoint) -> str | None:

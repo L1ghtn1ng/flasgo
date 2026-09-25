@@ -24,6 +24,9 @@
   `Self`; `RouteAuth` is a frozen dataclass; status reason phrases come from `http.HTTPStatus` (so a 413 WebSocket
   denial or fallback body now reads "Content Too Large", the RFC 9110 name); and the CLI suggests close matches for
   mistyped commands (`argparse` `suggest_on_error`).
+- An authentication backend that raises now yields 500 for HTTP routes, matching the documentation page and WebSocket
+  upgrades (previously HTTP routes returned 401, inviting clients to retry credentials that may have been valid).
+  Documentation and route authorization now share one implementation.
 
 ### Fixed
 
