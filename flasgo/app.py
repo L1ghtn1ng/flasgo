@@ -73,7 +73,6 @@ from .security import (
     SecurityConfig,
     allowed_host_pattern,
     apply_security_headers,
-    build_set_cookie,
     csrf_is_valid,
     ensure_csrf_cookie,
     host_is_allowed,
@@ -115,6 +114,8 @@ _BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 # Unknown methods use "HTTP" in the span name per OTel HTTP span naming rules.
 _OTEL_HTTP_METHODS = frozenset({"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE"})
 _INSECURE_SENTINEL = "dev-insecure-secret-change-this"
+# Set by __call__ so the head size is measured once per connection.
+_OVERSIZED_HEAD = "flasgo.oversized_head"
 _REJECTION_EVENTS = {
     "host-check-failed": "host",
     "cors-preflight-invalid": "cors",
@@ -298,7 +299,6 @@ class Flasgo(RouteDecorators):
         self._routes: list[Route] = []
         self._has_cors_routes = False
         self._websocket_routes: list[WebSocketRoute] = []
-        self._static_directories: list[StaticDirectory] = []
         self._before: list[BeforeMiddleware] = []
         self._after: list[AfterMiddleware] = []
         self._error_handlers: dict[type[Exception], ErrorHandler] = {}
@@ -367,6 +367,19 @@ class Flasgo(RouteDecorators):
         """
         return self._metrics.registry if self._metrics is not None else None
 
+    async def _bind_stream_receive(self, req: Request, response: StreamingResponse) -> None:
+        """Drain the request body, then let the stream watch the same receive channel for disconnects."""
+        self._track_response(req, response)
+        await req.body()
+        response.receive = req.receive
+
+    def _host_header_allowed(self, scope: Scope) -> bool:
+        """Return whether the scope carries exactly one allowed Host header (always true when enforcement is off)."""
+        if not self.security.enforce_allowed_hosts:
+            return True
+        host_values = _scope_header_values(scope, b"host")
+        return len(host_values) == 1 and host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts)
+
     def _backend_operation(self, req: Request, component: str, operation: str) -> AbstractContextManager[None]:
         """Time a logical backend call unless metrics are disabled or this request is a scrape."""
         if self._metrics is None or req.path == self.settings.METRICS_PATH:
@@ -377,10 +390,11 @@ class Flasgo(RouteDecorators):
         """Dispatch ASGI requests, rejecting oversized heads before tracing or trusting request IDs."""
         if scope.get("type") in {"http", "websocket"}:
             oversized_head = _request_head_size(scope) > self.security.max_request_head_bytes
+            scope[_OVERSIZED_HEAD] = oversized_head
             scope["request_id"] = uuid4().hex if oversized_head else self._request_id_for_scope(scope)
             if oversized_head:
                 if scope.get("type") == "http":
-                    await self._handle_http(scope, receive, send)
+                    await self._reject_oversized_http_head(scope, send)
                 else:
                     await self._handle_websocket(scope, receive, send)
                 return
@@ -403,6 +417,48 @@ class Flasgo(RouteDecorators):
         log_event(self._logger, logging.ERROR, "unsupported-asgi-scope", scope_type=scope_type)
         raise RuntimeError(f"Unsupported ASGI scope type: {scope_type!r}")
 
+    async def _reject_oversized_http_head(self, scope: Scope, send: Send) -> None:
+        """Answer 431 before routing, sessions, or tracing ever see an oversized request head."""
+        started = time.perf_counter()
+        instrument = self._metrics is not None and scope.get("path") != self.settings.METRICS_PATH
+        observed_send = _CountingSend(
+            send,
+            metrics=self._metrics if instrument else None,
+            started=started,
+            method=str(scope.get("method", "GET")),
+        )
+        if instrument:
+            self._metrics.http_active.inc()
+            self._metrics.http_in_flight.inc()
+            self._metrics.http_rejections.labels(route="<unmatched>", reason="request_head_limit").inc()
+        response = Response.text(
+            "Request headers exceed MAX_REQUEST_HEAD_BYTES.",
+            status_code=431,
+            headers={
+                "connection": "close",
+                "x-request-id": str(scope.get("request_id", "")),
+            },
+        )
+        apply_security_headers(response, self.security)
+        sent = False
+        try:
+            await response.send(observed_send)
+            sent = True
+        finally:
+            if instrument:
+                try:
+                    self._metrics.observe_http(
+                        method=str(scope.get("method", "GET")),
+                        route="<unmatched>",
+                        status=response.status_code,
+                        duration=time.perf_counter() - started,
+                        response_body_size=observed_send.body_bytes,
+                        response_sent=sent,
+                    )
+                finally:
+                    self._metrics.http_active.dec()
+                    self._metrics.http_in_flight.dec()
+
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
         """
         Handle an HTTP request through dispatch, response preparation, sending, cleanup, and metrics recording.
@@ -413,46 +469,6 @@ class Flasgo(RouteDecorators):
                 send (Send): Callable that sends ASGI events.
         """
         started = time.perf_counter()
-        if _request_head_size(scope) > self.security.max_request_head_bytes:
-            instrument = self._metrics is not None and scope.get("path") != self.settings.METRICS_PATH
-            observed_send = _CountingSend(
-                send,
-                metrics=self._metrics if instrument else None,
-                started=started,
-                method=str(scope.get("method", "GET")),
-            )
-            if instrument:
-                self._metrics.http_active.inc()
-                self._metrics.http_in_flight.inc()
-                self._metrics.http_rejections.labels(route="<unmatched>", reason="request_head_limit").inc()
-            response = Response.text(
-                "Request headers exceed MAX_REQUEST_HEAD_BYTES.",
-                status_code=431,
-                headers={
-                    "connection": "close",
-                    "x-request-id": str(scope.get("request_id", "")),
-                },
-            )
-            apply_security_headers(response, self.security)
-            sent = False
-            try:
-                await response.send(observed_send)
-                sent = True
-            finally:
-                if instrument:
-                    try:
-                        self._metrics.observe_http(
-                            method=str(scope.get("method", "GET")),
-                            route="<unmatched>",
-                            status=response.status_code,
-                            duration=time.perf_counter() - started,
-                            response_body_size=observed_send.body_bytes,
-                            response_sent=sent,
-                        )
-                    finally:
-                        self._metrics.http_active.dec()
-                        self._metrics.http_in_flight.dec()
-            return
         req = Request(scope, receive)
         req.scope["flasgo.app"] = self
         req.scope["max_request_body_bytes"] = self.security.max_request_body_bytes
@@ -487,9 +503,7 @@ class Flasgo(RouteDecorators):
                     session_before_dispatch = _copy_session(loaded_session)
                     response = await self._dispatch(req)
                     if isinstance(response, StreamingResponse):
-                        self._track_response(req, response)
-                        await req.body()
-                        response.receive = req.receive
+                        await self._bind_stream_receive(req, response)
                 persist_session = True
             except Exception as exc:
                 if session_before_dispatch is not None:
@@ -507,13 +521,16 @@ class Flasgo(RouteDecorators):
                 self._observe_rejection_exception(req, exc)
                 await self._close_request_dependencies(req, dependencies, exc)
                 self._log_security_event(logging.ERROR, "response-prepare-failed", req=req)
+                headers = {"x-request-id": req.request_id}
                 if isinstance(exc, StoreUnavailable):
                     status, detail = 503, "Service Unavailable"
                 elif isinstance(exc, HTTPException):
-                    status, detail = exc.status_code, exc.detail
+                    # Keep headers such as Retry-After and never send an empty body.
+                    status, detail = exc.status_code, exc.detail or _status_text(exc.status_code)
+                    headers = {**exc.headers, **headers}
                 else:
                     status, detail = 500, "Internal Server Error"
-                response = Response.text(detail, status_code=status, headers={"x-request-id": req.request_id})
+                response = Response.text(detail, status_code=status, headers=headers)
                 apply_security_headers(response, self.security)
                 cors = req.scope.get("flasgo.cors")
                 if isinstance(cors, CORSConfig):
@@ -732,7 +749,7 @@ class Flasgo(RouteDecorators):
         active = False
         try:
             await websocket.receive_connect()
-            if _request_head_size(scope) > self.security.max_request_head_bytes:
+            if scope.get(_OVERSIZED_HEAD):
                 outcome = "request_head_limit"
                 await websocket.deny(431, "Request headers exceed MAX_REQUEST_HEAD_BYTES.")
                 return
@@ -751,10 +768,7 @@ class Flasgo(RouteDecorators):
             scope["session"] = loaded_session
             scope["user"] = upgrade_req.scope["user"]
 
-            host_values = _scope_header_values(scope, b"host")
-            if self.security.enforce_allowed_hosts and (
-                len(host_values) != 1 or not host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts)
-            ):
+            if not self._host_header_allowed(scope):
                 self._log_security_event(logging.WARNING, "websocket-host-failed", req=upgrade_req)
                 outcome = "invalid_host"
                 await websocket.deny(400, "Invalid Host")
@@ -985,10 +999,7 @@ class Flasgo(RouteDecorators):
             list[tuple[bytes, bytes]]: The request headers, excluding the host header when allowed-host enforcement rejects it.
         """
         headers = list(scope.get("headers", []))
-        if not self.security.enforce_allowed_hosts:
-            return headers
-        host_values = _scope_header_values(scope, b"host")
-        if len(host_values) == 1 and host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts):
+        if self._host_header_allowed(scope):
             return headers
         return [(name, value) for name, value in headers if name.lower() != b"host"]
 
@@ -1432,7 +1443,6 @@ class Flasgo(RouteDecorators):
             url_path=url_path,
             cache_max_age=cache_max_age,
         )
-        self._static_directories.append(static_directory)
         self.add_route(
             f"{static_directory.url_path}/<path:filename>",
             self._build_static_endpoint(static_directory),
@@ -1516,9 +1526,7 @@ class Flasgo(RouteDecorators):
     async def _prepare_response(self, req: Request, response: Response, *, persist_session: bool = True) -> None:
         """Prepare an HTTP response with request, security, CORS, session, CSRF, and finalization metadata."""
         if isinstance(response, StreamingResponse) and response.receive is None:
-            self._track_response(req, response)
-            await req.body()
-            response.receive = req.receive
+            await self._bind_stream_receive(req, response)
         response.headers.setdefault("x-request-id", req.request_id)
         apply_security_headers(response, self.security)
         is_cors_preflight = req.scope.get("flasgo.cors_preflight") is True
@@ -1763,10 +1771,7 @@ class Flasgo(RouteDecorators):
         Returns:
                 Response: The response generated for the request.
         """
-        host_values = _scope_header_values(req.scope, b"host")
-        if self.security.enforce_allowed_hosts and (
-            len(host_values) != 1 or not host_is_allowed(host_values[0], allowed_hosts=self.security.allowed_hosts)
-        ):
+        if not self._host_header_allowed(req.scope):
             self._log_security_event(logging.WARNING, "host-check-failed", req=req)
             if self._register_security_failure(req):
                 return _security_rate_limit_response()
@@ -1858,7 +1863,7 @@ class Flasgo(RouteDecorators):
             return await self._run_after_middleware(req, not_found)
 
         req.scope["route_template"] = match.route_path
-        req.scope["flasgo.route_id"] = json.dumps([match.route_path, sorted(match.methods)])
+        req.scope["flasgo.route_id"] = match.route_id
         if match.cors is not None:
             req.scope["flasgo.cors"] = match.cors
         else:
@@ -1983,7 +1988,8 @@ class Flasgo(RouteDecorators):
         for route in self._routes:
             result = route.match(path, method)
             if result is not None:
-                return result, set(route.methods)
+                # Allowed methods only matter for the 405 response when nothing matched.
+                return result, set()
             if route.path_matches(path):
                 allowed_methods.update(route.methods)
         return None, allowed_methods
@@ -2091,10 +2097,7 @@ class Flasgo(RouteDecorators):
         tokens = req.cookie_values(self.security.session_cookie_name)
         token = tokens[0] if len(tokens) == 1 else None
         if self._session_backend is not None:
-            hosts = _scope_header_values(req.scope, b"host")
-            if self.security.enforce_allowed_hosts and (
-                len(hosts) != 1 or not host_is_allowed(hosts[0], allowed_hosts=self.security.allowed_hosts)
-            ):
+            if not self._host_header_allowed(req.scope):
                 return Session({})
             with self._backend_operation(req, "session", "load"):
                 return await self._session_backend.load(token)
@@ -2121,37 +2124,16 @@ class Flasgo(RouteDecorators):
         if self._session_backend is not None:
             with self._backend_operation(req, "session", "save"):
                 token = await self._session_backend.save(current, max_age=self.security.session_cookie_max_age) or ""
-            response.set_cookie(
-                self.security.session_cookie_name,
-                token,
-                max_age=self.security.session_cookie_max_age if token else 0,
-                secure=self.security.session_cookie_secure,
-                http_only=self.security.session_cookie_http_only,
-                same_site=self.security.session_cookie_same_site,
-            )
-            return token
-        if not current.data:
-            response.cookies.append(
-                build_set_cookie(
-                    self.security.session_cookie_name,
-                    "",
-                    max_age=0,
-                    secure=self.security.session_cookie_secure,
-                    http_only=self.security.session_cookie_http_only,
-                    same_site=self.security.session_cookie_same_site,
-                )
-            )
-            return ""
-        token = self._session_signer.dumps(current.data)
-        response.cookies.append(
-            build_set_cookie(
-                self.security.session_cookie_name,
-                token,
-                max_age=self.security.session_cookie_max_age,
-                secure=self.security.session_cookie_secure,
-                http_only=self.security.session_cookie_http_only,
-                same_site=self.security.session_cookie_same_site,
-            )
+        else:
+            token = self._session_signer.dumps(current.data) if current.data else ""
+        # An empty token clears the cookie (Max-Age=0).
+        response.set_cookie(
+            self.security.session_cookie_name,
+            token,
+            max_age=self.security.session_cookie_max_age if token else 0,
+            secure=self.security.session_cookie_secure,
+            http_only=self.security.session_cookie_http_only,
+            same_site=self.security.session_cookie_same_site,
         )
         return token
 

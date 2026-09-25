@@ -1,6 +1,7 @@
+import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .response import ResponseValue
@@ -33,6 +34,7 @@ class MatchResult:
     cors: CORSConfig | None
     methods: frozenset[str]
     response_model: object = None
+    route_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,22 +46,11 @@ class WebSocketMatchResult:
     websocket_parameter: str | None = None
 
 
-@dataclass(slots=True)
-class Route:
-    raw_path: str
-    methods: frozenset[str]
-    endpoint: Endpoint
-    endpoint_plan: EndpointPlan
-    name: str | None = None
-    cors: CORSConfig | None = None
-    public: bool = False
-    response_model: object = None
-    _regex: re.Pattern[str] | None = None
-    _casts: dict[str, Callable[[str], Any]] | None = None
+class _PathPattern:
+    """Path-shape helpers shared by HTTP and WebSocket routes (which provide ``raw_path``)."""
 
-    def __post_init__(self) -> None:
-        _validate_route(self.raw_path, self.name)
-        self._regex, self._casts = _compile_path(self.raw_path)
+    __slots__ = ()
+    raw_path: str
 
     @property
     def shape(self) -> str:
@@ -80,6 +71,27 @@ class Route:
     def specificity(self) -> tuple[int, int, int]:
         """Return a stable route precedence key, with literals and narrow converters first."""
         return _route_specificity(self.raw_path)
+
+
+@dataclass(slots=True)
+class Route(_PathPattern):
+    raw_path: str
+    methods: frozenset[str]
+    endpoint: Endpoint
+    endpoint_plan: EndpointPlan
+    name: str | None = None
+    cors: CORSConfig | None = None
+    public: bool = False
+    response_model: object = None
+    route_id: str = field(init=False, repr=False)
+    _regex: re.Pattern[str] = field(init=False, repr=False)
+    _casts: dict[str, Callable[[str], Any]] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_route(self.raw_path, self.name)
+        self._regex, self._casts = _compile_path(self.raw_path)
+        # Stable identity for shared rate-limit buckets, computed once rather than per request.
+        self.route_id = json.dumps([self.raw_path, sorted(self.methods)])
 
     def match(self, path: str, method: str) -> MatchResult | None:
         """
@@ -106,6 +118,7 @@ class Route:
             cors=self.cors,
             methods=self.methods,
             response_model=self.response_model,
+            route_id=self.route_id,
         )
 
     def path_matches(self, path: str) -> bool:
@@ -123,33 +136,18 @@ class Route:
 
 
 @dataclass(slots=True)
-class WebSocketRoute:
+class WebSocketRoute(_PathPattern):
     raw_path: str
     endpoint: WebSocketEndpoint
     name: str | None = None
     public: bool = False
     websocket_parameter: str | None = None
-    _regex: re.Pattern[str] | None = None
-    _casts: dict[str, Callable[[str], Any]] | None = None
+    _regex: re.Pattern[str] = field(init=False, repr=False)
+    _casts: dict[str, Callable[[str], Any]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         _validate_route(self.raw_path, self.name)
         self._regex, self._casts = _compile_path(self.raw_path)
-
-    @property
-    def shape(self) -> str:
-        """Return the route language without parameter names."""
-        return _route_shape(self.raw_path)
-
-    @property
-    def contract_shape(self) -> str:
-        """Return the route shape without converter or parameter names."""
-        return _route_contract_shape(self.raw_path)
-
-    @property
-    def specificity(self) -> tuple[int, int, int]:
-        """Return a stable route precedence key, with literals and narrow converters first."""
-        return _route_specificity(self.raw_path)
 
     def match(self, path: str) -> WebSocketMatchResult | None:
         params = _match_path(path, self._regex, self._casts)
@@ -292,11 +290,9 @@ def _compile_path(
 
 def _match_path(
     path: str,
-    regex: re.Pattern[str] | None,
-    casts: dict[str, Callable[[str], Any]] | None,
+    regex: re.Pattern[str],
+    casts: dict[str, Callable[[str], Any]],
 ) -> dict[str, Any] | None:
-    if regex is None or casts is None:
-        return None
     regex_match = regex.fullmatch(path)
     if regex_match is None:
         return None
