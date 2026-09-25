@@ -17,6 +17,8 @@
 - The `flasgo.session`, `flasgo.request` and `flasgo.current_user` proxies now forward attribute writes, deletion,
   membership, iteration and `len()` to the request-bound object. Previously `session.modified = True` was stored on the
   shared module-level proxy, so the session was never saved and the flag leaked into later requests.
+- `flasgo run --reload`, and `app.run()` with `DEBUG=True`, no longer crash with `ValueError: signal only works in main
+  thread`. The reloader now runs on the event loop through `watchfiles.arun_process` (new `arun_with_reload` helper).
 
 ## [0.9.1] - 2026-09-06
 

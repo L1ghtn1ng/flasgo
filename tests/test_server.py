@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import types
 from collections.abc import Coroutine
 from pathlib import Path
@@ -45,6 +46,30 @@ def test_run_with_reload_spawns_current_command(monkeypatch: pytest.MonkeyPatch,
     assert calls["target_type"] == "command"
     assert calls["env"] == "true"
     assert calls["ignore_permission_denied"] is True
+
+
+def test_dev_server_reload_runs_watchfiles_on_the_event_loop_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """watchfiles installs a SIGTERM handler, which fails outside the main thread, so it must not run via to_thread."""
+    calls: dict[str, object] = {}
+
+    async def fake_arun_process(*paths: str, target: str, **kwargs: object) -> int:
+        calls["thread"] = threading.current_thread()
+        calls["paths"] = paths
+        calls["target"] = target
+        calls["env"] = os.environ.get(server_module._RELOAD_ENV)
+        return 0
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(arun_process=fake_arun_process))
+    monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    asyncio.run(server_module.run_dev_server(Flasgo(), "127.0.0.1", 0, reload=True, reload_dirs=[tmp_path]))
+
+    assert calls["thread"] is threading.main_thread()
+    assert calls["paths"] == (str(tmp_path.resolve()),)
+    assert calls["target"] == "/usr/bin/python3 app.py"
+    assert calls["env"] == "true"
+    assert server_module._RELOAD_ENV not in os.environ
 
 
 def test_app_run_uses_debug_reload_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

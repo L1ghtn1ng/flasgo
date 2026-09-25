@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import shlex
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 type ReloadChanges = set[tuple[Change, str]]
 _RELOAD_ENV = "FLASGO_RUN_MAIN"
+_WATCHFILES_MISSING = "Reload support requires the 'watchfiles' package. Install project dependencies and retry."
 
 
 async def run_dev_server(
@@ -33,7 +34,9 @@ async def run_dev_server(
     """Run Flasgo on Uvicorn while retaining the existing file reloader."""
 
     if reload and os.environ.get(_RELOAD_ENV) != "true":
-        await asyncio.to_thread(run_with_reload, reload_dirs=reload_dirs)
+        # watchfiles registers a SIGTERM handler, which Python only allows on the main thread, so the reloader
+        # must run on the event loop rather than in a worker thread.
+        await arun_with_reload(reload_dirs=reload_dirs)
         return
 
     config = uvicorn.Config(
@@ -60,17 +63,17 @@ def run_with_reload(
     *,
     reload_dirs: Sequence[str | Path] | None = None,
 ) -> None:
+    """Run the current command under the file reloader, blocking until it exits.
+
+    ``watchfiles`` installs a SIGTERM handler, so this must be called from the main thread. Inside a running
+    event loop use :func:`arun_with_reload` instead.
+    """
     try:
         from watchfiles import run_process
     except ImportError as exc:
-        raise RuntimeError("Reload support requires the 'watchfiles' package. Install project dependencies and retry.") from exc
+        raise RuntimeError(_WATCHFILES_MISSING) from exc
 
-    watch_paths = tuple(str(resolve_reload_dir(path)) for path in (reload_dirs or (Path.cwd(),)))
-    command = build_reload_command()
-    previous = os.environ.get(_RELOAD_ENV)
-    os.environ[_RELOAD_ENV] = "true"
-    try:
-        print(f"Flasgo reloader watching {', '.join(watch_paths)}")
+    with _reload_environment(reload_dirs) as (watch_paths, command):
         run_process(
             *watch_paths,
             target=command,
@@ -78,6 +81,37 @@ def run_with_reload(
             callback=log_reload_changes,
             ignore_permission_denied=True,
         )
+
+
+async def arun_with_reload(
+    *,
+    reload_dirs: Sequence[str | Path] | None = None,
+) -> None:
+    """Run the current command under the file reloader from the event loop thread."""
+    try:
+        from watchfiles import arun_process
+    except ImportError as exc:
+        raise RuntimeError(_WATCHFILES_MISSING) from exc
+
+    with _reload_environment(reload_dirs) as (watch_paths, command):
+        await arun_process(
+            *watch_paths,
+            target=command,
+            target_type="command",
+            callback=log_reload_changes,
+            ignore_permission_denied=True,
+        )
+
+
+@contextmanager
+def _reload_environment(reload_dirs: Sequence[str | Path] | None) -> Iterator[tuple[tuple[str, ...], str]]:
+    watch_paths = tuple(str(resolve_reload_dir(path)) for path in (reload_dirs or (Path.cwd(),)))
+    command = build_reload_command()
+    previous = os.environ.get(_RELOAD_ENV)
+    os.environ[_RELOAD_ENV] = "true"
+    try:
+        print(f"Flasgo reloader watching {', '.join(watch_paths)}")
+        yield watch_paths, command
     finally:
         if previous is None:
             os.environ.pop(_RELOAD_ENV, None)
