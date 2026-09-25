@@ -4,7 +4,7 @@ import asyncio
 import mimetypes
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from email.utils import formatdate
 from pathlib import Path, PurePosixPath
 from stat import S_ISREG
 from typing import BinaryIO, cast
@@ -81,7 +81,7 @@ class StaticFileResponse(Response):
 
 
 def _http_date(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp, tz=UTC).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    return formatdate(timestamp, usegmt=True)
 
 
 def _etag(stat: os.stat_result) -> str:

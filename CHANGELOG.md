@@ -106,6 +106,11 @@
   raise `SSRFViolation` instead of leaking `ValueError`/`UnicodeError`; internationalized hosts are converted to their
   IDNA ASCII form for allowlist matching, resolution and `host_header`; and IPv6 site-local addresses (`fec0::/10`)
   are treated as private.
+- Settings validation: `SESSION_COOKIE_MAX_AGE` must be a positive integer (zero or negative values silently broke
+  every session), and `ALLOWED_HOSTS` entries that are not a hostname, IP address or `.suffix` pattern are rejected at
+  startup. In particular `"*"` previously matched nothing and returned 400 for every request; policy check FG002 no
+  longer describes it as unrestricted. `Settings.get()` returns only settings fields, not methods, and cookie
+  `Expires` / static `Last-Modified` dates no longer depend on the process locale.
 
 ## [0.9.1] - 2026-09-06
 

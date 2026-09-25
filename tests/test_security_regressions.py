@@ -1292,3 +1292,32 @@ def test_csrf_same_origin_comparison_is_canonical(origin: str, expected: bool) -
 
     request = SimpleNamespace(scheme="https", headers={"host": "APP.example.org"})
     assert _origin_matches_request(origin, cast(Any, request), SecurityConfig()) is expected
+
+
+@pytest.mark.parametrize("max_age", [0, -1, True, "3600"])
+def test_session_cookie_max_age_must_be_positive(max_age: object) -> None:
+    with pytest.raises(ValueError, match="SESSION_COOKIE_MAX_AGE must be a positive"):
+        Flasgo(settings={"SESSION_COOKIE_MAX_AGE": max_age})
+
+
+@pytest.mark.parametrize("pattern", ["*", "*.example.com", "exa mple.com", "evil.com/path"])
+def test_allowed_hosts_rejects_unsupported_patterns(pattern: str) -> None:
+    """``"*"`` looked like "allow any host" but matched nothing, so every request failed with 400."""
+    with pytest.raises(ValueError, match="ALLOWED_HOSTS entry"):
+        Flasgo(settings={"ALLOWED_HOSTS": {pattern}})
+
+
+def test_settings_get_only_returns_settings_fields() -> None:
+    settings = Settings(EXTRA={"custom": 1})
+    assert settings.get("DEBUG") is False
+    assert settings.get("custom") == 1
+    assert settings.get("to_security_config") is None
+    assert settings.get("get", "fallback") == "fallback"
+
+
+def test_cookie_expires_is_locale_independent() -> None:
+    from datetime import UTC, datetime
+
+    from flasgo.security import _format_http_date
+
+    assert _format_http_date(datetime(2026, 1, 5, 12, 0, tzinfo=UTC)) == "Mon, 05 Jan 2026 12:00:00 GMT"

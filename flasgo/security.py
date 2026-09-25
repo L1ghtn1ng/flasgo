@@ -5,6 +5,7 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import get_type_hints
 from urllib.parse import urlsplit
 
@@ -17,7 +18,8 @@ _CSRF_SIGNING_SALT = "flasgo.csrf"
 
 
 def _format_http_date(value: datetime) -> str:
-    return value.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    # strftime("%a %b") follows LC_TIME, which would produce invalid Expires values under non-English locales.
+    return format_datetime(value.astimezone(UTC), usegmt=True)
 
 
 _HOST_LABEL = r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
@@ -166,7 +168,7 @@ def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
     if hostname is None:
         return False
     for pattern in allowed_hosts:
-        p = _allowed_host_pattern(pattern)
+        p = allowed_host_pattern(pattern)
         if p is None:
             continue
         if p == hostname:
@@ -210,7 +212,8 @@ def _host_header_hostname(host: str | None) -> str | None:
     return hostname
 
 
-def _allowed_host_pattern(pattern: str) -> str | None:
+def allowed_host_pattern(pattern: str) -> str | None:
+    """Normalize an ``ALLOWED_HOSTS`` entry, or return ``None`` when it is not a valid host pattern."""
     raw = pattern.strip().lower()
     if raw.startswith("."):
         suffix = raw.removesuffix(".")

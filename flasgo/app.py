@@ -72,6 +72,7 @@ from .routing import (
 )
 from .security import (
     SecurityConfig,
+    allowed_host_pattern,
     apply_security_headers,
     build_set_cookie,
     csrf_is_valid,
@@ -1676,6 +1677,16 @@ class Flasgo(RouteDecorators):
             raise ValueError("SESSION_COOKIE_SAME_SITE='None' requires SESSION_COOKIE_SECURE=True.")
         validate_cookie_name(self.security.session_cookie_name)
         validate_cookie_name(self.security.csrf_cookie_name)
+        max_age = self.security.session_cookie_max_age
+        if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
+            # Zero or negative values make every session cookie expire immediately.
+            raise ValueError("SESSION_COOKIE_MAX_AGE must be a positive number of seconds.")
+        for pattern in self.security.allowed_hosts:
+            if not isinstance(pattern, str) or allowed_host_pattern(pattern) is None:
+                raise ValueError(
+                    f"ALLOWED_HOSTS entry {pattern!r} is not a hostname, IP address, or '.suffix' pattern. "
+                    "Wildcards such as '*' are not supported; list each host or use '.example.com'."
+                )
         if self.security.max_request_body_bytes <= 0:
             raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0.")
         if self.security.max_request_head_bytes <= 0:

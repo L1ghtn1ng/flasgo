@@ -153,7 +153,8 @@ class Settings:
         return cls.from_mapping(values)
 
     def get(self, key: str, default: Any = None) -> Any:
-        if hasattr(self, key):
+        # Only settings fields, not methods such as ``get`` or ``to_security_config``.
+        if key in self.__dataclass_fields__:
             return getattr(self, key)
         return self.EXTRA.get(key, default)
 

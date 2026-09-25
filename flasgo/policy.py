@@ -186,9 +186,9 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
     checks = (
         (app.settings.DEBUG, "FG001", "DEBUG is enabled."),
         (
-            not security.enforce_allowed_hosts or "*" in security.allowed_hosts,
+            not security.enforce_allowed_hosts,
             "FG002",
-            "Host validation is disabled or unrestricted.",
+            "Host validation is disabled.",
         ),
         (
             not security.session_cookie_secure or not security.session_cookie_http_only,
