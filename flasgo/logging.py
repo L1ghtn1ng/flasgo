@@ -34,6 +34,8 @@ class FlasgoJSONFormatter(logging.Formatter):
             payload[key] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
         return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str, allow_nan=False)
 
 
@@ -56,7 +58,14 @@ class _FlasgoTextFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 pieces.append(f"{key}={value}")
-        return f"{record.levelname.lower()} {' '.join(pieces)}"
+        line = f"{record.levelname.lower()} {' '.join(pieces)}"
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            line = f"{line}\n{record.exc_text}"
+        if record.stack_info:
+            line = f"{line}\n{self.formatStack(record.stack_info)}"
+        return line
 
 
 def configure_logging(
@@ -70,6 +79,9 @@ def configure_logging(
     normalized = format.strip().lower()
     if normalized not in {"text", "json"}:
         raise ValueError("LOG_FORMAT must be 'text' or 'json'.")
+    if isinstance(level, str):
+        # logging.setLevel only accepts upper-case names, while LOG_LEVEL validation is case-insensitive.
+        level = level.strip().upper()
     logger = logging.getLogger("flasgo")
     logger.setLevel(level)
     handler = next((item for item in logger.handlers if getattr(item, _OWNED_HANDLER, False)), None)
@@ -77,6 +89,8 @@ def configure_logging(
         handler = logging.StreamHandler(stream)
         setattr(handler, _OWNED_HANDLER, True)
         logger.addHandler(handler)
+    elif stream is not None and isinstance(handler, logging.StreamHandler):
+        handler.setStream(stream)
     handler.setLevel(level)
     handler.setFormatter(FlasgoJSONFormatter() if normalized == "json" else _FlasgoTextFormatter())
     logger.propagate = False

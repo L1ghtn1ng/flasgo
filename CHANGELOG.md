@@ -19,6 +19,9 @@
   shared module-level proxy, so the session was never saved and the flag leaked into later requests.
 - `flasgo run --reload`, and `app.run()` with `DEBUG=True`, no longer crash with `ValueError: signal only works in main
   thread`. The reloader now runs on the event loop through `watchfiles.arun_process` (new `arun_with_reload` helper).
+- The default text log format now includes exception tracebacks and stack info, which were silently dropped.
+- `LOG_LEVEL` is case-insensitive at runtime as well as in validation; `LOG_LEVEL="info"` no longer crashes startup.
+- Calling `configure_logging(stream=...)` again now switches the Flasgo handler to the new stream.
 
 ## [0.9.1] - 2026-09-06
 
