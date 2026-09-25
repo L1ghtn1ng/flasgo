@@ -268,9 +268,12 @@ def _atomic_write(path: Path, value: str) -> None:
     parent.mkdir(parents=True, exist_ok=True)
     destination = parent / absolute.name
     try:
-        existing_mode: int | None = stat.S_IMODE(destination.stat().st_mode)
+        entry = destination.lstat()
     except FileNotFoundError:
-        existing_mode = None
+        entry = None
+    # A symlink is replaced by a regular file, so treat it as new: inheriting the *target's* mode could make
+    # output public that the caller's umask would keep private.
+    existing_mode = stat.S_IMODE(entry.st_mode) if entry is not None and not stat.S_ISLNK(entry.st_mode) else None
     temporary: Path | None = None
     try:
         # A replacement starts with the destination's own mode, so a private (0600) file's new contents are never

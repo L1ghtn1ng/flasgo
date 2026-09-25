@@ -402,14 +402,21 @@ def test_routes_openapi_and_check_commands(tmp_path: Path, capsys: pytest.Captur
 def test_atomic_write_replaces_symlink_entry_without_following_target(tmp_path: Path) -> None:
     target = tmp_path / "victim.txt"
     target.write_text("keep", encoding="utf-8")
+    target.chmod(0o644)
     output = tmp_path / "openapi.json"
     output.symlink_to(target)
 
-    cli_module._atomic_write(output, "generated")
+    previous = os.umask(0o077)
+    try:
+        cli_module._atomic_write(output, "generated")
+    finally:
+        os.umask(previous)
 
     assert target.read_text(encoding="utf-8") == "keep"
     assert not output.is_symlink()
     assert output.read_text(encoding="utf-8") == "generated"
+    # The replacement is a new file under the caller's umask, not a copy of the symlink target's 0644 mode.
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 
 def test_atomic_write_uses_umask_for_new_files_and_keeps_existing_modes(tmp_path: Path) -> None:

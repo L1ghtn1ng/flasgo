@@ -228,3 +228,29 @@ def test_dev_server_websocket_implementation_loads_without_deprecation_warnings(
         warnings.simplefilter("error")
         config.load()
     assert config.ws_protocol_class is not None
+
+
+def test_abandoning_a_started_child_does_not_block_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child that ignores SIGINT must not freeze the event loop for the stop grace period on cancellation."""
+    stopping = threading.Event()
+    release = threading.Event()
+    stopped: list[object] = []
+
+    def slow_stop(process: object) -> None:
+        stopping.set()
+        release.wait(10)
+        stopped.append(process)
+
+    monkeypatch.setattr(server_module, "_start_reload_child", lambda command: "child")
+    monkeypatch.setattr(server_module, "_stop_reload_child", slow_stop)
+    handoff = server_module._ChildHandoff()
+    assert handoff.start("cmd") == "child"
+
+    handoff.abandon()  # returns immediately even though stopping is still in progress
+    assert stopping.wait(10)
+    assert stopped == []
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "flasgo-reload-stop":
+            thread.join(10)
+    assert stopped == ["child"]

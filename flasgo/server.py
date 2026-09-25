@@ -146,12 +146,16 @@ class _ChildHandoff:
         return process
 
     def abandon(self) -> None:
-        """Called on cancellation: stop the child now if it exists, otherwise the worker stops it once spawned."""
+        """Called on cancellation: stop the child if it exists, otherwise the worker stops it once spawned.
+
+        Stopping can take the whole SIGINT grace period, so it runs in its own thread instead of blocking the event
+        loop. The thread is non-daemon, so the interpreter still waits for the child to stop before exiting.
+        """
         with self._lock:
             self._abandoned = True
             process = self._process
         if process is not None:
-            _stop_reload_child(process)
+            threading.Thread(target=_stop_reload_child, args=(process,), name="flasgo-reload-stop").start()
 
 
 def _start_reload_child(command: str) -> subprocess.Popen[bytes]:
