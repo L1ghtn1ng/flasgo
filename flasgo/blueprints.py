@@ -11,7 +11,7 @@ from .auth import PermissionLike
 from .cors import CORSConfig
 from .params import Depends
 from .ratelimit import RateLimitRule, endpoint_rate_limits, rate_limit
-from .registration import RouteDecorators
+from .registration import RouteDecorators, route_methods
 from .routing import _CONVERTERS, _PARAM_PATTERN, Endpoint, _validate_route
 
 if TYPE_CHECKING:
@@ -109,6 +109,7 @@ class Blueprint(RouteDecorators):
             response_model (object): The model used to describe or validate responses.
             dependencies (Sequence[Depends]): Dependencies applied to the route.
         """
+        method_names = route_methods(methods)
         _validate_route(path, name)
         endpoint_name = name or getattr(endpoint, "__name__", "")
         if not endpoint_name:
@@ -117,7 +118,7 @@ class Blueprint(RouteDecorators):
             _Registration(
                 path,
                 endpoint,
-                tuple(methods),
+                method_names,
                 endpoint_name,
                 cors,
                 public,

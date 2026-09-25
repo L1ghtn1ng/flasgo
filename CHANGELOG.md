@@ -26,6 +26,7 @@
   instead of returning 422.
 - A JSON integer too large for a `float` field now returns a 422 validation error instead of an unhandled
   `OverflowError` (500).
+- `methods="POST"` now raises `TypeError` instead of registering the single-character methods `P`, `O`, `S` and `T`.
 
 ## [0.9.1] - 2026-09-06
 

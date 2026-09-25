@@ -145,3 +145,15 @@ def test_cli_policy_snapshot_and_comparison(tmp_path: Path, capsys: pytest.Captu
     app.security.csrf_enabled = False
     assert cli.main(["check", "unused", "--against", str(file), "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["changes"]
+
+
+@pytest.mark.parametrize("target", ["app", "blueprint"])
+def test_single_string_methods_are_rejected(target: str) -> None:
+    """``methods="POST"`` would otherwise register the methods P, O, S and T."""
+    owner = Flasgo() if target == "app" else Blueprint("api")
+
+    with pytest.raises(TypeError, match=r"sequence of method names such as \('POST',\)"):
+
+        @owner.route("/submit", methods="POST")
+        def submit() -> str:
+            return "ok"

@@ -56,7 +56,7 @@ from .ratelimit import (
     rate_limit,
     rate_limit_success_headers,
 )
-from .registration import RouteDecorators
+from .registration import RouteDecorators, route_methods
 from .request import Request
 from .response import Response, ResponseValue, to_response
 from .routing import (
@@ -1160,7 +1160,7 @@ class Flasgo(RouteDecorators):
         if path in reserved_paths:
             raise ValueError(f"Route {path!r} conflicts with an enabled internal endpoint.")
         normalized_methods: set[str] = set()
-        for method in methods:
+        for method in route_methods(methods):
             if not isinstance(method, str) or not _HTTP_METHOD_RE.fullmatch(method):
                 raise ValueError("HTTP route methods must be non-empty RFC 9110 method tokens such as GET or QUERY.")
             normalized_methods.add(method.upper())

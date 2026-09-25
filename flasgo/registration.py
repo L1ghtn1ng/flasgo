@@ -8,6 +8,13 @@ from .params import Depends
 from .routing import Endpoint
 
 
+def route_methods(methods: Iterable[str]) -> tuple[str, ...]:
+    """Materialize route methods, rejecting a bare string that would otherwise be split into characters."""
+    if isinstance(methods, str | bytes):
+        raise TypeError(f"Route methods must be a sequence of method names such as ({methods!r},), not a single string.")
+    return tuple(methods)
+
+
 class RouteDecorators:
     """Shared HTTP registration API for applications and blueprints."""
 
