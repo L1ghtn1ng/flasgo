@@ -22,6 +22,25 @@ def _format_http_date(value: datetime) -> str:
 
 _HOST_LABEL = r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
 _HOSTNAME_RE = re.compile(rf"(?=.{{1,253}}$){_HOST_LABEL}(?:\.{_HOST_LABEL})*")
+
+
+def default_security_headers() -> dict[str, str]:
+    """Return the default response security headers.
+
+    Cache headers are deliberately absent: :func:`apply_security_headers` adds them only while
+    ``enforce_no_store_cache`` is enabled, so that setting can actually turn them off.
+    """
+    return {
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "x-xss-protection": "0",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+        "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+        "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
+    }
+
+
 _SAME_SITE_VALUES = {"lax": "Lax", "strict": "Strict", "none": "None"}
 _COOKIE_NAME_PUNCTUATION = frozenset("!#$%&'*+-.^_`|~")
 
@@ -120,20 +139,7 @@ class SecurityConfig:
     security_failure_window_seconds: int = 60
     log_security_events: bool = True
 
-    security_headers: dict[str, str] = field(
-        default_factory=lambda: {
-            "x-content-type-options": "nosniff",
-            "x-frame-options": "DENY",
-            "referrer-policy": "strict-origin-when-cross-origin",
-            "x-xss-protection": "0",
-            "permissions-policy": "camera=(), microphone=(), geolocation=()",
-            "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
-            "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
-            "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
-            "pragma": "no-cache",
-            "expires": "0",
-        }
-    )
+    security_headers: dict[str, str] = field(default_factory=default_security_headers)
 
     secret_key: str = field(default_factory=_default_secret_key)
 

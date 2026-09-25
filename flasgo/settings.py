@@ -6,19 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast, get_type_hints
 
-from .security import SecurityConfig
-
-
-def _default_security_headers() -> dict[str, str]:
-    return {
-        "x-content-type-options": "nosniff",
-        "x-frame-options": "DENY",
-        "referrer-policy": "strict-origin-when-cross-origin",
-        "x-xss-protection": "0",
-        "permissions-policy": "camera=(), microphone=(), geolocation=()",
-        "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
-        "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
-    }
+from .security import SecurityConfig, default_security_headers
 
 
 @dataclass
@@ -90,7 +78,7 @@ class Settings:
     SSRF_ALLOW_UNRESOLVABLE_HOSTS: bool = False
     SSRF_RESOLUTION_TIMEOUT_SECONDS: float | None = 5.0
 
-    SECURITY_HEADERS: dict[str, str] = field(default_factory=_default_security_headers)
+    SECURITY_HEADERS: dict[str, str] = field(default_factory=default_security_headers)
     EXTRA: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __setattr__(self, name: str, value: object) -> None:

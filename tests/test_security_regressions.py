@@ -1222,3 +1222,26 @@ def test_session_proxy_supports_container_operations() -> None:
         return {"has_a": "a" in session, "has_b": "b" in session, "keys": list(session), "size": len(session), "truthy": bool(session)}
 
     assert app.test_client().get("/").json() == {"has_a": True, "has_b": False, "keys": ["a"], "size": 1, "truthy": True}
+
+
+@pytest.mark.parametrize(
+    "app_factory",
+    [
+        lambda: Flasgo(settings={"ENFORCE_NO_STORE_CACHE": False}),
+        lambda: Flasgo(security=SecurityConfig(enforce_no_store_cache=False)),
+    ],
+    ids=["settings", "security-config"],
+)
+def test_disabling_no_store_cache_is_honoured_by_every_config_path(app_factory: Any) -> None:
+    """A directly built SecurityConfig used to carry cache headers in its defaults, so the opt-out had no effect."""
+    app = app_factory()
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    response = app.test_client().get("/")
+    assert "cache-control" not in response.headers
+    assert "pragma" not in response.headers
+    assert response.headers["x-frame-options"] == "DENY"
+    assert SecurityConfig().security_headers == Settings().SECURITY_HEADERS
