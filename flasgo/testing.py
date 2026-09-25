@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import queue
 import threading
@@ -180,7 +181,6 @@ class TestClient:
         if self._mode is not None:
             raise RuntimeError("TestClient contexts may not be re-entered.")
         self._mode = "sync"
-        self._loop = asyncio.new_event_loop()
         self._work_queue = queue.Queue()
         self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._loop_thread.start()
@@ -218,21 +218,18 @@ class TestClient:
             self._mode = None
 
     def _run_loop(self) -> None:
-        loop = self._loop
         work_queue = self._work_queue
-        if loop is None or work_queue is None:
+        if work_queue is None:
             return
-        asyncio.set_event_loop(loop)
-        while True:
-            item = work_queue.get()
-            if item is None:
-                break
-            coro, future = item
-            try:
-                future.set_result(loop.run_until_complete(coro))
-            except BaseException as exc:
-                future.set_exception(exc)
-        loop.close()
+        # Runner cancels leftover tasks and shuts down async generators and the default executor on exit.
+        with asyncio.Runner() as runner:
+            while (item := work_queue.get()) is not None:
+                coro, future = item
+                try:
+                    # A fresh context per call keeps the isolation run_until_complete() gave each submission.
+                    future.set_result(runner.run(coro, context=contextvars.copy_context()))
+                except BaseException as exc:
+                    future.set_exception(exc)
 
     def _stop_sync_loop(self) -> None:
         if self._work_queue is not None:
@@ -269,9 +266,19 @@ class TestClient:
             "asgi": {"version": "3.0", "spec_version": "2.0"},
             "state": {},
         }
-        self._lifespan_task = asyncio.create_task(self.app(scope, receive, send))
+        lifespan_task = asyncio.create_task(self.app(scope, receive, send))
+        self._lifespan_task = lifespan_task
         await self._lifespan_receive.put({"type": "lifespan.startup"})
-        result = await asyncio.wait_for(self._lifespan_send.get(), timeout=5)
+        reply = asyncio.ensure_future(send_queue.get())
+        # Watch the app task too: if it raises instead of replying, surface that error rather than a timeout.
+        done, _ = await asyncio.wait({reply, lifespan_task}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        if reply not in done:
+            reply.cancel()
+            if lifespan_task in done:
+                await lifespan_task
+                raise RuntimeError("Application lifespan exited without completing startup.")
+            raise TimeoutError("Application lifespan startup did not complete within 5 seconds.")
+        result = reply.result()
         if result.get("type") != "lifespan.startup.complete":
             if self._lifespan_task is not None:
                 await self._lifespan_task

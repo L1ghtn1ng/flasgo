@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import textwrap
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import pytest
 from flasgo import (
@@ -456,3 +457,17 @@ def test_websocket_client_waits_for_the_app_after_a_server_close() -> None:
     with app.test_client() as client, client.websocket_connect("/bye") as websocket, pytest.raises(WebSocketDisconnect):
         websocket.receive_text()
     assert events == ["handler-finished"]
+
+
+def test_test_client_surfaces_lifespan_crashes_immediately() -> None:
+    """An app that raises on the lifespan scope must fail fast with its own error, not a 5 second timeout."""
+
+    async def broken_app(scope: dict[str, object], receive: object, send: object) -> None:
+        raise ValueError("lifespan exploded")
+
+    from flasgo.testing import TestClient
+
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="lifespan exploded"), TestClient(cast(Any, broken_app)):
+        pass
+    assert time.monotonic() - started < 2

@@ -96,6 +96,9 @@
   when switching to GET; cookies set with `Max-Age=0` or a past `Expires` are removed from the jar; closing a
   WebSocket session after a server-side close still waits for the handler to finish; and repeated response headers are
   decoded consistently for HTTP, streaming and WebSocket responses.
+- The synchronous test client runs its worker loop with `asyncio.Runner`, so leftover tasks, async generators and the
+  default executor are shut down cleanly, and a lifespan that crashes now raises its own error immediately instead of
+  a 5-second timeout.
 
 ## [0.9.1] - 2026-09-06
 
