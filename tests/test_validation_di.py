@@ -683,3 +683,35 @@ def test_validation_issue_responses_are_capped() -> None:
         "code": "too_many_errors",
         "message": "Additional validation errors were omitted.",
     }
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Annotated[str, Header()] | None,
+        list[Annotated[str, Query()]],
+        Annotated[int, Cookie()] | Annotated[str, Cookie()],
+    ],
+)
+def test_nested_markers_are_rejected_instead_of_silently_becoming_query(annotation: Any) -> None:
+    """A marker hidden inside a union or generic would otherwise be dropped and the value read from the query string."""
+    app = Flasgo()
+
+    async def handler(value: Any = None) -> str:
+        return "ok"
+
+    handler.__annotations__["value"] = annotation
+    with pytest.raises(TypeError, match="nests a Flasgo marker"):
+        app.get("/nested")(handler)
+
+
+def test_outer_marker_with_optional_type_reads_the_header() -> None:
+    app = Flasgo()
+
+    @app.get("/header")
+    async def handler(x_token: Annotated[str | None, Header()] = None) -> dict[str, str | None]:
+        return {"value": x_token}
+
+    client = app.test_client()
+    assert client.get("/header?x_token=query", headers={"x-token": "header"}).json() == {"value": "header"}
+    assert client.get("/header?x_token=query").json() == {"value": None}

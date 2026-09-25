@@ -9,6 +9,8 @@
 - Response header names are now case-insensitive (`ResponseHeaders`). Flask-style `response.headers["Content-Type"] = ...`
   replaces the existing header instead of sending a second, conflicting `Content-Type`/`Content-Length`, and a custom
   `X-Frame-Options` no longer ships alongside the default one.
+- A parameter marker nested inside another type, such as `Annotated[str, Header()] | None`, is now rejected at route
+  registration. Previously the marker was silently dropped and the value was read from the query string instead.
 
 ## [0.9.1] - 2026-09-06
 

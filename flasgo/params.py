@@ -85,6 +85,7 @@ class Depends:
 
 
 type ParameterMarker = Body | Query | Header | Cookie | Form | Depends
+_MARKER_TYPES = (Body, Query, Header, Cookie, Form, Depends)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +195,7 @@ def _compile_callable(
             raise TypeError(f"Endpoint parameter {parameter.name!r} on {_callable_name(endpoint)!r} must be keyword-compatible.")
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             continue
-        if isinstance(parameter.default, (Body, Query, Header, Cookie, Form, Depends)):
+        if isinstance(parameter.default, _MARKER_TYPES):
             raise TypeError(
                 f"Parameter {parameter.name!r} on {_callable_name(endpoint)!r} uses a marker as its default. "
                 "Use Annotated[T, Marker()] so static type checking remains correct."
@@ -266,12 +267,26 @@ def _compile_callable(
 
 def _split_marker(annotation: object, *, endpoint: Provider, parameter: str) -> tuple[object, ParameterMarker | None]:
     if get_origin(annotation) is not Annotated:
+        if _has_nested_marker(annotation):
+            raise TypeError(
+                f"Parameter {parameter!r} on {_callable_name(endpoint)!r} nests a Flasgo marker inside another type, "
+                "where it would be ignored. Put the marker on the outside, e.g. Annotated[str | None, Header()]."
+            )
         return annotation, None
     args = get_args(annotation)
-    markers = [item for item in args[1:] if isinstance(item, (Body, Query, Header, Cookie, Form, Depends))]
+    markers = [item for item in args[1:] if isinstance(item, _MARKER_TYPES)]
     if len(markers) > 1:
         raise TypeError(f"Parameter {parameter!r} on {_callable_name(endpoint)!r} has more than one Flasgo marker.")
     return args[0], markers[0] if markers else None
+
+
+def _has_nested_marker(annotation: object) -> bool:
+    for item in get_args(annotation):
+        if get_origin(item) is Annotated and any(isinstance(meta, _MARKER_TYPES) for meta in get_args(item)[1:]):
+            return True
+        if _has_nested_marker(item):
+            return True
+    return False
 
 
 def _contains_forward_ref(annotation: object) -> bool:
