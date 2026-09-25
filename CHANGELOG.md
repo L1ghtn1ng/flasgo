@@ -34,6 +34,9 @@
   decoded as the two scopes `read` and `admin`, and list-form scope claims with whitespace are now rejected. A NaN or
   infinite `leeway` is rejected instead of silently disabling expiry checks, and `additional_claims` may now use
   `scope` when a different `scope_claim` is configured.
+- Rate-limit response headers now report the most restrictive quota across the pre-authentication and
+  post-authentication phases. Previously a generous per-user limit overwrote a nearly exhausted per-IP limit, so
+  clients saw `ratelimit-remaining: 49` right before a 429.
 
 ## [0.9.1] - 2026-09-06
 

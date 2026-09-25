@@ -101,6 +101,33 @@ def test_ratelimit_decorator_blocks_client_ip_and_adds_retry_headers() -> None:
     assert calls == 2
 
 
+def test_ratelimit_headers_report_the_most_restrictive_phase() -> None:
+    """A generous per-user limit checked after auth must not hide a nearly exhausted per-IP limit."""
+    app = Flasgo()
+
+    def validate_token(token: str) -> User | None:
+        return User(id="alice", is_authenticated=True) if token == "token-123" else None
+
+    app.register_auth_backend("bearer", bearer_token_backend(validate_token))
+
+    @app.get("/limited")
+    @app.authorize(IsAuthenticated(), backend="bearer")
+    @app.ratelimit(2, per=60)
+    @app.ratelimit(50, per=60, key_func=lambda req: current_user.id)
+    def limited() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    headers = {"authorization": "Bearer token-123"}
+    first = client.get("/limited", headers=headers)
+    second = client.get("/limited", headers=headers)
+
+    assert first.headers["ratelimit-limit"] == "2"
+    assert first.headers["ratelimit-remaining"] == "1"
+    assert second.headers["ratelimit-remaining"] == "0"
+    assert client.get("/limited", headers=headers).status_code == 429
+
+
 def test_ratelimit_scope_can_cover_multiple_endpoints() -> None:
     app = Flasgo()
 

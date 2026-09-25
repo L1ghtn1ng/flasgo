@@ -50,6 +50,7 @@ from .openapi import build_openapi_spec
 from .params import Depends, Provider, compile_endpoint_plan
 from .ratelimit import (
     RateLimitBackend,
+    RateLimitDecision,
     RateLimiter,
     build_rate_limit_response,
     endpoint_rate_limits,
@@ -1841,7 +1842,8 @@ class Flasgo(RouteDecorators):
             authenticated_rate_limit = await self._check_rate_limits(req, match.endpoint, phase="post_auth")
             if isinstance(authenticated_rate_limit, Response):
                 return await self._run_after_middleware(req, authenticated_rate_limit)
-            rate_limit_result.update(authenticated_rate_limit)
+            # Advertise whichever phase's quota is closest to exhaustion, not simply the last one checked.
+            rate_limit_result = _most_restrictive([item for item in (rate_limit_result, authenticated_rate_limit) if item is not None])
 
         raw_response = await self._call_endpoint(req, match)
         if isinstance(raw_response, Response):
@@ -1849,7 +1851,8 @@ class Flasgo(RouteDecorators):
         response = (
             contract_response(raw_response, match.response_model, req) if match.response_model is not None else to_response(raw_response)
         )
-        response.headers.update(rate_limit_result)
+        if rate_limit_result is not None:
+            response.headers.update(rate_limit_success_headers(rate_limit_result))
         return await self._run_after_middleware(req, response)
 
     async def _check_rate_limits(
@@ -1858,7 +1861,7 @@ class Flasgo(RouteDecorators):
         endpoint: Endpoint | WebSocketEndpoint,
         *,
         phase: str = "all",
-    ) -> dict[str, str] | Response:
+    ) -> RateLimitDecision | Response | None:
         """
         Check the applicable rate limits for a request endpoint.
 
@@ -1867,17 +1870,16 @@ class Flasgo(RouteDecorators):
                 ``"post_auth"``.
 
         Returns:
-            dict[str, str] | Response: Rate-limit headers when all applicable limits
-                allow the request, or a denial response when a limit is exceeded.
+            RateLimitDecision | Response | None: The most restrictive allowing decision, a denial
+                response when a limit is exceeded, or ``None`` when no rule applies in this phase.
         """
-        headers: dict[str, str] = {}
         indexed_rules = [
             (index, rule)
             for index, rule in enumerate(endpoint_rate_limits(endpoint))
             if phase == "all" or (phase == "pre_auth" and rule.key_func is None) or (phase == "post_auth" and rule.key_func is not None)
         ]
         if not indexed_rules:
-            return headers
+            return None
 
         # Check all rules atomically using batch method
         stable_id = str(req.scope.get("flasgo.route_id", req.scope.get("route_template", req.path)))
@@ -1900,12 +1902,7 @@ class Flasgo(RouteDecorators):
                 return build_rate_limit_response(decision)
             allowed_decisions.append(decision)
 
-        # Choose the most restrictive allowed decision (smallest remaining tokens)
-        if allowed_decisions:
-            canonical_decision = min(allowed_decisions, key=lambda d: (d.remaining, d.reset_after))
-            headers.update(rate_limit_success_headers(canonical_decision))
-
-        return headers
+        return _most_restrictive(allowed_decisions)
 
     async def _run_after_middleware(self, req: Request, response: Response) -> Response:
         """
@@ -2441,6 +2438,13 @@ def _security_rate_limit_response() -> Response:
         "Too many failed security checks from this client. Wait a moment before retrying.",
         status_code=429,
     )
+
+
+def _most_restrictive(decisions: Sequence[RateLimitDecision]) -> RateLimitDecision | None:
+    """Pick the allowing decision with the fewest remaining requests (then the longest wait) for response headers."""
+    if not decisions:
+        return None
+    return min(decisions, key=lambda decision: (decision.remaining, -decision.reset_after))
 
 
 def _websocket_rate_limit_headers(response: Response) -> dict[str, str]:
