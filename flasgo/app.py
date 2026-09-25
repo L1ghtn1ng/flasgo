@@ -1021,6 +1021,7 @@ class Flasgo(RouteDecorators):
         """
         if not isinstance(public, bool):
             raise TypeError("public must be a bool.")
+        self._reject_duplicate_route_name(name)
         route = WebSocketRoute(path, endpoint, name=name, public=public, websocket_parameter=_websocket_parameter(endpoint))
         if any(
             existing.contract_shape == route.contract_shape
@@ -1171,6 +1172,7 @@ class Flasgo(RouteDecorators):
             reserved_paths.update((self.settings.DOCS_PATH, self.settings.OPENAPI_PATH))
         if path in reserved_paths:
             raise ValueError(f"Route {path!r} conflicts with an enabled internal endpoint.")
+        self._reject_duplicate_route_name(name)
         normalized_methods: set[str] = set()
         for method in route_methods(methods):
             if not isinstance(method, str) or not _HTTP_METHOD_RE.fullmatch(method):
@@ -1236,16 +1238,18 @@ class Flasgo(RouteDecorators):
         auth = dict(self._route_auth)
         had_cors = self._has_cors_routes
         try:
+            # add_route rejects duplicate names and conflicting routes, so a failure part-way through is rolled back.
             blueprint._register(self)
-            names = [route.name for route in self._routes if route.name]
-            keys = [(route.raw_path, method) for route in self._routes for method in route.methods]
-            if len(names) != len(set(names)) or len(keys) != len(set(keys)):
-                raise ValueError("Blueprint registration creates duplicate route names or HTTP routes.")
         except Exception:
             self._routes = routes
             self._route_auth = auth
             self._has_cors_routes = had_cors
             raise
+
+    def _reject_duplicate_route_name(self, name: str | None) -> None:
+        """Explicit route names identify one route for ``url_for``, so they must be unique across HTTP and WebSocket routes."""
+        if name is not None and any(route.name == name for route in (*self._routes, *self._websocket_routes)):
+            raise ValueError(f"Route name {name!r} is a duplicate; route names must be unique across HTTP and WebSocket routes.")
 
     def url_for(self, endpoint: str, **values: Any) -> str:
         """

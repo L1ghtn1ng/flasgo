@@ -54,6 +54,8 @@
 - A lifespan handler that yields more than once now has its cleanup run immediately at shutdown instead of at garbage
   collection, and a startup failure after the handler started no longer leaves the app reporting that its lifespan is
   already active.
+- Duplicate explicit route names are rejected when the route is added (HTTP and WebSocket alike). Previously they were
+  accepted and then caused the next, unrelated blueprint registration to fail.
 
 ## [0.9.1] - 2026-09-06
 

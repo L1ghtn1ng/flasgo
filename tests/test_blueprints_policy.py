@@ -157,3 +157,19 @@ def test_single_string_methods_are_rejected(target: str) -> None:
         @owner.route("/submit", methods="POST")
         def submit() -> str:
             return "ok"
+
+
+def test_duplicate_route_names_are_rejected_at_registration() -> None:
+    """Duplicates used to register fine and then break the next, unrelated blueprint registration."""
+    app = Flasgo()
+    app.add_route("/a", lambda: "a", name="dup")
+
+    with pytest.raises(ValueError, match="'dup' is a duplicate"):
+        app.add_route("/b", lambda: "b", name="dup")
+    with pytest.raises(ValueError, match="'dup' is a duplicate"):
+        app.add_websocket_route("/ws", lambda websocket: None, name="dup")
+
+    unrelated = Blueprint("other", url_prefix="/other")
+    unrelated.add_route("/c", lambda: "c", name="c")
+    app.register_blueprint(unrelated)
+    assert app.url_for("other.c") == "/other/c"
