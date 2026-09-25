@@ -471,3 +471,25 @@ def test_test_client_surfaces_lifespan_crashes_immediately() -> None:
     with pytest.raises(ValueError, match="lifespan exploded"), TestClient(cast(Any, broken_app)):
         pass
     assert time.monotonic() - started < 2
+
+
+def test_websocket_query_params_enforce_max_form_fields() -> None:
+    app = Flasgo(settings={"MAX_FORM_FIELDS": 2})
+    outcomes: list[str] = []
+
+    @app.websocket("/q", public=True)
+    async def query(websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            params = websocket.query_params
+        except Exception as exc:
+            outcomes.append(type(exc).__name__)
+            raise
+        await websocket.send_text(",".join(sorted(params)))
+
+    with app.test_client() as client:
+        with client.websocket_connect("/q?a=1&b=2") as websocket:
+            assert websocket.receive_text() == "a,b"
+        with client.websocket_connect("/q?a=1&b=2&c=3") as websocket, pytest.raises(WebSocketDisconnect):
+            websocket.receive_text()
+    assert outcomes == ["_RequestRejection"]

@@ -7,9 +7,8 @@ from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs
 
-from .request import _reject_json_constant
+from .request import _reject_json_constant, parse_query_params
 from .response import _validate_set_cookie
 from .types import Message, Receive, Scope, Send
 
@@ -84,8 +83,8 @@ class WebSocket:
 
     @property
     def query_params(self) -> Mapping[str, list[str]]:
-        raw = bytes(self.scope.get("query_string", b"")).decode("latin-1")
-        return parse_qs(raw, keep_blank_values=True)
+        """Decode query parameters with the same ``MAX_FORM_FIELDS`` limit as HTTP requests."""
+        return parse_query_params(self.scope)
 
     @property
     def client_ip(self) -> str | None:

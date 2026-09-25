@@ -707,6 +707,7 @@ class Flasgo(RouteDecorators):
         limiting, endpoint execution, and cleanup.
         """
         started = time.perf_counter()
+        scope["max_form_fields"] = self.security.max_form_fields
         websocket = WebSocket(
             scope,
             receive,

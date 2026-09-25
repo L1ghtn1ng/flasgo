@@ -30,6 +30,16 @@ def _scope_positive_int(scope: Scope, key: str, default: int) -> int:
     return default
 
 
+def parse_query_params(scope: Scope) -> dict[str, list[str]]:
+    """Decode an HTTP or WebSocket scope's query string, enforcing the ``MAX_FORM_FIELDS`` limit."""
+    max_fields = _scope_positive_int(scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
+    raw = bytes(scope.get("query_string", b"")).decode("latin-1")
+    try:
+        return parse_qs(raw, keep_blank_values=True, max_num_fields=max_fields)
+    except ValueError as exc:
+        raise _RequestRejection(413, "Query string exceeds MAX_FORM_FIELDS.", "form_limit") from exc
+
+
 def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"Invalid JSON constant: {value!r}")
 
@@ -281,11 +291,7 @@ class Request:
     @property
     def query_params(self) -> Mapping[str, list[str]]:
         """Decode query parameters while enforcing the configured field-count limit."""
-        max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
-        try:
-            return parse_qs(self.query_string, keep_blank_values=True, max_num_fields=max_fields)
-        except ValueError as exc:
-            raise _RequestRejection(413, "Query string exceeds MAX_FORM_FIELDS.", "form_limit") from exc
+        return parse_query_params(self.scope)
 
     @property
     def content_type(self) -> str:

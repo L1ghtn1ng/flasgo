@@ -114,6 +114,7 @@
   startup. In particular `"*"` previously matched nothing and returned 400 for every request; policy check FG002 no
   longer describes it as unrestricted. `Settings.get()` returns only settings fields, not methods, and cookie
   `Expires` / static `Last-Modified` dates no longer depend on the process locale.
+- `WebSocket.query_params` now enforces `MAX_FORM_FIELDS` like HTTP requests do.
 
 ## [0.9.1] - 2026-09-06
 
