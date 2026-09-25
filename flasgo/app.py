@@ -1379,9 +1379,16 @@ class Flasgo(RouteDecorators):
         return self.templates
 
     def render_template(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
+        return self._configured_templates().render(template_name, context)
+
+    async def render_template_async(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
+        """Render with templates configured via ``configure_templates(..., enable_async=True)``."""
+        return await self._configured_templates().render_async(template_name, context)
+
+    def _configured_templates(self) -> JinjaTemplates:
         if self.templates is None:
             raise RuntimeError("Templates are not configured. Call app.configure_templates(...) or pass templates=... first.")
-        return self.templates.render(template_name, context)
+        return self.templates
 
     def configure_static(
         self,

@@ -143,8 +143,18 @@ class JinjaTemplates:
         return self.environment.get_template(template_name)
 
     def render(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
+        if self.environment.is_async:
+            # Jinja would call asyncio.run() here, which fails inside the server's running event loop.
+            raise RuntimeError("Templates were configured with enable_async=True; use `await render_async(...)` instead.")
         template = self.get_template(template_name)
         return template.render({} if context is None else dict(context))
+
+    async def render_async(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
+        """Render a template configured with ``enable_async=True`` without blocking the event loop."""
+        if not self.environment.is_async:
+            raise RuntimeError("render_async requires templates configured with enable_async=True; use render(...) instead.")
+        template = self.get_template(template_name)
+        return await template.render_async({} if context is None else dict(context))
 
 
 def render_template(

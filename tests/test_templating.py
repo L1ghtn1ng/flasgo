@@ -139,3 +139,23 @@ def test_flasgo_render_template_uses_configured_environment(tmp_path: Path) -> N
 
     assert isinstance(templates, JinjaTemplates)
     assert app.render_template("layout.html", {"user": "alice"}) == "Hello alice"
+
+
+def test_async_templates_render_from_async_handlers(tmp_path: Path) -> None:
+    (tmp_path / "greet.html").write_text("Hello {{ name }}", encoding="utf-8")
+    app = Flasgo()
+    app.configure_templates(tmp_path, enable_async=True)
+
+    @app.get("/async")
+    async def async_page() -> str:
+        return await app.render_template_async("greet.html", {"name": "<b>"})
+
+    @app.get("/sync")
+    def sync_page() -> str:
+        return app.render_template("greet.html", {"name": "x"})
+
+    client = app.test_client()
+    assert client.get("/async").text == "Hello &lt;b&gt;"
+    with pytest.raises(RuntimeError, match="enable_async=True"):
+        app.render_template("greet.html", {"name": "x"})
+    assert client.get("/sync").status_code == 500

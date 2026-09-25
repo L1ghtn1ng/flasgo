@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `JinjaTemplates.render_async()` and `Flasgo.render_template_async()` for templates configured with
+  `enable_async=True`, which previously failed with a 500 on every render. The synchronous helpers now raise a clear
+  `RuntimeError` for async environments.
+
 ### Changed
 
 - `after_request` hooks now also run for 404 and 405 responses and for authentication and authorization denials,

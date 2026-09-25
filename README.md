@@ -554,7 +554,7 @@ handing off.
   `Flasgo.delete`, `Flasgo.websocket`, `Flasgo.lifespan`, `Flasgo.state`, `Flasgo.before_request`,
   `Flasgo.after_request`, `Flasgo.errorhandler`
 - App integrations: `Flasgo.register_auth_backend`, `Flasgo.authorize`, `Flasgo.ratelimit`,
-  `Flasgo.configure_templates`, `Flasgo.render_template`, `Flasgo.configure_static`, `Flasgo.test_client`,
+  `Flasgo.configure_templates`, `Flasgo.render_template`, `Flasgo.render_template_async`, `Flasgo.configure_static`, `Flasgo.test_client`,
   `Flasgo.resolve_outbound_url`, `Flasgo.aresolve_outbound_url`, `Flasgo.openapi_spec`
 - Parameter and validation helpers: `Body`, `Query`, `Header`, `Cookie`, `Form`, `Depends`, `ValidationIssue`,
   `RequestValidationError`, `FormValidationError`
@@ -656,6 +656,9 @@ If you only need the rendered string, use the app helper:
 ```python
 html = app.render_template("home.html", {"title": "Welcome"})
 ```
+
+Templates configured with `enable_async=True` must be rendered from an async handler with
+`await app.render_template_async(...)`; the synchronous helpers raise a clear error instead of blocking the event loop.
 
 ## Forms
 
