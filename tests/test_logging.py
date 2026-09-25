@@ -51,10 +51,10 @@ def test_json_formatter_includes_tracebacks_and_event_fields() -> None:
     assert second["status"] == 200
 
 
-@pytest.mark.parametrize("level", ["info", " Debug ", "WARNING"])
-def test_log_level_names_are_case_insensitive(level: str) -> None:
+@pytest.mark.parametrize(("level", "expected"), [("info", logging.INFO), (" Debug ", logging.DEBUG), ("WARNING", logging.WARNING)])
+def test_log_level_names_are_case_insensitive(level: str, expected: int) -> None:
     logger = configure_logging(level=level, stream=io.StringIO())
-    assert logger.level == logging.getLevelName(level.strip().upper())
+    assert logger.level == expected
 
 
 def test_reconfiguring_logging_rebinds_the_stream() -> None:
