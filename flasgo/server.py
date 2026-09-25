@@ -4,6 +4,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -113,18 +114,44 @@ async def arun_with_reload(
 
 
 async def _start_reload_child_async(command: str) -> subprocess.Popen[bytes]:
-    """Start a child in a worker thread without losing it if cancellation arrives mid-start.
+    """Start a child in a worker thread without ever losing it to cancellation.
 
     Cancelling ``await asyncio.to_thread(...)`` does not stop the thread, which would still spawn a child that no
-    caller holds a reference to. Shield the start, and on cancellation wait for it and stop what it spawned.
+    caller holds. The cancellation path is synchronous on purpose: any ``await`` there could itself be interrupted
+    by a second cancellation (for example a second SIGTERM) before the child is stopped.
     """
-    start = asyncio.ensure_future(asyncio.to_thread(_start_reload_child, command))
+    handoff = _ChildHandoff()
     try:
-        return await asyncio.shield(start)
+        return await asyncio.to_thread(handoff.start, command)
     except asyncio.CancelledError:
-        with suppress(Exception):
-            await asyncio.to_thread(_stop_reload_child, await start)
+        handoff.abandon()
         raise
+
+
+class _ChildHandoff:
+    """Hands a child spawned in a worker thread to the event loop, or stops it if the loop stopped waiting."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._process: subprocess.Popen[bytes] | None = None
+
+    def start(self, command: str) -> subprocess.Popen[bytes]:
+        process = _start_reload_child(command)
+        with self._lock:
+            self._process = process
+            abandoned = self._abandoned
+        if abandoned:
+            _stop_reload_child(process)
+        return process
+
+    def abandon(self) -> None:
+        """Called on cancellation: stop the child now if it exists, otherwise the worker stops it once spawned."""
+        with self._lock:
+            self._abandoned = True
+            process = self._process
+        if process is not None:
+            _stop_reload_child(process)
 
 
 def _start_reload_child(command: str) -> subprocess.Popen[bytes]:

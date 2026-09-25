@@ -114,8 +114,11 @@ def test_cancelling_the_reloader_stops_the_server_child(monkeypatch: pytest.Monk
     assert started[0].poll() is not None
 
 
-def test_cancelling_the_reloader_while_a_child_is_starting_stops_that_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Cancellation during the worker-thread spawn must not leave the freshly started child running."""
+@pytest.mark.parametrize("cancellations", [1, 2])
+def test_cancelling_the_reloader_while_a_child_is_starting_stops_that_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cancellations: int
+) -> None:
+    """Cancellation during the worker-thread spawn, even repeated (two SIGTERMs), must not orphan the child."""
     started: list[subprocess.Popen[bytes]] = []
     spawning = threading.Event()
     release = threading.Event()
@@ -140,13 +143,14 @@ def test_cancelling_the_reloader_while_a_child_is_starting_stops_that_child(monk
     async def run() -> None:
         task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
         assert await asyncio.to_thread(spawning.wait, 10)
-        task.cancel()
-        await asyncio.sleep(0)
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0)
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    asyncio.run(run())
+    asyncio.run(run())  # also waits for the worker thread, which stops a child it spawned after cancellation
     assert len(started) == 1
     assert started[0].poll() is not None
 
