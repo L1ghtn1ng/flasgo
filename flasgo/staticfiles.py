@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from stat import S_ISREG
 from typing import BinaryIO, cast
 
 from .exceptions import HTTPException
@@ -128,43 +129,43 @@ def resolve_static_directory(directory: str | Path, *, url_path: str, cache_max_
     return StaticDirectory(root=root, url_path=url_path, cache_max_age=cache_max_age)
 
 
-def build_static_response(
+# Encodings browsers transparently decode; anything else is an archive the user downloads as-is.
+_TRANSPARENT_ENCODINGS = frozenset({"gzip", "br"})
+_ARCHIVE_CONTENT_TYPES = {
+    "gzip": "application/gzip",
+    "bzip2": "application/x-bzip2",
+    "xz": "application/x-xz",
+    "compress": "application/x-compress",
+}
+
+
+async def build_static_response(
     directory: StaticDirectory,
     filename: str,
     *,
     request: Request,
 ) -> Response:
-    normalized = _normalize_static_path(filename)
-    candidate = directory.root.joinpath(*normalized.parts)
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(directory.root)
-    except (FileNotFoundError, OSError, ValueError) as exc:
-        raise HTTPException(404, "Not Found") from exc
-
-    if not resolved.is_file():
-        raise HTTPException(404, "Not Found")
-
-    stat = resolved.stat()
+    """Serve one file from ``directory``, resolving and stat-ing it off the event loop."""
+    relative = _normalize_static_path(filename)
+    resolved, stat = await asyncio.to_thread(_locate_static_file, directory, relative)
     etag = _etag(stat)
-    if request.headers.get("if-none-match") == etag:
+    last_modified = _http_date(stat.st_mtime)
+    cache_control = f"public, max-age={directory.cache_max_age}"
+    if _etag_matches(request.headers.get("if-none-match"), etag):
         return Response(
             body=b"",
             status_code=304,
-            headers={
-                "etag": etag,
-                "last-modified": _http_date(stat.st_mtime),
-                "cache-control": f"public, max-age={directory.cache_max_age}",
-            },
+            headers={"etag": etag, "last-modified": last_modified, "cache-control": cache_control},
             allow_public_cache=True,
         )
 
-    content_type, encoding = mimetypes.guess_type(str(resolved))
-    headers = {
-        "cache-control": f"public, max-age={directory.cache_max_age}",
-        "etag": etag,
-        "last-modified": _http_date(stat.st_mtime),
-    }
+    # Guess from the requested name: a symlink target such as ``app.js.3f2a`` has no useful suffix.
+    content_type, encoding = mimetypes.guess_file_type(relative.name)
+    if encoding is not None and (encoding not in _TRANSPARENT_ENCODINGS or content_type in {None, "application/x-tar"}):
+        # e.g. ``.tar.gz`` or ``.xz``: sending Content-Encoding would make browsers decode (or fail to decode) the
+        # download, so serve the archive itself.
+        content_type, encoding = _ARCHIVE_CONTENT_TYPES.get(encoding, "application/octet-stream"), None
+    headers = {"cache-control": cache_control, "etag": etag, "last-modified": last_modified}
     if encoding:
         headers["content-encoding"] = encoding
     return StaticFileResponse(
@@ -173,3 +174,26 @@ def build_static_response(
         headers=headers,
         content_type=content_type or "application/octet-stream",
     )
+
+
+def _locate_static_file(directory: StaticDirectory, relative: PurePosixPath) -> tuple[Path, os.stat_result]:
+    """Resolve a contained regular file. Blocking; run it in a worker thread."""
+    try:
+        resolved = directory.root.joinpath(*relative.parts).resolve(strict=True)
+        resolved.relative_to(directory.root)
+        stat = resolved.stat()
+    except OSError, ValueError:
+        raise HTTPException(404, "Not Found") from None
+    if not S_ISREG(stat.st_mode):
+        raise HTTPException(404, "Not Found")
+    return resolved, stat
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """Apply RFC 9110 weak comparison to an ``If-None-Match`` list, including ``*``."""
+    if if_none_match is None:
+        return False
+    if if_none_match.strip() == "*":
+        return True
+    target = etag.removeprefix("W/")
+    return any(candidate.strip().removeprefix("W/") == target for candidate in if_none_match.split(","))

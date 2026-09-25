@@ -1955,8 +1955,8 @@ class Flasgo(RouteDecorators):
         return await _maybe_await(value)
 
     def _build_static_endpoint(self, directory: StaticDirectory) -> Endpoint:
-        def endpoint(*, request: Request, filename: str) -> Response:
-            return build_static_response(directory, filename, request=request)
+        async def endpoint(*, request: Request, filename: str) -> Response:
+            return await build_static_response(directory, filename, request=request)
 
         return endpoint
 

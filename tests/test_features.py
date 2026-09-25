@@ -351,3 +351,54 @@ def test_request_cookies_read_every_cookie_header_first_value_wins() -> None:
 
     response = app.test_client().get("/cookies", headers=[("cookie", "a=1; b=2"), ("cookie", "a=3; c=4")])
     assert response.json() == {"a": "1", "b": "2", "c": "4"}
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type", "content_encoding"),
+    [
+        ("data.tar.gz", "application/gzip", None),
+        ("data.tar.bz2", "application/x-bzip2", None),
+        ("data.xz", "application/x-xz", None),
+        ("logo.svgz", "image/svg+xml", "gzip"),
+        ("site.css.gz", "text/css", "gzip"),
+    ],
+)
+def test_static_archives_are_not_served_with_content_encoding(
+    tmp_path: Path, name: str, content_type: str, content_encoding: str | None
+) -> None:
+    """Only transparently decoded encodings may be sent as Content-Encoding; archives are downloads."""
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / name).write_bytes(b"payload")
+    app = Flasgo(static_folder=static_dir)
+
+    response = app.test_client().get(f"/static/{name}")
+    assert response.headers["content-type"] == content_type
+    assert response.headers.get("content-encoding") == content_encoding
+
+
+def test_static_content_type_comes_from_the_requested_name(tmp_path: Path) -> None:
+    static_dir = tmp_path / "static"
+    (static_dir / "build").mkdir(parents=True)
+    (static_dir / "build" / "app.js.3f2a").write_text("console.log(1)")
+    (static_dir / "app.js").symlink_to(static_dir / "build" / "app.js.3f2a")
+    app = Flasgo(static_folder=static_dir)
+
+    assert app.test_client().get("/static/app.js").headers["content-type"] == "text/javascript"
+
+
+def test_static_if_none_match_uses_weak_comparison_lists_and_wildcard(tmp_path: Path) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "site.css").write_text("body{}", encoding="utf-8")
+    client = Flasgo(static_folder=static_dir).test_client()
+    etag = client.get("/static/site.css").headers["etag"]
+
+    for if_none_match in (etag, f"W/{etag}", f'"stale", {etag}', "*"):
+        not_modified = client.get("/static/site.css", headers={"if-none-match": if_none_match})
+        assert not_modified.status_code == 304
+        assert not_modified.body == b""
+        assert "content-type" not in not_modified.headers
+        assert "content-length" not in not_modified.headers
+        assert not_modified.headers["etag"] == etag
+    assert client.get("/static/site.css", headers={"if-none-match": '"stale"'}).status_code == 200

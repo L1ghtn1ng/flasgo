@@ -66,6 +66,10 @@
 - 1xx, 204 and 304 responses no longer send `content-length` or `content-type` (RFC 9110), and constructing one with a
   body raises `ValueError`. `Response.content_type` is now backed by the header, so assigning it after construction
   changes what is sent. Tuple responses such as `("body", 999)` are validated like any other response.
+- Static files: `If-None-Match` uses RFC 9110 weak comparison and accepts lists and `*`; archives such as `.tar.gz`,
+  `.tar.bz2` and `.xz` are served as downloads with their archive type instead of a `Content-Encoding` browsers cannot
+  decode; the content type comes from the requested name rather than a symlink target; and path resolution and
+  `stat()` run off the event loop.
 
 ## [0.9.1] - 2026-09-06
 
