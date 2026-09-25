@@ -25,20 +25,13 @@ type RequestHeaders = Mapping[str, str] | Sequence[tuple[str, str]]
 
 
 def _flatten_data(data: RequestData) -> list[tuple[str, str]]:
+    items = data.items() if isinstance(data, Mapping) else data
     pairs: list[tuple[str, str]] = []
-    if isinstance(data, Mapping):
-        for key, value in data.items():
-            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-                pairs.extend((str(key), str(item)) for item in value)
-                continue
-            pairs.append((str(key), str(value)))
-        return pairs
-
-    for key, value in data:
+    for key, value in items:
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
             pairs.extend((str(key), str(item)) for item in value)
-            continue
-        pairs.append((str(key), str(value)))
+        else:
+            pairs.append((str(key), str(value)))
     return pairs
 
 
@@ -754,7 +747,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         origin: str | None = "http://localhost",
         subprotocols: Sequence[str] = (),
         scheme: str = "ws",
@@ -775,7 +768,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         origin: str | None = "http://localhost",
         subprotocols: Sequence[str] = (),
         scheme: str = "ws",
@@ -811,7 +804,7 @@ class _WebSocketTransport:
         client: TestClient,
         path: str,
         *,
-        headers: dict[str, str] | None,
+        headers: RequestHeaders | None,
         origin: str | None,
         subprotocols: Sequence[str],
         scheme: str,
@@ -832,7 +825,8 @@ class _WebSocketTransport:
     async def start(self) -> None:
         normalized_headers = {"host": "localhost"}
         if self.headers:
-            normalized_headers.update({key.lower(): value for key, value in self.headers.items()})
+            items = cast(Mapping[str, str], self.headers).items() if isinstance(self.headers, Mapping) else self.headers
+            normalized_headers.update({key.lower(): value for key, value in items})
         if self.origin is not None:
             normalized_headers["origin"] = self.origin
         cookie_header = _merge_cookie_headers(normalized_headers.get("cookie"), self.client._cookies)
@@ -896,7 +890,7 @@ class _WebSocketTransport:
         await self._put({"type": "websocket.receive", "bytes": value})
 
     async def send_json(self, value: object) -> None:
-        await self.send_text(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
+        await self.send_text(_json_dumps(value))
 
     async def receive_text(self) -> str:
         message = await self._next_output()
@@ -1053,7 +1047,7 @@ def _encode_request_body(
         raise ValueError("Use only one of body, json, or data/files per request.")
 
     if json is not None:
-        return json_module_dumps(json).encode("utf-8"), "application/json"
+        return _json_dumps(json).encode("utf-8"), "application/json"
     if files is not None:
         return _encode_multipart(data, files)
     if data is not None:
@@ -1063,5 +1057,5 @@ def _encode_request_body(
     return b"", None
 
 
-def json_module_dumps(value: object) -> str:
+def _json_dumps(value: object) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)

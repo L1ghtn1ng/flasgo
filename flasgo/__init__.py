@@ -45,11 +45,13 @@ from .testing import (
     TestResponse,
     WebSocketHandshakeError,
 )
+from .testing_stream import AsyncTestStream
 from .validation import FormValidationError, RequestValidationError, ValidationIssue
 from .websockets import WebSocket, WebSocketDisconnect, WebSocketException
 
 __all__ = [
     "AllowAny",
+    "AsyncTestStream",
     "AsyncWebSocketSession",
     "AuthResult",
     "BackgroundTasks",
