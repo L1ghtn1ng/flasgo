@@ -402,3 +402,67 @@ def test_static_if_none_match_uses_weak_comparison_lists_and_wildcard(tmp_path: 
         assert "content-length" not in not_modified.headers
         assert not_modified.headers["etag"] == etag
     assert client.get("/static/site.css", headers={"if-none-match": '"stale"'}).status_code == 200
+
+
+def test_test_client_decodes_paths_and_encodes_non_ascii_queries_like_a_server() -> None:
+    app = Flasgo()
+
+    @app.get("/files/<name>")
+    def file(name: str, request: Request) -> dict[str, str]:
+        return {"name": name, "raw": request.scope["raw_path"].decode("ascii"), "q": request.query_params["q"][0]}
+
+    response = app.test_client().get("/files/a%20b?q=日本")
+    assert response.json() == {"name": "a b", "raw": "/files/a%20b", "q": "日本"}
+    assert cast(dict[str, str], app.test_client().get("/files/café?q=x").json())["name"] == "café"
+
+
+def test_test_client_redirects_respect_scheme_and_stay_on_the_app_origin() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.get("/secure-only")
+    def secure_only(request: Request) -> Response:
+        if request.scheme != "https":
+            return redirect("https://localhost/secure-only")
+        return Response.text("secure")
+
+    @app.get("/away")
+    def away() -> Response:
+        return redirect("https://evil.example/landing")
+
+    @app.post("/submit")
+    def submit() -> Response:
+        return redirect("/done", status_code=303)
+
+    @app.get("/done")
+    def done(request: Request) -> dict[str, str | None]:
+        return {"content_type": request.headers.get("content-type")}
+
+    client = app.test_client()
+    assert client.get("/secure-only", follow_redirects=True).text == "secure"
+    external = client.get("/away", follow_redirects=True)
+    assert external.status_code == 302
+    assert external.location == "https://evil.example/landing"
+    after_post = client.post("/submit", json={"a": 1}, headers={"content-type": "application/json"}, follow_redirects=True)
+    assert after_post.json() == {"content_type": None}
+
+
+def test_test_client_cookie_jar_honours_expiry() -> None:
+    app = Flasgo()
+
+    @app.get("/set")
+    def set_cookie() -> Response:
+        response = Response.text("set")
+        response.set_cookie("theme", "dark")
+        return response
+
+    @app.get("/expire")
+    def expire() -> Response:
+        response = Response.text("expired")
+        response.set_cookie("theme", "dark", max_age=0)
+        return response
+
+    client = app.test_client()
+    client.get("/set")
+    assert client.cookies["theme"] == "dark"
+    client.get("/expire")
+    assert "theme" not in client.cookies

@@ -90,6 +90,12 @@
   `[A-Za-z0-9_]` (the static route produced `static:/static_get`), and docstring descriptions keep paragraph breaks
   and indentation. Tuple route response models are rejected at registration because a returned tuple is read as
   `(body, status)`.
+- The test client behaves more like a real server and browser: `scope["path"]` is percent-decoded and non-ASCII paths
+  and query strings are percent-encoded instead of raising `UnicodeEncodeError`; followed redirects honour the scheme
+  of an absolute `Location`, stop at other origins instead of replaying them against the app, and drop body headers
+  when switching to GET; cookies set with `Max-Age=0` or a past `Expires` are removed from the jar; closing a
+  WebSocket session after a server-side close still waits for the handler to finish; and repeated response headers are
+  decoded consistently for HTTP, streaming and WebSocket responses.
 
 ## [0.9.1] - 2026-09-06
 

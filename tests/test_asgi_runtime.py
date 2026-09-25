@@ -439,3 +439,20 @@ def test_lifespan_can_start_again_after_a_failed_startup() -> None:
         assert await _drive_lifespan(app, "startup", "shutdown") == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
 
     asyncio.run(run())
+
+
+def test_websocket_client_waits_for_the_app_after_a_server_close() -> None:
+    """After the server closes, leaving the session must still run the handler to completion."""
+    app = Flasgo()
+    events: list[str] = []
+
+    @app.websocket("/bye", public=True)
+    async def bye(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close(1000)
+        await asyncio.sleep(0.01)
+        events.append("handler-finished")
+
+    with app.test_client() as client, client.websocket_connect("/bye") as websocket, pytest.raises(WebSocketDisconnect):
+        websocket.receive_text()
+    assert events == ["handler-finished"]

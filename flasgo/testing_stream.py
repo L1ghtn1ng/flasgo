@@ -31,7 +31,7 @@ class AsyncTestStream:
         if message["type"] == "http.response.start":
             self.status_code = message["status"]
             for key, value in message.get("headers", []):
-                name, text = key.decode("latin-1"), value.decode("latin-1")
+                name, text = key.decode("latin-1").lower(), value.decode("latin-1")
                 self.headers[name] = self.headers[name] + "\n" + text if name in self.headers else text
             self.started.set()
         elif message["type"] == "http.response.body":

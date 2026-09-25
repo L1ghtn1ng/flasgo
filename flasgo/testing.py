@@ -8,9 +8,11 @@ from collections.abc import Coroutine, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from http.cookies import SimpleCookie
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from http.cookies import Morsel, SimpleCookie
 from typing import Any, cast
-from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.parse import quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 from .testing_stream import AsyncTestStream
@@ -39,6 +41,56 @@ def _flatten_data(data: RequestData) -> list[tuple[str, str]]:
             continue
         pairs.append((str(key), str(value)))
     return pairs
+
+
+_PATH_SAFE = "/%:@!$&'()*+,;=-._~"
+_QUERY_SAFE = "=&%+:/?@!$'()*,;-._~"
+
+
+def _target_scope(target: str) -> dict[str, Any]:
+    """Build ASGI path fields the way a real server does.
+
+    ``path`` is percent-decoded while ``raw_path`` and ``query_string`` stay encoded as ASCII, so non-ASCII
+    text in a test URL is percent-encoded instead of failing a latin-1 encode.
+    """
+    parsed = urlsplit(target)
+    raw_path = quote(parsed.path or "/", safe=_PATH_SAFE)
+    return {
+        "path": unquote(raw_path),
+        "raw_path": raw_path.encode("ascii"),
+        "query_string": quote(parsed.query, safe=_QUERY_SAFE).encode("ascii"),
+    }
+
+
+def _header_value(headers: RequestHeaders | None, name: str) -> str | None:
+    if headers is None:
+        return None
+    items = cast(Mapping[str, str], headers).items() if isinstance(headers, Mapping) else headers
+    return next((value for key, value in items if key.lower() == name), None)
+
+
+def _without_headers(headers: RequestHeaders | None, names: set[str]) -> list[tuple[str, str]] | None:
+    if headers is None:
+        return None
+    items = cast(Mapping[str, str], headers).items() if isinstance(headers, Mapping) else headers
+    return [(key, value) for key, value in items if key.lower() not in names]
+
+
+def _cookie_expired(morsel: Morsel[str]) -> bool:
+    """Treat ``Max-Age<=0`` or a past ``Expires`` as deletion, as browsers do (Secure is not enforced on localhost)."""
+    max_age = morsel["max-age"]
+    if max_age:
+        try:
+            return int(max_age) <= 0
+        except ValueError:
+            return False
+    expires = morsel["expires"]
+    if expires:
+        try:
+            return parsedate_to_datetime(expires) <= datetime.now(UTC)
+        except TypeError, ValueError:
+            return False
+    return False
 
 
 def _merge_cookie_headers(cookie_header: str | None, jar: dict[str, str]) -> str | None:
@@ -489,27 +541,36 @@ class TestClient:
         current_json = json
         current_data = data
         current_files = files
-        current_path = path
+        current_headers = headers
+        host = (_header_value(headers, "host") or "localhost").lower()
+        current_url = f"{scheme}://{host}{path}"
 
         for _ in range(10):
             location = current_response.location
             if current_response.status_code not in {301, 302, 303, 307, 308} or location is None:
                 current_response.history = history
                 return current_response
+            current_url = urljoin(current_url, location)
+            target = urlsplit(current_url)
+            if target.netloc.lower() != host:
+                # A redirect to another origin leaves the application under test; do not replay it locally.
+                current_response.history = history
+                return current_response
 
             history.append(current_response)
-            current_path = urljoin(current_path, location)
+            scheme = target.scheme or scheme
             if current_response.status_code in {301, 302, 303} and current_method not in {"GET", "HEAD"}:
                 current_method = "GET"
                 current_body = None
                 current_json = None
                 current_data = None
                 current_files = None
+                current_headers = _without_headers(current_headers, {"content-type", "content-length"})
 
             current_response = await self._send(
                 current_method,
-                current_path,
-                headers=headers,
+                urlunsplit(("", "", target.path or "/", target.query, "")),
+                headers=current_headers,
                 body=current_body,
                 json=current_json,
                 data=current_data,
@@ -601,7 +662,6 @@ class TestClient:
         """
         payload, content_type = _encode_request_body(body=body, json=json, data=data, files=files)
 
-        parsed = urlsplit(path)
         if headers is None:
             header_items: list[tuple[str, str]] = []
         elif isinstance(headers, Mapping):
@@ -631,9 +691,7 @@ class TestClient:
             "http_version": "1.1",
             "method": method.upper(),
             "scheme": scheme.lower(),
-            "path": parsed.path or "/",
-            "raw_path": (parsed.path or "/").encode("latin-1"),
-            "query_string": parsed.query.encode("latin-1"),
+            **_target_scope(path),
             "headers": raw_headers,
             "client": ("127.0.0.1", 50000),
             "server": ("localhost", 80),
@@ -678,14 +736,7 @@ class TestClient:
         if start_message is None:
             raise RuntimeError("No response start message from application")
 
-        decoded_headers: dict[str, str] = {}
-        for key_raw, value_raw in start_message.get("headers", []):
-            key = key_raw.decode("latin-1").lower()
-            value = value_raw.decode("latin-1")
-            if key in decoded_headers:
-                decoded_headers[key] = f"{decoded_headers[key]}\n{value}"
-            else:
-                decoded_headers[key] = value
+        decoded_headers = _decode_raw_headers(start_message.get("headers", []))
 
         self._update_cookies(decoded_headers.get("set-cookie"))
         return TestResponse(
@@ -743,7 +794,7 @@ class TestClient:
             cookie = SimpleCookie()
             cookie.load(raw_cookie)
             for key, morsel in cookie.items():
-                if morsel.value:
+                if morsel.value and not _cookie_expired(morsel):
                     self._cookies[key] = morsel.value
                 else:
                     self._cookies.pop(key, None)
@@ -774,7 +825,6 @@ class _WebSocketTransport:
         self.closed = False
 
     async def start(self) -> None:
-        parsed = urlsplit(self.path)
         normalized_headers = {"host": "localhost"}
         if self.headers:
             normalized_headers.update({key.lower(): value for key, value in self.headers.items()})
@@ -802,9 +852,7 @@ class _WebSocketTransport:
             "asgi": {"version": "3.0", "spec_version": "2.5"},
             "http_version": "1.1",
             "scheme": self.scheme,
-            "path": parsed.path or "/",
-            "raw_path": (parsed.path or "/").encode("latin-1"),
-            "query_string": parsed.query.encode("latin-1"),
+            **_target_scope(self.path),
             "headers": raw_headers,
             "client": ("127.0.0.1", 50000),
             "server": ("localhost", 80),
@@ -865,8 +913,8 @@ class _WebSocketTransport:
         return json.loads(await self.receive_text())
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        if self.closed:
-            return
+        # Even after the server closed the socket the app task may still be running (or have failed), so always
+        # deliver the disconnect and await it; otherwise its exceptions are lost and the task leaks.
         self.closed = True
         if self._task is not None and not self._task.done():
             await self._put({"type": "websocket.disconnect", "code": code, "reason": reason})
@@ -979,9 +1027,12 @@ class AsyncWebSocketSession:
 
 
 def _decode_raw_headers(raw_headers: Sequence[tuple[bytes, bytes]]) -> dict[str, str]:
+    """Decode response headers with lowercase names, joining repeated values (such as Set-Cookie) with newlines."""
     decoded: dict[str, str] = {}
     for key_raw, value_raw in raw_headers:
-        decoded[key_raw.decode("latin-1").lower()] = value_raw.decode("latin-1")
+        key = key_raw.decode("latin-1").lower()
+        value = value_raw.decode("latin-1")
+        decoded[key] = f"{decoded[key]}\n{value}" if key in decoded else value
     return decoded
 
 
