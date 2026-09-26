@@ -1,9 +1,13 @@
-from __future__ import annotations
-
 import ipaddress
+import re
 import secrets
+import time
+from annotationlib import Format
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
+from functools import cache
 from typing import get_type_hints
 from urllib.parse import urlsplit
 
@@ -11,12 +15,34 @@ from .request import Request
 from .response import Response
 from .session import hmac_digest
 
-_CSRF_TOKEN_VERSION = "v1"
+_CSRF_TOKEN_VERSION = "v1"  # noqa: S105 - a token format version, not a secret
 _CSRF_SIGNING_SALT = "flasgo.csrf"
 
 
 def _format_http_date(value: datetime) -> str:
-    return value.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    # strftime("%a %b") follows LC_TIME, which would produce invalid Expires values under non-English locales.
+    return format_datetime(value.astimezone(UTC), usegmt=True)
+
+
+_HOST_LABEL = r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
+_HOSTNAME_RE = re.compile(rf"(?=.{{1,253}}$){_HOST_LABEL}(?:\.{_HOST_LABEL})*")
+
+
+def default_security_headers() -> dict[str, str]:
+    """Return the default response security headers.
+
+    Cache headers are deliberately absent: :func:`apply_security_headers` adds them only while
+    ``enforce_no_store_cache`` is enabled, so that setting can actually turn them off.
+    """
+    return {
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "x-xss-protection": "0",
+        "permissions-policy": "camera=(), microphone=(), geolocation=()",
+        "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+        "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
+    }
 
 
 _SAME_SITE_VALUES = {"lax": "Lax", "strict": "Strict", "none": "None"}
@@ -66,8 +92,42 @@ def _validate_cookie_path(path: str) -> None:
         raise ValueError("Invalid cookie path: must be Latin-1 encodable.") from exc
 
 
-def _default_secret_key() -> str:
+def default_secret_key() -> str:
     return secrets.token_urlsafe(48)
+
+
+@cache
+def _bool_fields(cls: type) -> frozenset[str]:
+    try:
+        hints = get_type_hints(cls)
+    except NameError, TypeError:
+        # A TYPE_CHECKING-only annotation on one field must not make the whole class unconstructible.
+        hints = get_type_hints(cls, format=Format.FORWARDREF)
+    return frozenset(name for name, annotation in hints.items() if annotation is bool)
+
+
+class StrictBoolFields:
+    """Dataclass mixin that rejects non-bool values for ``bool`` fields, at construction and on assignment.
+
+    A truthy string such as ``"false"`` must never silently enable or disable a security control. Field types are
+    resolved once per class (including subclasses), so later assignments are checked too.
+    """
+
+    __slots__ = ()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in _bool_fields(type(self)) and not isinstance(value, bool):
+            raise TypeError(f"{name} must be a bool.")
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self) -> None:
+        self._validate_boolean_fields()
+
+    def _validate_boolean_fields(self) -> None:
+        """Validate boolean fields, including after a caller mutates an existing instance."""
+        for name in _bool_fields(type(self)):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a bool.")
 
 
 def _validate_cookie_value(value: str) -> None:
@@ -85,7 +145,7 @@ def validate_cookie_name(name: str) -> None:
 
 
 @dataclass(slots=True)
-class SecurityConfig:
+class SecurityConfig(StrictBoolFields):
     allowed_hosts: set[str] = field(default_factory=lambda: {"127.0.0.1", "localhost"})
     enforce_allowed_hosts: bool = True
 
@@ -117,39 +177,9 @@ class SecurityConfig:
     security_failure_window_seconds: int = 60
     log_security_events: bool = True
 
-    security_headers: dict[str, str] = field(
-        default_factory=lambda: {
-            "x-content-type-options": "nosniff",
-            "x-frame-options": "DENY",
-            "referrer-policy": "strict-origin-when-cross-origin",
-            "x-xss-protection": "0",
-            "permissions-policy": "camera=(), microphone=(), geolocation=()",
-            "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
-            "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
-            "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
-            "pragma": "no-cache",
-            "expires": "0",
-        }
-    )
+    security_headers: dict[str, str] = field(default_factory=default_security_headers)
 
-    secret_key: str = field(default_factory=_default_secret_key)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        """Reject wrong-typed boolean assignments throughout the configuration lifetime."""
-        annotation = type(self).__annotations__.get(name)
-        if annotation in {bool, "bool"} and not isinstance(value, bool):
-            raise TypeError(f"{name} must be a bool.")
-        object.__setattr__(self, name, value)
-
-    def __post_init__(self) -> None:
-        """Reject wrong-typed booleans before they can disable a security control."""
-        self._validate_boolean_fields()
-
-    def _validate_boolean_fields(self) -> None:
-        """Validate boolean fields, including after a caller mutates an existing instance."""
-        for name, annotation in get_type_hints(type(self)).items():
-            if annotation is bool and not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be a bool.")
+    secret_key: str = field(default_factory=default_secret_key)
 
 
 def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
@@ -157,12 +187,13 @@ def host_is_allowed(host: str | None, *, allowed_hosts: set[str]) -> bool:
     if hostname is None:
         return False
     for pattern in allowed_hosts:
-        p = _allowed_host_pattern(pattern)
+        p = allowed_host_pattern(pattern)
         if p is None:
             continue
         if p == hostname:
             return True
-        if p.startswith(".") and hostname.endswith(p):
+        # Suffix patterns only ever apply to DNS names; an IPv6 literal (which contains ":") never matches one.
+        if p.startswith(".") and ":" not in hostname and hostname.endswith(p):
             return True
     return False
 
@@ -171,7 +202,7 @@ def _host_header_hostname(host: str | None) -> str | None:
     if host is None:
         return None
     raw = host.strip().lower()
-    if not raw or any(char in raw for char in ("\x00", "\r", "\n", "/", "\\", "@")):
+    if not raw:
         return None
     if raw.startswith("["):
         end = raw.find("]")
@@ -181,7 +212,7 @@ def _host_header_hostname(host: str | None) -> str | None:
         remainder = raw[end + 1 :]
         if remainder and (not remainder.startswith(":") or not remainder[1:].isdigit()):
             return None
-        return hostname.rstrip(".") or None
+        return _ipv6_literal(hostname)
     if raw.count(":") > 1:
         return None
     if ":" in raw:
@@ -190,21 +221,40 @@ def _host_header_hostname(host: str | None) -> str | None:
             return None
     else:
         hostname = raw
-    return hostname.rstrip(".") or None
+    hostname = hostname.removesuffix(".")
+    # Only DNS names and IPv4 literals are valid here; anything else (``?``, ``#``, spaces, userinfo, paths)
+    # could let a suffix pattern such as ``.example.com`` match a host that actually names another server.
+    if _HOSTNAME_RE.fullmatch(hostname) is None:
+        return None
+    return hostname
 
 
-def _allowed_host_pattern(pattern: str) -> str | None:
-    normalized = _host_header_hostname(pattern)
+def _ipv6_literal(value: str) -> str | None:
+    """Return the compressed form of a plain IPv6 address, rejecting zone IDs.
+
+    ``ipaddress`` accepts almost any text after ``%`` as a zone ID, so ``::1%@evil.com#.example.com`` would
+    otherwise be treated as an IPv6 literal whose text ends in an allowed suffix. Zone IDs are also meaningless
+    in an HTTP Host header (RFC 9110 has no syntax for them).
+    """
+    if "%" in value:
+        return None
+    try:
+        address = ipaddress.IPv6Address(value)
+    except ValueError:
+        return None
+    return None if address.scope_id is not None else str(address)
+
+
+def allowed_host_pattern(pattern: str) -> str | None:
+    """Normalize an ``ALLOWED_HOSTS`` entry, or return ``None`` when it is not a valid host pattern."""
+    raw = pattern.strip().lower()
+    if raw.startswith("."):
+        suffix = raw.removesuffix(".")
+        return suffix if _HOSTNAME_RE.fullmatch(suffix[1:]) is not None else None
+    normalized = _host_header_hostname(raw)
     if normalized is not None:
         return normalized
-    raw = pattern.strip().lower().rstrip(".")
-    try:
-        return str(ipaddress.ip_address(raw))
-    except ValueError:
-        pass
-    if raw.startswith(".") and raw.count(":") == 0:
-        return raw
-    return None
+    return _ipv6_literal(raw)
 
 
 def ensure_csrf_cookie(
@@ -313,26 +363,42 @@ def _csrf_origin_is_valid(request: Request, config: SecurityConfig) -> bool:
 
 
 def _origin_matches_request(origin_value: str, request: Request, config: SecurityConfig) -> bool:
-    parsed = urlsplit(origin_value)
+    try:
+        parsed = urlsplit(origin_value)
+    except ValueError:
+        return False
     if not parsed.scheme or not parsed.netloc:
         return False
-    origin_scheme = parsed.scheme.lower()
-    origin_host = parsed.netloc.lower()
-    request_scheme = request.scheme
-    request_host = (request.headers.get("host") or "").strip().lower()
-    if request_host and origin_host == request_host and origin_scheme == request_scheme:
+    # Referer carries a path, so compare only its scheme and authority.
+    origin = canonical_origin(f"{parsed.scheme}://{parsed.netloc}")
+    if origin is None:
+        return False
+    request_host = (request.headers.get("host") or "").strip()
+    if request_host and origin == canonical_origin(f"{request.scheme}://{request_host}"):
         return True
-    for trusted in config.csrf_trusted_origins:
-        normalized = trusted.strip().lower()
-        if "://" in normalized:
-            if f"{origin_scheme}://{origin_host}" == normalized:
-                return True
-            continue
-        if origin_host == normalized:
-            return True
-        if normalized.startswith(".") and origin_host.split(":", 1)[0].endswith(normalized):
-            return True
-    return False
+    return any(_trusted_origin_matches(trusted, origin, request_scheme=request.scheme) for trusted in config.csrf_trusted_origins)
+
+
+def _trusted_origin_matches(trusted: str, origin: tuple[str, str, int], *, request_scheme: str) -> bool:
+    """Match one ``CSRF_TRUSTED_ORIGINS`` entry against a canonical request origin.
+
+    Entries may be exact origins (``https://partner.example``), scheme-qualified wildcards
+    (``https://*.example.com``), bare hosts (``partner.example``), or bare suffixes (``.example.com``).
+    Bare entries only trust the request's own scheme, so an HTTPS app never trusts a plain-HTTP origin.
+    """
+    scheme, host, port = origin
+    normalized = trusted.strip().lower()
+    if "://" in normalized:
+        trusted_scheme, _, authority = normalized.partition("://")
+        if authority.startswith("*."):
+            wildcard = canonical_origin(f"{trusted_scheme}://{authority[2:]}")
+            return wildcard is not None and (scheme, port) == (wildcard[0], wildcard[2]) and host.endswith(f".{wildcard[1]}")
+        return origin == canonical_origin(normalized)
+    if scheme != request_scheme:
+        return False
+    if normalized.startswith("."):
+        return host.endswith(normalized)
+    return origin == canonical_origin(f"{scheme}://{normalized}")
 
 
 def websocket_origin_is_allowed(
@@ -344,16 +410,17 @@ def websocket_origin_is_allowed(
 ) -> bool:
     """Validate a WebSocket Origin using exact origins only."""
 
-    candidate = _canonical_origin(origin_value)
+    candidate = canonical_origin(origin_value)
     if candidate is None:
         return False
-    same_origin = _canonical_origin(f"{request_scheme}://{request_host}")
+    same_origin = canonical_origin(f"{request_scheme}://{request_host}")
     if candidate == same_origin:
         return True
-    return candidate in {_canonical_origin(item) for item in allowed_origins}
+    return candidate in {canonical_origin(item) for item in allowed_origins}
 
 
-def _canonical_origin(value: str) -> tuple[str, str, int] | None:
+def canonical_origin(value: str) -> tuple[str, str, int] | None:
+    """Return ``(scheme, host, port)`` for an exact http(s) origin, or ``None`` if it is not one."""
     try:
         parsed = urlsplit(value.strip())
         port = parsed.port
@@ -371,3 +438,60 @@ def _canonical_origin(value: str) -> tuple[str, str, int] | None:
     ):
         return None
     return scheme, parsed.hostname.lower(), port or (443 if scheme == "https" else 80)
+
+
+class SecurityFailureThrottle:
+    """Count security failures per client in fixed windows and report when a client should be throttled.
+
+    Tracking is bounded to ``max_clients`` identities. When full, a new client is throttled rather than evicting a
+    live entry, so an attacker cannot flush other clients' failure history. Limits are read from ``config`` on each
+    call so later configuration changes apply.
+    """
+
+    def __init__(self, config: SecurityConfig, *, max_clients: int = 10_000) -> None:
+        self._config = config
+        self._max_clients = max_clients
+        self._clients: OrderedDict[str, tuple[float, int]] = OrderedDict()
+
+    def register(self, client: str | None) -> bool:
+        """Record one failure for ``client`` and return whether it is now throttled."""
+        limit = self._config.security_failure_rate_limit
+        if limit <= 0 or client is None:
+            # Without a peer identity there is no per-client bucket; throttling a shared "unknown" bucket would let
+            # one client lock out all the others.
+            return False
+        window = self._config.security_failure_window_seconds
+        now = time.monotonic()
+        self._prune(now, window)
+        start, count = self._clients.get(client, (now, 0))
+        if now - start >= window:
+            self._clients.pop(client, None)
+            start, count = now, 0
+        if client not in self._clients and len(self._clients) >= self._max_clients:
+            return True
+        count += 1
+        self._clients[client] = (start, count)
+        return count > limit
+
+    def is_limited(self, client: str | None) -> bool:
+        """Return whether ``client`` is already throttled, without recording a failure."""
+        limit = self._config.security_failure_rate_limit
+        if limit <= 0 or client is None:
+            return False
+        state = self._clients.get(client)
+        if state is None:
+            return False
+        start, count = state
+        if time.monotonic() - start >= self._config.security_failure_window_seconds:
+            self._clients.pop(client, None)
+            return False
+        return count >= limit
+
+    def _prune(self, now: float, window: float) -> None:
+        """Remove expired client buckets in amortized insertion order."""
+        cutoff = now - window
+        while self._clients:
+            client, (started, _count) = next(iter(self._clients.items()))
+            if started >= cutoff:
+                break
+            self._clients.pop(client)

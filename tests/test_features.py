@@ -1,13 +1,12 @@
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from jinja2 import TemplateError
+
 from flasgo import Flasgo, Request, Response, TestClient, redirect, session
 from flasgo import staticfiles as staticfiles_module
 from flasgo.debug import Debug
-from jinja2 import TemplateError
 
 
 def test_urlencoded_form_parsing_support() -> None:
@@ -319,3 +318,200 @@ def test_official_test_client_persists_cookies_and_follows_redirects() -> None:
     assert redirected.status_code == 200
     assert redirected.json() == {"method": "GET"}
     assert len(redirected.history) == 1
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "expected"),
+    [
+        ("application/x-www-form-urlencoded; charset=latin-1", b"name=%E9", 200),
+        ("application/x-www-form-urlencoded", b"name=%C3%A9", 200),
+        ("application/x-www-form-urlencoded", b"name=%FF", 400),
+    ],
+)
+def test_urlencoded_forms_decode_percent_escapes_with_the_declared_charset(content_type: str, body: bytes, expected: int) -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/form")
+    async def form(request: Request) -> dict[str, str | None]:
+        return {"name": (await request.form()).get("name")}
+
+    response = app.test_client().post("/form", body=body, headers={"content-type": content_type})
+    assert response.status_code == expected
+    if expected == 200:
+        assert response.json() == {"name": "é"}
+
+
+def test_request_cookies_read_every_cookie_header_first_value_wins() -> None:
+    app = Flasgo()
+
+    @app.get("/cookies")
+    def cookies(request: Request) -> dict[str, str]:
+        return request.cookies
+
+    response = app.test_client().get("/cookies", headers=[("cookie", "a=1; b=2"), ("cookie", "a=3; c=4")])
+    assert response.json() == {"a": "1", "b": "2", "c": "4"}
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type", "content_encoding"),
+    [
+        ("data.tar.gz", "application/gzip", None),
+        ("data.tar.bz2", "application/x-bzip2", None),
+        ("data.xz", "application/x-xz", None),
+        ("logo.svgz", "image/svg+xml", "gzip"),
+        ("site.css.gz", "text/css", "gzip"),
+    ],
+)
+def test_static_archives_are_not_served_with_content_encoding(
+    tmp_path: Path, name: str, content_type: str, content_encoding: str | None
+) -> None:
+    """Only transparently decoded encodings may be sent as Content-Encoding; archives are downloads."""
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / name).write_bytes(b"payload")
+    app = Flasgo(static_folder=static_dir)
+
+    response = app.test_client().get(f"/static/{name}")
+    assert response.headers["content-type"] == content_type
+    assert response.headers.get("content-encoding") == content_encoding
+
+
+def test_static_content_type_comes_from_the_requested_name(tmp_path: Path) -> None:
+    static_dir = tmp_path / "static"
+    (static_dir / "build").mkdir(parents=True)
+    (static_dir / "build" / "app.js.3f2a").write_text("console.log(1)")
+    (static_dir / "app.js").symlink_to(static_dir / "build" / "app.js.3f2a")
+    app = Flasgo(static_folder=static_dir)
+
+    assert app.test_client().get("/static/app.js").headers["content-type"] == "text/javascript"
+
+
+def test_static_if_none_match_uses_weak_comparison_lists_and_wildcard(tmp_path: Path) -> None:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "site.css").write_text("body{}", encoding="utf-8")
+    client = Flasgo(static_folder=static_dir).test_client()
+    etag = client.get("/static/site.css").headers["etag"]
+
+    for if_none_match in (etag, f"W/{etag}", f'"stale", {etag}', "*"):
+        not_modified = client.get("/static/site.css", headers={"if-none-match": if_none_match})
+        assert not_modified.status_code == 304
+        assert not_modified.body == b""
+        assert "content-type" not in not_modified.headers
+        assert "content-length" not in not_modified.headers
+        assert not_modified.headers["etag"] == etag
+    assert client.get("/static/site.css", headers={"if-none-match": '"stale"'}).status_code == 200
+
+
+def test_test_client_decodes_paths_and_encodes_non_ascii_queries_like_a_server() -> None:
+    app = Flasgo()
+
+    @app.get("/files/<name>")
+    def file(name: str, request: Request) -> dict[str, str]:
+        return {"name": name, "raw": request.scope["raw_path"].decode("ascii"), "q": request.query_params["q"][0]}
+
+    response = app.test_client().get("/files/a%20b?q=日本")
+    assert response.json() == {"name": "a b", "raw": "/files/a%20b", "q": "日本"}
+    assert cast(dict[str, str], app.test_client().get("/files/café?q=x").json())["name"] == "café"
+
+
+def test_test_client_redirects_respect_scheme_and_stay_on_the_app_origin() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.get("/secure-only")
+    def secure_only(request: Request) -> Response:
+        if request.scheme != "https":
+            return redirect("https://localhost/secure-only")
+        return Response.text("secure")
+
+    @app.get("/away")
+    def away() -> Response:
+        return redirect("https://evil.example/landing")
+
+    @app.post("/submit")
+    def submit() -> Response:
+        return redirect("/done", status_code=303)
+
+    @app.get("/done")
+    def done(request: Request) -> dict[str, str | None]:
+        return {"content_type": request.headers.get("content-type")}
+
+    client = app.test_client()
+    assert client.get("/secure-only", follow_redirects=True).text == "secure"
+    external = client.get("/away", follow_redirects=True)
+    assert external.status_code == 302
+    assert external.location == "https://evil.example/landing"
+    after_post = client.post("/submit", json={"a": 1}, headers={"content-type": "application/json"}, follow_redirects=True)
+    assert after_post.json() == {"content_type": None}
+
+
+def test_test_client_cookie_jar_honours_expiry() -> None:
+    app = Flasgo()
+
+    @app.get("/set")
+    def set_cookie() -> Response:
+        response = Response.text("set")
+        response.set_cookie("theme", "dark")
+        return response
+
+    @app.get("/expire")
+    def expire() -> Response:
+        response = Response.text("expired")
+        response.set_cookie("theme", "dark", max_age=0)
+        return response
+
+    client = app.test_client()
+    client.get("/set")
+    assert client.cookies["theme"] == "dark"
+    client.get("/expire")
+    assert "theme" not in client.cookies
+
+
+@pytest.mark.parametrize(
+    ("value", "allow_dotfiles", "expected"),
+    [
+        ("css/site.css", False, "css/site.css"),
+        ("css//./site.css", False, "css/site.css"),
+        ("css\\site.css", False, "css/site.css"),
+        ("../secret", True, None),
+        ("a/../b", True, None),
+        ("/etc/passwd", True, None),
+        ("C:/windows", True, None),
+        (".env", False, None),
+        (".env", True, ".env"),
+        ("a\x00b", True, None),
+        ("", True, None),
+    ],
+)
+def test_safe_relative_path(value: str, allow_dotfiles: bool, expected: str | None) -> None:
+    from flasgo._paths import safe_relative_path
+
+    result = safe_relative_path(value, allow_dotfiles=allow_dotfiles)
+    assert (None if result is None else str(result)) == expected
+
+
+@pytest.mark.parametrize("location", ["http://localhost:80/next", "http://localhost/next", "/next"])
+def test_test_client_follows_same_origin_redirects_with_default_ports(location: str) -> None:
+    app = Flasgo()
+
+    @app.get("/start")
+    def start() -> Response:
+        return redirect(location)
+
+    @app.get("/next")
+    def next_page() -> str:
+        return "arrived"
+
+    response = app.test_client().get("/start", follow_redirects=True)
+    assert response.text == "arrived"
+    assert [item.status_code for item in response.history] == [302]
+
+
+def test_test_client_does_not_follow_redirects_to_another_port() -> None:
+    app = Flasgo()
+
+    @app.get("/start")
+    def start() -> Response:
+        return redirect("http://localhost:8080/next")
+
+    assert app.test_client().get("/start", follow_redirects=True).status_code == 302

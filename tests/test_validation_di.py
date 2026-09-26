@@ -1,10 +1,15 @@
-from __future__ import annotations
-
+import importlib.util
+import sys
+import textwrap
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
+from pathlib import Path
 from typing import Annotated, Any, Literal, cast
+from uuid import UUID
 
 import pytest
+
 from flasgo import (
     Body,
     Cookie,
@@ -88,12 +93,11 @@ class UnknownAnnotation:
     pass
 
 
-_DI_CALLS = 0
+_DI_CALLS = [0]
 
 
 def _page_size(limit: Annotated[int, Query()] = 10) -> int:
-    global _DI_CALLS
-    _DI_CALLS += 1
+    _DI_CALLS[0] += 1
     return limit
 
 
@@ -231,8 +235,7 @@ def test_form_validation_error_preserves_safe_form_values() -> None:
 
 def test_dependencies_are_nested_cached_and_validated() -> None:
     app = Flasgo()
-    global _DI_CALLS
-    _DI_CALLS = 0
+    _DI_CALLS[0] = 0
 
     @app.get("/items")
     def items(
@@ -244,7 +247,7 @@ def test_dependencies_are_nested_cached_and_validated() -> None:
 
     response = app.test_client().get("/items?limit=25")
     assert response.json() == {"first": 25, "second": 25, "label": "page:25"}
-    assert _DI_CALLS == 1
+    assert _DI_CALLS[0] == 1
 
 
 def test_dependency_cycles_and_multiple_body_models_fail_at_registration() -> None:
@@ -346,9 +349,11 @@ def test_unresolved_local_return_annotation_does_not_block_route_registration() 
         class LocalPayload:
             pass
 
-        def endpoint(payload: Annotated[LocalPayload, Body()]) -> str:
+        def endpoint(payload: Annotated[LocalPayload, Body()]) -> str:  # noqa: F821 - deleted below on purpose
             return str(payload)
 
+        # Annotations are evaluated lazily (PEP 649), so removing the name makes this one genuinely unresolvable.
+        del LocalPayload
         return endpoint
 
     with pytest.raises(TypeError, match="marked annotation"):
@@ -683,3 +688,223 @@ def test_validation_issue_responses_are_capped() -> None:
         "code": "too_many_errors",
         "message": "Additional validation errors were omitted.",
     }
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        Annotated[str, Header()] | None,
+        list[Annotated[str, Query()]],
+        Annotated[int, Cookie()] | Annotated[str, Cookie()],
+    ],
+    ids=["optional-header", "list-of-query", "union-of-cookies"],
+)
+def test_nested_markers_are_rejected_instead_of_silently_becoming_query(annotation: Any) -> None:
+    """A marker hidden inside a union or generic would otherwise be dropped and the value read from the query string."""
+    app = Flasgo()
+
+    async def handler(value: Any = None) -> str:
+        return "ok"
+
+    handler.__annotations__["value"] = annotation
+    with pytest.raises(TypeError, match="nests a Flasgo marker"):
+        app.get("/nested")(handler)
+
+
+def test_outer_marker_with_optional_type_reads_the_header() -> None:
+    app = Flasgo()
+
+    @app.get("/header")
+    async def handler(x_token: Annotated[str | None, Header()] = None) -> dict[str, str | None]:
+        return {"value": x_token}
+
+    client = app.test_client()
+    assert client.get("/header?x_token=query", headers={"x-token": "header"}).json() == {"value": "header"}
+    assert client.get("/header?x_token=query").json() == {"value": None}
+
+
+def test_untyped_path_segments_are_coerced_from_text() -> None:
+    """``/items/<item_id>`` with ``item_id: int`` must accept ``/items/5`` rather than rejecting the string."""
+    app = Flasgo()
+
+    @app.get("/items/<item_id>")
+    async def item(item_id: int) -> dict[str, int]:
+        return {"item_id": item_id}
+
+    @app.get("/flags/<flag>")
+    async def flag(flag: bool) -> dict[str, bool]:
+        return {"flag": flag}
+
+    client = app.test_client()
+    assert client.get("/items/5").json() == {"item_id": 5}
+    assert client.get("/flags/false").json() == {"flag": False}
+    invalid = client.get("/items/five")
+    assert invalid.status_code == 422
+    assert cast(Any, invalid.json())["errors"][0]["location"] == ["path", "item_id"]
+
+
+@pytest.mark.parametrize("payload", [b'{"value": 1' + b"0" * 400 + b"}", b'{"value": 1e400}'])
+def test_huge_json_numbers_for_float_fields_are_validation_errors(payload: bytes) -> None:
+    """An unbounded JSON integer overflows float(); that must be a 422, not an unhandled 500."""
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/numbers")
+    async def numbers(body: Annotated[dict[str, float], Body()]) -> dict[str, float]:
+        return body
+
+    response = app.test_client().post("/numbers", body=payload, headers={"content-type": "application/json"})
+    assert response.status_code == 422
+    assert cast(Any, response.json())["errors"][0]["message"] == "Expected a finite number."
+
+
+def _issues(annotation: Any, value: object, *, from_text: bool = False) -> list[tuple[tuple[object, ...], str]]:
+    from flasgo.validation import RequestValidationError, validate_text_values, validate_value
+
+    try:
+        if from_text:
+            validate_text_values(annotation, [cast(str, value)], location=("query", "v"))
+        else:
+            validate_value(annotation, value, location=("body",))
+    except RequestValidationError as exc:
+        return [(issue.location, issue.message) for issue in exc.issues]
+    return []
+
+
+@pytest.mark.parametrize("text", ["1_000", " 12 ", "٣", "+", "1.5"])
+def test_integer_text_must_be_plain_ascii_decimal(text: str) -> None:
+    assert _issues(int, text, from_text=True) == [(("query", "v"), "Expected an integer.")]
+
+
+@pytest.mark.parametrize("text", ["1_0.5", " 1.5", "nan", "inf", "0x10"])
+def test_float_text_must_be_plain_decimal(text: str) -> None:
+    assert _issues(float, text, from_text=True) == [(("query", "v"), "Expected a finite number.")]
+
+
+def test_numeric_text_still_accepts_ordinary_values() -> None:
+    from flasgo.validation import validate_text_values
+
+    assert validate_text_values(int, ["-42"], location=("query", "v")) == -42
+    assert validate_text_values(float, ["1.5e3"], location=("query", "v")) == 1500.0
+    assert validate_text_values(float, [".5"], location=("query", "v")) == 0.5
+
+
+class _Level(Enum):
+    ONE = 1
+
+
+def test_literal_enum_and_uuid_require_exact_json_types() -> None:
+    assert _issues(Literal[0, True], False)
+    assert not _issues(Literal[0, True], 0)
+    assert _issues(_Level, True)
+    assert not _issues(_Level, 1)
+    assert _issues(UUID, 0x12345678123456781234567812345678) == [(("body",), "Expected a UUID.")]
+
+
+def test_validation_messages_do_not_leak_annotation_names() -> None:
+    assert _issues(date, 5) == [(("body",), "Expected an ISO date value.")]
+    assert _issues(_Level.__class__, object()) == [(("body",), "Invalid value.")]
+
+
+@dataclass
+class _Point:
+    x: int
+
+
+@dataclass
+class _Positive:
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.value < 0:
+            raise ValueError("negative")
+
+
+def test_optional_model_reports_nested_field_errors() -> None:
+    assert _issues(_Point | None, {"x": "nope"}) == [(("body", "x"), "Expected an integer.")]
+
+
+def test_model_construction_failures_are_validation_errors() -> None:
+    assert _issues(_Positive, {"value": -1}) == [(("body",), "Value is not valid for this model.")]
+    assert _issues(set[_Point], [{"x": 1}]) == [(("body",), "Set items must be hashable.")]
+
+
+def test_unhashable_annotated_metadata_inside_unions_is_supported() -> None:
+    assert not _issues(Annotated[int, {"doc": "count"}] | None, 1)
+
+
+@dataclass
+class _Tags:
+    tags: list[int]
+
+
+def test_form_errors_group_list_items_under_the_field_name() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/tags")
+    async def tags(form: Annotated[_Tags, Form()]) -> str:
+        return "ok"
+
+    @app.errorhandler(FormValidationError)
+    def invalid(_request: Any, exc: Exception) -> dict[str, list[str]]:
+        return cast(FormValidationError, exc).errors
+
+    response = app.test_client().post("/tags", data={"tags": ["a", "b"]})
+    assert list(cast(dict[str, Any], response.json())) == ["tags"]
+
+
+def test_one_unresolvable_model_annotation_does_not_break_the_other_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TYPE_CHECKING-only name on one field used to make every field of the model reject all values."""
+    module_path = tmp_path / "partial_hints_models.py"
+    module_path.write_text(
+        textwrap.dedent(
+            """
+            from __future__ import annotations
+
+            from dataclasses import dataclass
+            from typing import TYPE_CHECKING
+
+            if TYPE_CHECKING:
+                from decimal import Decimal
+
+
+            @dataclass
+            class Inner:
+                x: int
+                note: Decimal | None = None
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("partial_hints_models", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+
+    assert not _issues(module.Inner, {"x": 2})
+    assert _issues(module.Inner, {"x": "two"}) == [(("body", "x"), "Expected an integer.")]
+
+
+def test_endpoint_with_unresolvable_return_annotation_still_registers() -> None:
+    """Under PEP 649 an unresolvable annotation used to raise NameError from inspect.signature at registration."""
+    app = Flasgo()
+
+    def build_endpoint():
+        class Hidden(dict[str, int]):
+            pass
+
+        def endpoint(value: Annotated[int, Query()]) -> Hidden:  # noqa: F821 - deleted below on purpose
+            return cast(Any, {"value": value})
+
+        del Hidden
+        return endpoint
+
+    app.add_route("/hidden", build_endpoint())
+    assert app.test_client().get("/hidden?value=3").json() == {"value": 3}
+
+
+def test_dict_validation_reports_every_invalid_value() -> None:
+    assert _issues(dict[str, int], {"a": "x", "b": 1, "c": "y"}) == [
+        (("body", "a"), "Expected an integer."),
+        (("body", "c"), "Expected an integer."),
+    ]

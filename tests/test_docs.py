@@ -1,10 +1,11 @@
-from __future__ import annotations
-
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, cast
 
 import pytest
+from openapi_spec_validator import OpenAPIV32SpecValidator, validate
+
 from flasgo import (
     AuthResult,
     Body,
@@ -21,7 +22,6 @@ from flasgo import (
     bearer_token_backend,
 )
 from flasgo.testing import TestClient
-from openapi_spec_validator import OpenAPIV32SpecValidator, validate
 
 
 @dataclass
@@ -445,7 +445,10 @@ def test_openapi_accepts_supported_local_security_scheme_types(scheme: dict[str,
     def private() -> str:
         return "ok"
 
-    validate(app.openapi_spec(), cls=OpenAPIV32SpecValidator)
+    spec = app.openapi_spec()
+    validate(spec, cls=OpenAPIV32SpecValidator)
+    assert spec["components"]["securitySchemes"]["customAuth"] == scheme
+    assert spec["paths"]["/private"]["get"]["security"] == [{"customAuth": []}]
 
 
 @pytest.mark.parametrize(
@@ -589,3 +592,46 @@ def test_comprehensive_openapi_document_passes_validator() -> None:
     spec = app.openapi_spec()
     validate(spec, cls=OpenAPIV32SpecValidator)
     assert len(spec["paths"]) == 3
+
+
+def test_openapi_documents_runtime_status_media_types_and_operation_ids(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    app = Flasgo(settings={"ENABLE_DOCS": True}, static_folder=tmp_path)
+
+    @app.delete("/items/<item_id>")
+    def remove(item_id: int) -> None:
+        """Remove an item.
+
+        Paragraph one.
+
+        Example::
+
+            curl -X DELETE /items/1
+        """
+
+    @app.get("/raw")
+    def raw() -> bytes:
+        return b"raw"
+
+    spec = app.openapi_spec()
+    delete = spec["paths"]["/items/{item_id}"]["delete"]
+    assert "204" in delete["responses"]
+    assert "200" not in delete["responses"]
+    assert delete["summary"] == "Remove an item."
+    assert delete["description"] == "Paragraph one.\n\nExample::\n\n    curl -X DELETE /items/1"
+    assert delete["parameters"][0]["schema"] == {"type": "integer"}
+    assert list(spec["paths"]["/raw"]["get"]["responses"]["200"]["content"]) == ["text/plain"]
+    assert app.test_client().get("/raw").headers["content-type"].startswith("text/plain")
+    operation_ids = [operation["operationId"] for item in spec["paths"].values() for operation in item.values()]
+    assert all(re.fullmatch(r"[A-Za-z0-9_]+", operation_id) for operation_id in operation_ids)
+
+
+def test_unannotated_path_parameters_are_documented_as_strings() -> None:
+    app = Flasgo(settings={"ENABLE_DOCS": True})
+
+    @app.get("/items/<item_id>")
+    def item(item_id):  # deliberately unannotated
+        return str(item_id)
+
+    parameter = app.openapi_spec()["paths"]["/items/{item_id}"]["get"]["parameters"][0]
+    assert parameter["schema"] == {"type": "string"}

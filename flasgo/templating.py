@@ -1,11 +1,12 @@
-from __future__ import annotations
-
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, cast, override
 
 from jinja2 import BaseLoader, StrictUndefined, Template, TemplateNotFound, select_autoescape
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+from ._paths import require_directory, safe_relative_path
 
 _DEFAULT_MAX_TEMPLATE_BYTES = 262_144
 
@@ -16,30 +17,12 @@ def _coerce_search_paths(template_dirs: str | Path | Sequence[str | Path]) -> tu
     if not raw_paths:
         raise ValueError("At least one template directory must be configured.")
 
-    resolved_paths: list[Path] = []
-    for raw_path in raw_paths:
-        resolved = Path(raw_path).expanduser().resolve()
-        if not resolved.exists():
-            msg = f"Template directory does not exist: {resolved}"
-            raise ValueError(msg)
-        if not resolved.is_dir():
-            msg = f"Template directory is not a directory: {resolved}"
-            raise ValueError(msg)
-        resolved_paths.append(resolved)
-    return tuple(resolved_paths)
+    return tuple(require_directory(raw_path, "Template") for raw_path in raw_paths)
 
 
 def _normalize_template_name(template_name: str) -> PurePosixPath:
-    if not template_name or any(char in template_name for char in ("\x00", "\r", "\n")):
-        raise TemplateNotFound(template_name)
-
-    normalized = template_name.replace("\\", "/")
-    candidate = PurePosixPath(normalized)
-    if candidate.is_absolute():
-        raise TemplateNotFound(template_name)
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        raise TemplateNotFound(template_name)
-    if candidate.parts and candidate.parts[0].endswith(":"):
+    candidate = safe_relative_path(template_name, allow_dotfiles=True)
+    if candidate is None:
         raise TemplateNotFound(template_name)
     return candidate
 
@@ -59,6 +42,7 @@ class SecureTemplateLoader(BaseLoader):
         self.encoding = encoding
         self.max_template_bytes = max_template_bytes
 
+    @override
     def get_source(self, environment: Any, template: str) -> tuple[str, str, Callable[[], bool]]:
         del environment
         normalized_template = _normalize_template_name(template)
@@ -68,7 +52,7 @@ class SecureTemplateLoader(BaseLoader):
             try:
                 resolved = candidate.resolve(strict=True)
                 resolved.relative_to(root)
-            except FileNotFoundError, OSError, ValueError:
+            except OSError, ValueError:
                 continue
             if not resolved.is_file():
                 continue
@@ -92,6 +76,14 @@ class SecureTemplateLoader(BaseLoader):
             return source, str(resolved), uptodate
 
         raise TemplateNotFound(template)
+
+
+def _event_loop_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def create_template_environment(
@@ -143,8 +135,19 @@ class JinjaTemplates:
         return self.environment.get_template(template_name)
 
     def render(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
+        if self.environment.is_async and _event_loop_running():
+            # Jinja drives async templates with asyncio.run(), which cannot run inside an already running loop.
+            # Outside a loop (scripts, the module-level render_template helper) that works fine.
+            raise RuntimeError("Templates were configured with enable_async=True; use `await render_async(...)` instead.")
         template = self.get_template(template_name)
         return template.render({} if context is None else dict(context))
+
+    async def render_async(self, template_name: str, context: Mapping[str, Any] | None = None) -> str:
+        """Render a template configured with ``enable_async=True`` without blocking the event loop."""
+        if not self.environment.is_async:
+            raise RuntimeError("render_async requires templates configured with enable_async=True; use render(...) instead.")
+        template = self.get_template(template_name)
+        return await template.render_async({} if context is None else dict(context))
 
 
 def render_template(

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import importlib
@@ -90,6 +88,7 @@ class MemoryStore:
             raise ValueError("max_keys must be a positive integer.")
         self.max_keys = max_keys
         self._values: dict[str, tuple[bytes, float]] = {}
+        self._next_expiry = 0.0
         self._lock = asyncio.Lock()
 
     def _get(self, key: str) -> bytes | None:
@@ -137,13 +136,32 @@ class MemoryStore:
         async with self._lock:
             if self._get(key) is not None:
                 return False
+            now = time.monotonic()
+            if len(self._values) >= self.max_keys and now >= self._next_expiry:
+                self._sweep(now)
             if len(self._values) >= self.max_keys:
-                for existing in tuple(self._values):
-                    self._get(existing)
-                if len(self._values) >= self.max_keys:
-                    raise _StoreCapacityExceeded("Session store capacity reached.")
-            self._values[key] = (value, time.monotonic() + ttl)
+                raise _StoreCapacityExceeded("Session store capacity reached.")
+            self._store(key, value, ttl)
             return True
+
+    def _store(self, key: str, value: bytes, ttl: int) -> None:
+        expires = time.monotonic() + ttl
+        self._values[key] = (value, expires)
+        self._next_expiry = min(self._next_expiry, expires)
+
+    def _sweep(self, now: float) -> None:
+        """Drop expired entries and record when the next one expires.
+
+        Until then a full store can reject new keys without rescanning every entry. Every write lowers the recorded
+        time when needed, so it can be early (causing an extra sweep) but never late.
+        """
+        next_expiry = math.inf
+        for existing, (_value, expires) in tuple(self._values.items()):
+            if expires <= now:
+                del self._values[existing]
+            else:
+                next_expiry = min(next_expiry, expires)
+        self._next_expiry = next_expiry
 
     async def replace(self, key: str, expected: bytes, value: bytes, ttl: int) -> bool:
         """Replace a stored value when its current value matches the expected value.
@@ -160,7 +178,7 @@ class MemoryStore:
         async with self._lock:
             if self._get(key) != expected:
                 return False
-            self._values[key] = (value, time.monotonic() + ttl)
+            self._store(key, value, ttl)
             return True
 
     async def rotate(self, key: str, expected: bytes, new_key: str, value: bytes, ttl: int) -> bool:
@@ -176,7 +194,7 @@ class MemoryStore:
         async with self._lock:
             if self._get(key) != expected or self._get(new_key) is not None:
                 return False
-            self._values[new_key] = (value, time.monotonic() + ttl)
+            self._store(new_key, value, ttl)
             del self._values[key]
             return True
 
@@ -216,15 +234,17 @@ class RedisStore:
         self.timeout = timeout
         self.max_value_bytes = max_value_bytes
         self._owns_client = False
+        self._script_digests: dict[str, str] = {}
 
     @classmethod
-    def from_url(cls, url: str, *, namespace: str = "flasgo", timeout: float = 2) -> RedisStore:
+    def from_url(cls, url: str, *, namespace: str = "flasgo", timeout: float = 2, max_value_bytes: int = 65_536) -> RedisStore:
         """Create a Redis-backed session store from a connection URL.
 
         Parameters:
             url (str): Redis connection URL.
             namespace (str): Namespace used to isolate stored keys.
             timeout (float): Connection and operation timeout in seconds.
+            max_value_bytes (int): Maximum permitted size of a stored value in bytes.
 
         Returns:
             RedisStore: A store configured with a client created from the URL.
@@ -237,7 +257,7 @@ class RedisStore:
         except ImportError as exc:
             raise ImportError("Redis storage requires the optional extra: install 'flasgo[redis]'.") from exc
         client = redis.Redis.from_url(url, socket_connect_timeout=timeout, socket_timeout=timeout, max_connections=100)
-        store = cls(client, namespace=namespace, timeout=timeout)
+        store = cls(client, namespace=namespace, timeout=timeout, max_value_bytes=max_value_bytes)
         store._owns_client = True
         return store
 
@@ -269,9 +289,19 @@ class RedisStore:
         Returns:
             Any: The result produced by the script.
         """
+        digest = self._script_digests.get(script)
+        if digest is None:
+            digest = self._script_digests[script] = hashlib.sha1(script.encode("utf-8"), usedforsecurity=False).hexdigest()
         try:
             async with asyncio.timeout(self.timeout):
-                return await self.client.eval(script, len(keys), *keys, *args)
+                try:
+                    # EVALSHA avoids resending the script body on every rate-limit or session call.
+                    return await self.client.evalsha(digest, len(keys), *keys, *args)
+                except Exception as exc:
+                    # redis-py raises NoScriptError; other clients surface the raw "NOSCRIPT ..." reply.
+                    if type(exc).__name__ != "NoScriptError" and "NOSCRIPT" not in str(exc):
+                        raise
+                    return await self.client.eval(script, len(keys), *keys, *args)
         except Exception as exc:
             raise StoreUnavailable("Shared storage is unavailable.") from exc
 

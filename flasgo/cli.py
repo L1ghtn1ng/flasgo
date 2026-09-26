@@ -1,12 +1,11 @@
-from __future__ import annotations
-
 import argparse
 import importlib
 import json
 import os
 import re
+import secrets
+import stat
 import sys
-import tempfile
 import traceback
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
@@ -35,7 +34,7 @@ _MISSING = object()
 def build_parser() -> argparse.ArgumentParser:
     """Create the Flasgo CLI argument parser."""
 
-    parser = argparse.ArgumentParser(prog="flasgo")
+    parser = argparse.ArgumentParser(prog="flasgo", suggest_on_error=True)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run a Flasgo application")
@@ -157,7 +156,7 @@ def _routes_command(args: argparse.Namespace) -> int:
 
 def _openapi_command(args: argparse.Namespace) -> int:
     app = load_app(args.target, app_name=args.app)
-    document = json.dumps(app.openapi_spec(), indent=2, sort_keys=True) + "\n"
+    document = json.dumps(app.openapi_spec(), indent=2, sort_keys=True, allow_nan=False) + "\n"
     if args.output is None:
         print(document, end="")
     else:
@@ -268,23 +267,43 @@ def _atomic_write(path: Path, value: str) -> None:
     parent = absolute.parent.resolve()
     parent.mkdir(parents=True, exist_ok=True)
     destination = parent / absolute.name
+    try:
+        entry = destination.lstat()
+    except FileNotFoundError:
+        entry = None
+    # A symlink is replaced by a regular file, so treat it as new: inheriting the *target's* mode could make
+    # output public that the caller's umask would keep private.
+    existing_mode = stat.S_IMODE(entry.st_mode) if entry is not None and not stat.S_ISLNK(entry.st_mode) else None
     temporary: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=parent,
-            prefix=f".{destination.name}.",
-            delete=False,
-        ) as handle:
+        # A replacement starts with the destination's own mode, so a private (0600) file's new contents are never
+        # readable by others, even briefly. A new file uses 0o666 and the kernel applies the current umask; reading
+        # or changing the process umask would widen permissions for files other threads create meanwhile.
+        initial_mode = existing_mode if existing_mode is not None else 0o666
+        temporary, descriptor = _create_temporary(parent, destination.name, mode=initial_mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
-            temporary = Path(handle.name)
-        os.replace(temporary, destination)
+        if existing_mode is not None:
+            # Restore any bits the umask stripped at creation; this never widens access beyond the destination's.
+            temporary.chmod(existing_mode)
+        temporary.replace(destination)
+        temporary = None
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _create_temporary(parent: Path, name: str, *, mode: int) -> tuple[Path, int]:
+    """Exclusively create a hidden sibling file for an atomic replace, with ``mode`` masked by the umask."""
+    for _attempt in range(100):
+        candidate = parent / f".{name}.{secrets.token_hex(8)}"
+        try:
+            return candidate, os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"Could not create a temporary file next to {parent / name}.")
 
 
 def _db_command(args: argparse.Namespace) -> int:
@@ -481,13 +500,14 @@ def _import_target(target: _ResolvedTarget) -> ModuleType:
 
 
 def _namespace_matches_target(module: ModuleType, target: _ResolvedTarget) -> bool:
-    assert target.source is not None
+    if target.source is None:
+        raise RuntimeError("A namespace target must be resolved from a source file.")
     if "." not in target.module_name:
         return _module_matches_source(module, target.source)
     expected_directory = target.import_root / target.module_name.partition(".")[0]
     location = _module_location(module)
     if location is not None:
-        return location == expected_directory or location.parent == expected_directory
+        return expected_directory in {location, location.parent}
     return any(Path(value).resolve() == expected_directory for value in getattr(module, "__path__", ()))
 
 

@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import copy
 import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, Self, runtime_checkable
 from urllib.parse import urlsplit
 
 from .request import Request
@@ -20,7 +18,7 @@ class User:
     data: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def anonymous(cls) -> User:
+    def anonymous(cls) -> Self:
         return cls()
 
 

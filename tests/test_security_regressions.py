@@ -1,13 +1,12 @@
-from __future__ import annotations
-
 import asyncio
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
-from typing import Any, get_type_hints
+from typing import Any, cast, get_type_hints
+
+import pytest
 
 import flasgo.app as app_module
 import flasgo.streaming as streaming_module
-import pytest
 from flasgo import (
     Blueprint,
     Flasgo,
@@ -50,7 +49,7 @@ def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
     assert response.cookies == []
     with pytest.raises(ValueError, match="Invalid Set-Cookie"):
         Response(body=b"", cookies=[raw_cookie])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"(?i)set-cookie"):
         Response(body=b"", headers={"Set-Cookie": raw_cookie})
 
     async def run() -> None:
@@ -67,7 +66,7 @@ def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
                 mutated.headers["Set-Cookie"] = raw_cookie
             else:
                 mutated.cookies.append(raw_cookie)
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match=r"(?i)set-cookie"):
                 await mutated.send(send)
 
         async def receive() -> dict[str, Any]:
@@ -83,11 +82,13 @@ def test_cookie_controls_are_rejected_before_emission(codepoint: int) -> None:
                 max_messages_per_minute=60,
             )
             await websocket.receive_connect()
-            with pytest.raises(ValueError):
-                if accept:
-                    await websocket.accept(headers={"Set-Cookie": raw_cookie})
-                else:
-                    await websocket.deny(403, "Denied", headers={"Set-Cookie": raw_cookie})
+            handshake = (
+                websocket.accept(headers={"Set-Cookie": raw_cookie})
+                if accept
+                else websocket.deny(403, "Denied", headers={"Set-Cookie": raw_cookie})
+            )
+            with pytest.raises(ValueError, match=r"Invalid (Set-Cookie value|WebSocket \w+ header)"):
+                await handshake
         assert messages == []
 
     asyncio.run(run())
@@ -126,7 +127,7 @@ def test_intersecting_route_ties_are_rejected_for_both_protocols(converter: str,
 
     async def socket(value: str) -> None:
         """Provide a WebSocket endpoint for registration-only overlap checks."""
-        return None
+        return
 
     app.add_websocket_route(paths[0], socket)
     with pytest.raises(ValueError, match="conflicts with an existing route pattern"):
@@ -732,14 +733,14 @@ def test_security_failure_tracking_is_bounded_and_reuses_expired_capacity(monkey
 
     for index in range(10_000):
         assert app._register_security_failure(request_for(f"client-{index}")) is False
-    assert len(app._security_failures) == 10_000
+    assert len(app._security_throttle._clients) == 10_000
     assert app._register_security_failure(request_for("overflow")) is True
-    assert len(app._security_failures) == 10_000
-    assert "client-0" in app._security_failures
+    assert len(app._security_throttle._clients) == 10_000
+    assert "client-0" in app._security_throttle._clients
 
     now = 61.0
     assert app._register_security_failure(request_for("after-expiry")) is False
-    assert list(app._security_failures) == ["after-expiry"]
+    assert list(app._security_throttle._clients) == ["after-expiry"]
 
 
 def test_route_registration_rejects_equivalent_shapes_and_prefers_specific_routes() -> None:
@@ -891,7 +892,7 @@ def test_stream_cleanup_timeout_bounds_cancellation_resistant_closers() -> None:
 
         async def send(message: dict[str, Any]) -> None:
             """Accept ASGI output without adding transport delay."""
-            return None
+            return
 
         try:
             await asyncio.wait_for(streamed_response.send(send), timeout=0.1)
@@ -944,7 +945,7 @@ def test_stream_teardown_is_bounded_after_duration_or_disconnect(disconnect: boo
 
         async def send(message: dict[str, Any]) -> None:
             """Accept response messages without affecting the producer deadline."""
-            return None
+            return
 
         response.receive = receive
         expected = ConnectionError if disconnect else TimeoutError
@@ -998,7 +999,7 @@ def test_nested_stream_cleanup_is_observed_when_outer_cleanup_is_cancelled() -> 
 
         async def send(message: dict[str, Any]) -> None:
             """Accept transport output without introducing additional failures."""
-            return None
+            return
 
         response.receive = receive
         try:
@@ -1067,3 +1068,356 @@ def test_cancellation_resistant_cleanup_has_a_hard_process_limit() -> None:
         assert all(response._closed for response in responses)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "attacker.com?.example.com",
+        "attacker.com#.example.com",
+        "attacker.com .example.com",
+        "attacker.com%2f.example.com",
+        "[evil].example.com",
+        "example.com",
+        # IPv6 zone IDs accept arbitrary text; a browser reads this link as userinfo "[::1%" at host evil.com.
+        "[::1%@evil.com#.example.com]",
+        "[::1%@evil.com#.example.com]:443",
+        "[::1%.example.com]",
+        "[::ffff:127.0.0.1%25x.example.com]",
+    ],
+)
+def test_suffix_host_patterns_reject_url_delimiter_smuggling(host: str) -> None:
+    """Only real DNS names may match a suffix pattern; URL delimiters must not smuggle in another host."""
+    app = Flasgo(settings={"ALLOWED_HOSTS": {".example.com"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    assert app.test_client().get("/", headers={"host": host}).status_code == 400
+
+
+@pytest.mark.parametrize("host", ["api.example.com", "API.Example.com:8443", "a.b.example.com.", "my_service.example.com"])
+def test_suffix_host_patterns_allow_real_subdomains(host: str) -> None:
+    """Keep matching ordinary subdomains, ports, trailing dots, and underscore service names."""
+    app = Flasgo(settings={"ALLOWED_HOSTS": {".example.com"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    assert app.test_client().get("/", headers={"host": host}).status_code == 200
+
+
+def test_mixed_case_response_headers_replace_instead_of_duplicating() -> None:
+    """Flask-style header assignment must not emit conflicting framing or security headers."""
+    app = Flasgo()
+
+    @app.get("/")
+    def home() -> Response:
+        response = Response.html("<p>hi</p>", headers={"X-Frame-Options": "SAMEORIGIN"})
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Content-Length"] = "999"
+        return response
+
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "headers": [(b"host", b"localhost")],
+        "client": ("127.0.0.1", 1),
+        "server": ("localhost", 80),
+        "root_path": "",
+    }
+    asyncio.run(app(scope, receive, send))
+
+    names = [name.lower() for name, _ in sent[0]["headers"]]
+    assert len(names) == len(set(names))
+    headers = dict(sent[0]["headers"])
+    assert headers[b"content-type"] == b"application/json"
+    assert headers[b"content-length"] == b"9"
+    assert headers[b"x-frame-options"] == b"SAMEORIGIN"
+
+
+def test_response_headers_are_case_insensitive() -> None:
+    response = Response.text("ok", headers={"X-Custom": "1"})
+    response.headers.update({"x-CUSTOM": "2"})
+    response.headers |= {"X-Other": "3"}
+    assert response.headers["X-CUSTOM"] == "2"
+    assert "X-OTHER" in response.headers
+    assert response.headers.pop("X-Other") == "3"
+    response.headers = {"Content-Type": "text/csv"}
+    response.prepare()
+    assert response.headers["content-type"] == "text/csv"
+    assert list(response.headers) == ["content-type", "content-length"]
+
+
+def test_session_supports_mapping_protocol() -> None:
+    """Flask idioms such as ``"user" in session`` must work instead of raising KeyError(0)."""
+    from flasgo.session import Session
+
+    current = Session({"user": 1})
+    assert "user" in current
+    assert "missing" not in current
+    assert list(current) == ["user"]
+    assert len(current) == 1
+    assert not Session({})
+    assert current.setdefault("theme", "dark") == "dark"
+    assert current.modified
+    del current["theme"]
+    assert dict(current.items()) == {"user": 1}
+
+
+def test_session_pop_of_missing_key_does_not_mark_modified() -> None:
+    """Consuming an absent flash message on every page must not re-sign the cookie or rotate the CSRF binding."""
+    from flasgo.session import Session
+
+    current = Session({"user": 1})
+    assert current.pop("flash", None) is None
+    assert not current.modified
+    assert current.pop("user") == 1
+    assert current.modified
+
+
+def test_session_proxy_forwards_attribute_writes_to_the_request_session() -> None:
+    """``session.modified = True`` must reach the request's session rather than the shared module-level proxy."""
+    import flasgo.globals as globals_module
+
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+    observed: list[bool] = []
+
+    @app.get("/mark")
+    def mark() -> str:
+        session.modified = True
+        return "ok"
+
+    @app.get("/check")
+    def check() -> str:
+        observed.append(session.modified)
+        return "ok"
+
+    client = app.test_client()
+    marked = client.get("/mark")
+    assert "set-cookie" in marked.headers
+    client.get("/check")
+    assert observed == [False]
+    assert "modified" not in object.__dir__(globals_module.session)
+
+
+def test_session_proxy_supports_container_operations() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> dict[str, Any]:
+        session["a"] = 1
+        session["b"] = 2
+        del session["b"]
+        return {"has_a": "a" in session, "has_b": "b" in session, "keys": list(session), "size": len(session), "truthy": bool(session)}
+
+    assert app.test_client().get("/").json() == {"has_a": True, "has_b": False, "keys": ["a"], "size": 1, "truthy": True}
+
+
+@pytest.mark.parametrize(
+    "app_factory",
+    [
+        lambda: Flasgo(settings={"ENFORCE_NO_STORE_CACHE": False}),
+        lambda: Flasgo(security=SecurityConfig(enforce_no_store_cache=False)),
+    ],
+    ids=["settings", "security-config"],
+)
+def test_disabling_no_store_cache_is_honoured_by_every_config_path(app_factory: Any) -> None:
+    """A directly built SecurityConfig used to carry cache headers in its defaults, so the opt-out had no effect."""
+    app = app_factory()
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    response = app.test_client().get("/")
+    assert "cache-control" not in response.headers
+    assert "pragma" not in response.headers
+    assert response.headers["x-frame-options"] == "DENY"
+    assert SecurityConfig().security_headers == Settings().SECURITY_HEADERS
+
+
+@pytest.mark.parametrize(
+    ("trusted", "origin", "expected"),
+    [
+        ("https://partner.example.com", "https://partner.example.com", True),
+        ("https://partner.example.com/", "https://partner.example.com", True),
+        ("https://partner.example.com:443", "https://partner.example.com", True),
+        ("https://partner.example.com", "http://partner.example.com", False),
+        ("https://*.example.com", "https://api.example.com", True),
+        ("https://*.example.com", "http://api.example.com", False),
+        ("https://*.example.com", "https://example.com", False),
+        (".example.com", "https://api.example.com", True),
+        (".example.com", "http://evil.example.com", False),
+        ("partner.example.com", "https://partner.example.com", True),
+        ("partner.example.com", "http://partner.example.com", False),
+    ],
+)
+def test_csrf_trusted_origins_respect_scheme_and_canonical_form(trusted: str, origin: str, expected: bool) -> None:
+    """Bare entries must not trust plain-HTTP origins on an HTTPS app, and exact entries tolerate a trailing slash."""
+    from types import SimpleNamespace
+
+    from flasgo.security import _origin_matches_request
+
+    request = SimpleNamespace(scheme="https", headers={"host": "app.example.org"})
+    config = SecurityConfig(csrf_trusted_origins={trusted})
+    assert _origin_matches_request(origin, cast(Any, request), config) is expected
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ("https://app.example.org", True),
+        ("https://app.example.org:443", True),
+        ("https://app.example.org/some/referer?path", True),
+        ("http://app.example.org", False),
+        ("null", False),
+        ("https://[::1", False),
+    ],
+)
+def test_csrf_same_origin_comparison_is_canonical(origin: str, expected: bool) -> None:
+    from types import SimpleNamespace
+
+    from flasgo.security import _origin_matches_request
+
+    request = SimpleNamespace(scheme="https", headers={"host": "APP.example.org"})
+    assert _origin_matches_request(origin, cast(Any, request), SecurityConfig()) is expected
+
+
+@pytest.mark.parametrize("max_age", [0, -1, True, "3600"])
+def test_session_cookie_max_age_must_be_positive(max_age: object) -> None:
+    with pytest.raises(ValueError, match="SESSION_COOKIE_MAX_AGE must be a positive"):
+        Flasgo(settings={"SESSION_COOKIE_MAX_AGE": max_age})
+
+
+@pytest.mark.parametrize("pattern", ["*", "*.example.com", "exa mple.com", "evil.com/path"])
+def test_allowed_hosts_rejects_unsupported_patterns(pattern: str) -> None:
+    """``"*"`` looked like "allow any host" but matched nothing, so every request failed with 400."""
+    with pytest.raises(ValueError, match="ALLOWED_HOSTS entry"):
+        Flasgo(settings={"ALLOWED_HOSTS": {pattern}})
+
+
+def test_settings_get_only_returns_settings_fields() -> None:
+    settings = Settings(EXTRA={"custom": 1})
+    assert settings.get("DEBUG") is False
+    assert settings.get("custom") == 1
+    assert settings.get("to_security_config") is None
+    assert settings.get("get", "fallback") == "fallback"
+
+
+def test_cookie_expires_is_locale_independent() -> None:
+    from datetime import UTC, datetime
+
+    from flasgo.security import _format_http_date
+
+    assert _format_http_date(datetime(2026, 1, 5, 12, 0, tzinfo=UTC)) == "Mon, 05 Jan 2026 12:00:00 GMT"
+
+
+def test_settings_subclass_bool_fields_are_checked_on_assignment() -> None:
+    """Assignment checks used the concrete class's own annotations only, missing inherited and subclass fields."""
+    from dataclasses import dataclass
+
+    @dataclass
+    class AppSettings(Settings):
+        FEATURE_ENABLED: bool = False
+
+    settings = AppSettings()
+    with pytest.raises(TypeError, match="FEATURE_ENABLED must be a bool"):
+        setattr(settings, "FEATURE_ENABLED", "yes")  # noqa: B010 - bypass static typing on purpose
+    with pytest.raises(TypeError, match="DEBUG must be a bool"):
+        setattr(settings, "DEBUG", "false")  # noqa: B010 - bypass static typing on purpose
+
+
+@pytest.mark.parametrize("host", ["[::1%eth0]", "[::1%25eth0]:8000", "[fe80::1%lo]"])
+def test_ipv6_hosts_with_zone_ids_are_rejected(host: str) -> None:
+    """Zone IDs have no meaning in a Host header and must not match an allowed IPv6 address."""
+    app = Flasgo(settings={"ALLOWED_HOSTS": {"::1", "fe80::1"}, "CSRF_ENABLED": False})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    client = app.test_client()
+    assert client.get("/", headers={"host": host}).status_code == 400
+    assert client.get("/", headers={"host": "[::1]:8000"}).status_code == 200
+
+
+def test_allowed_hosts_rejects_ipv6_zone_id_patterns() -> None:
+    with pytest.raises(ValueError, match="ALLOWED_HOSTS entry"):
+        Flasgo(settings={"ALLOWED_HOSTS": {"::1%eth0"}})
+
+
+def test_suffix_patterns_never_match_ipv6_literals() -> None:
+    from flasgo.security import host_is_allowed
+
+    assert not host_is_allowed("[::1]", allowed_hosts={".example.com"})
+    assert host_is_allowed("[::1]", allowed_hosts={"::1"})
+
+
+def test_settings_subclass_with_type_checking_only_annotation_can_be_constructed(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One unresolvable field annotation must not stop the strict bool checks (or construction) from working."""
+    import importlib.util
+    import sys
+    import textwrap
+
+    module_path = tmp_path / "forward_settings.py"
+    module_path.write_text(
+        textwrap.dedent(
+            """
+            from dataclasses import dataclass
+            from typing import TYPE_CHECKING
+
+            from flasgo import Settings
+
+            if TYPE_CHECKING:
+                from decimal import Decimal
+
+
+            @dataclass
+            class AppSettings(Settings):
+                PRICE: "Decimal | None" = None
+                FEATURE_ENABLED: bool = False
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("forward_settings", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+
+    settings = module.AppSettings()
+    with pytest.raises(TypeError, match="FEATURE_ENABLED must be a bool"):
+        setattr(settings, "FEATURE_ENABLED", "yes")  # noqa: B010 - bypass static typing on purpose
+
+
+@pytest.mark.parametrize(
+    "entry", ["chrome-extension://abcdef", "https://partner.example/app", "https://partner.example?x=1", "*", "partner example"]
+)
+def test_csrf_trusted_origins_rejects_entries_that_can_never_match(entry: str) -> None:
+    with pytest.raises(ValueError, match="CSRF_TRUSTED_ORIGINS entry"):
+        Flasgo(settings={"CSRF_TRUSTED_ORIGINS": {entry}})
+
+
+@pytest.mark.parametrize(
+    "entry", ["https://partner.example", "https://partner.example/", "https://*.example.com", "partner.example:8443", ".example.com"]
+)
+def test_csrf_trusted_origins_accepts_supported_entries(entry: str) -> None:
+    Flasgo(settings={"CSRF_TRUSTED_ORIGINS": {entry}})

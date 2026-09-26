@@ -4,6 +4,7 @@ import sys
 from typing import Annotated
 
 import pytest
+
 from flasgo import Depends
 from flasgo.di import resolve_endpoint_arguments
 from flasgo.params import compile_endpoint_plan

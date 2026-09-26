@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from flasgo import Blueprint, Depends, Flasgo, HasScope, IsAuthenticated, RateLimitRule, User, cli
 from flasgo.policy import compare_policy, deployment_issues
 
@@ -93,7 +94,7 @@ def test_blueprint_cycles_and_duplicates_fail_without_partial_registration() -> 
 def test_url_for_rejects_ambiguous_path_values(value: str) -> None:
     app = Flasgo()
     app.get("/<path:value>", name="file")(lambda value: value)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"Unsafe URL parameter|safe relative URL"):
         app.url_for("file", value=value)
 
 
@@ -120,7 +121,7 @@ def test_policy_omits_secrets_and_detects_permission_change() -> None:
     assert app.security.secret_key not in json.dumps(before)
     app.authorize(IsAuthenticated())(private)
     assert compare_policy(before, app.policy_snapshot())[0]["section"] == "routes"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="schema_version=1"):
         compare_policy({"schema_version": 2}, app.policy_snapshot())
 
 
@@ -145,3 +146,56 @@ def test_cli_policy_snapshot_and_comparison(tmp_path: Path, capsys: pytest.Captu
     app.security.csrf_enabled = False
     assert cli.main(["check", "unused", "--against", str(file), "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["changes"]
+
+
+@pytest.mark.parametrize("target", ["app", "blueprint"])
+def test_single_string_methods_are_rejected(target: str) -> None:
+    """``methods="POST"`` would otherwise register the methods P, O, S and T."""
+    owner = Flasgo() if target == "app" else Blueprint("api")
+
+    with pytest.raises(TypeError, match=r"sequence of method names such as \('POST',\)"):
+
+        @owner.route("/submit", methods="POST")
+        def submit() -> str:
+            return "ok"
+
+
+def test_duplicate_route_names_are_rejected_at_registration() -> None:
+    """Duplicates used to register fine and then break the next, unrelated blueprint registration."""
+    app = Flasgo()
+    app.add_route("/a", lambda: "a", name="dup")
+
+    with pytest.raises(ValueError, match="'dup' is a duplicate"):
+        app.add_route("/b", lambda: "b", name="dup")
+    with pytest.raises(ValueError, match="'dup' is a duplicate"):
+        app.add_websocket_route("/ws", lambda websocket: None, name="dup")
+
+    unrelated = Blueprint("other", url_prefix="/other")
+    unrelated.add_route("/c", lambda: "c", name="c")
+    app.register_blueprint(unrelated)
+    assert app.url_for("other.c") == "/other/c"
+
+
+def test_url_for_encodes_literal_segments_and_skips_none_query_values() -> None:
+    app = Flasgo()
+
+    @app.get("/café/<int:item_id>", name="item")
+    def item(item_id: int) -> str:
+        return str(item_id)
+
+    assert app.url_for("item", item_id=3, q=None, sort="a b") == "/caf%C3%A9/3?sort=a+b"
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("/<a>/<int:a>", "repeats a parameter name"),
+        ("/items/<int: id>", "malformed"),
+        ("/items/<id", "malformed"),
+        ("/items/<bogus:id>", "Unknown route converter"),
+    ],
+)
+def test_malformed_route_placeholders_are_rejected(path: str, message: str) -> None:
+    app = Flasgo()
+    with pytest.raises(ValueError, match=message):
+        app.get(path)(lambda **_: "ok")

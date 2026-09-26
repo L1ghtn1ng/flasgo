@@ -1,8 +1,9 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
+
 from flasgo import Depends, EventSourceResponse, Flasgo, NDJSONResponse, ServerSentEvent, StreamingResponse, request
 
 
@@ -117,11 +118,9 @@ def test_annotated_sse_and_text_responses_use_the_correct_openapi_media_types() 
 
 @pytest.mark.parametrize("field", ["event", "id"])
 def test_sse_rejects_control_character_injection(field: str) -> None:
-    with pytest.raises(ValueError):
-        if field == "event":
-            ServerSentEvent("test", event="x\ndata: injected")
-        else:
-            ServerSentEvent("test", id="x\ndata: injected")
+    injected: dict[str, Any] = {field: "x\ndata: injected"}
+    with pytest.raises(ValueError, match="without control characters"):
+        ServerSentEvent("test", **injected)
 
 
 def test_ndjson_contract_filters_each_item() -> None:
@@ -314,3 +313,34 @@ def test_background_tasks_do_not_retain_request_context() -> None:
 
     assert app.test_client().get("/").body == b"done"
     assert events == ["complete"]
+
+
+def test_client_disconnect_from_a_stream_is_not_logged_as_an_error(caplog: pytest.LogCaptureFixture) -> None:
+    """Closing an SSE stream is routine, so it must not produce ERROR-level response-send-failed events."""
+    app = Flasgo()
+
+    @app.get("/events")
+    def events() -> StreamingResponse:
+        async def content():
+            yield b"first"
+            await asyncio.Event().wait()
+
+        return StreamingResponse(content())
+
+    async def run() -> None:
+        async with app.test_client().astream("GET", "/events") as response:
+            assert await anext(response.iter_bytes()) == b"first"
+
+    with caplog.at_level("INFO", logger="flasgo"):
+        asyncio.run(run())
+
+    assert not [record for record in caplog.records if record.levelname == "ERROR"]
+    assert [getattr(record, "event", None) for record in caplog.records if record.name == "flasgo.access"] == ["http-client-disconnected"]
+
+
+def test_sse_heartbeat_must_be_shorter_than_idle_timeout() -> None:
+    async def events():
+        yield ServerSentEvent({"ok": True})
+
+    with pytest.raises(ValueError, match="heartbeat must be shorter than idle_timeout"):
+        EventSourceResponse(events(), heartbeat=5, idle_timeout=0.5)

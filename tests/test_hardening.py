@@ -1,22 +1,14 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import time
 
 import pytest
+
+from _helpers import extract_cookie
 from flasgo import Flasgo, HTTPException, Request, User
 from flasgo.security import build_set_cookie
 from flasgo.session import SessionSigner, b64encode, hmac_digest
 from flasgo.testing import TestClient
-
-
-def _extract_cookie(set_cookie_header: str, name: str) -> str | None:
-    for line in set_cookie_header.split("\n"):
-        raw = line.strip()
-        if raw.startswith(f"{name}="):
-            return raw.split(";", 1)[0].split("=", 1)[1]
-    return None
 
 
 def test_authorize_defaults_to_is_authenticated() -> None:
@@ -65,7 +57,7 @@ def test_csrf_rejects_same_host_with_wrong_scheme() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed", scheme="https")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     rejected = client.post(
@@ -92,7 +84,7 @@ def test_csrf_rejects_same_host_with_wrong_scheme() -> None:
 
 @pytest.mark.parametrize("cookie_value", ["bad;value", "bad,value", "bad value", "bad\tvalue"])
 def test_build_set_cookie_rejects_unsafe_value_separators(cookie_value: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid cookie value"):
         build_set_cookie("session", cookie_value)
 
 

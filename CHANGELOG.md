@@ -2,6 +2,177 @@
 
 ## [Unreleased]
 
+### Added
+
+- `JinjaTemplates.render_async()` and `Flasgo.render_template_async()` for templates configured with
+  `enable_async=True`, which previously failed with a 500 on every render. The synchronous helpers now raise a clear
+  `RuntimeError` for async environments.
+
+### Changed
+
+- `after_request` hooks now also run for 404 and 405 responses and for authentication and authorization denials,
+  matching the existing behaviour for rate-limit rejections and before-request short-circuits. Error-handler responses
+  and CSRF or host rejections still bypass them.
+- The built-in development server uses uvicorn's `websockets-sansio` WebSocket implementation instead of the
+  deprecated legacy `websockets` one (which logged a deprecation warning at startup), and no longer sends a `server:
+  uvicorn` header.
+- Removed `from __future__ import annotations` throughout the package, tests and benchmarks; Python 3.14 evaluates
+  annotations lazily (PEP 649/749).
+- Internal type aliases use `type` statements and generics use PEP 695 syntax; union checks rely on `typing.Union is
+  types.UnionType` (3.14).
+- Typing and 3.14 idioms: overriding methods use `@typing.override`; context managers and `User.anonymous()` return
+  `Self`; `RouteAuth` is a frozen dataclass; status reason phrases come from `http.HTTPStatus` (so a 413 WebSocket
+  denial or fallback body now reads "Content Too Large", the RFC 9110 name); and the CLI suggests close matches for
+  mistyped commands (`argparse` `suggest_on_error`).
+- An authentication backend that raises now yields 500 for HTTP routes, matching the documentation page and WebSocket
+  upgrades (previously HTTP routes returned 401, inviting clients to retry credentials that may have been valid).
+  Documentation and route authorization now share one implementation.
+- Redis-backed rate limiting and sessions call their Lua scripts with `EVALSHA` (falling back to `EVAL` on `NOSCRIPT`)
+  instead of sending the full script on every request, and `RedisStore.from_url()` accepts `max_value_bytes`.
+- The in-memory rate limiter and `MemoryStore` remember when their earliest entry expires, so once full they reject
+  new clients without rescanning every key (about 5 ms per request at 10,000 keys before, microseconds now). Capacity
+  denials from the in-memory limiter report a Retry-After based on that expiry.
+- `BackgroundTasks.bind_observer()` is deprecated (Flasgo no longer uses it), and an observer that raises no longer
+  makes a successful task be reported as failed.
+- Packaging: license metadata uses a PEP 639 SPDX expression (`BSD-3-Clause`) with `license-files`, the `Typing ::
+  Typed`, `Python :: 3 :: Only` and `Environment :: Web Environment` classifiers are declared, and source
+  distributions contain an explicit file list, so untracked local files are never packaged.
+- Development tooling: ruff now also enforces the C4, DTZ, ERA, FLY, FURB, G, INP, ISC, LOG, PGH, PLW, PT, PTH, PYI,
+  Q, RET, RSE, S, SLOT, T20 and TID rule sets (with targeted per-file ignores), import sorting treats `flasgo` as
+  first-party, and pytest runs in strict mode with warnings treated as errors.
+
+### Fixed
+
+- `ALLOWED_HOSTS` now accepts only DNS names and IP literals in the Host header, so URL delimiters such as `?`, `#`, or
+  spaces can no longer smuggle an attacker host past a suffix pattern like `.example.com`. Bracketed IPv6 Host values
+  with a zone ID (for example `[::1%@evil.com#.example.com]`) are rejected, and suffix patterns never match IPv6
+  literals.
+- Response header names are now case-insensitive (`ResponseHeaders`). Flask-style `response.headers["Content-Type"] = ...`
+  replaces the existing header instead of sending a second, conflicting `Content-Type`/`Content-Length`, and a custom
+  `X-Frame-Options` no longer ships alongside the default one.
+- A parameter marker nested inside another type, such as `Annotated[str, Header()] | None`, is now rejected at route
+  registration. Previously the marker was silently dropped and the value was read from the query string instead.
+- `Session` is now a full `MutableMapping`: `"key" in session`, iteration, `len()`, `del session[key]`, `update()` and
+  `setdefault()` work. `session.pop(key, None)` only marks the session modified when the key existed, so consuming an
+  absent flash message no longer re-issues the session cookie and CSRF token on every page.
+- The `flasgo.session`, `flasgo.request` and `flasgo.current_user` proxies now forward attribute writes, deletion,
+  membership, iteration and `len()` to the request-bound object. Previously `session.modified = True` was stored on the
+  shared module-level proxy, so the session was never saved and the flag leaked into later requests.
+- `flasgo run --reload`, and `app.run()` with `DEBUG=True`, no longer crash with `ValueError: signal only works in main
+  thread`. The reloader now runs on the event loop through `watchfiles.arun_process` (new `arun_with_reload` helper).
+- The default text log format now includes exception tracebacks and stack info, which were silently dropped.
+- `LOG_LEVEL` is case-insensitive at runtime as well as in validation; `LOG_LEVEL="info"` no longer crashes startup.
+- Calling `configure_logging(stream=...)` again now switches the Flasgo handler to the new stream.
+- Untyped path segments such as `/items/<item_id>` are now coerced from text, so `item_id: int` accepts `/items/5`
+  instead of returning 422.
+- A JSON integer too large for a `float` field now returns a 422 validation error instead of an unhandled
+  `OverflowError` (500).
+- `methods="POST"` now raises `TypeError` instead of registering the single-character methods `P`, `O`, `S` and `T`.
+- CSRF trusted origins are compared in canonical form, so `https://partner.example/` and `https://partner.example:443`
+  match. Bare host and `.example.com` suffix entries now only trust the request's own scheme, so an HTTPS app no
+  longer trusts `http://evil.example.com`. Use `https://*.example.com` to trust subdomains explicitly.
+- JWT scopes must be RFC 6749 scope tokens. `encode_jwt(scopes=["read admin"])` previously produced a token that
+  decoded as the two scopes `read` and `admin`, and list-form scope claims with whitespace are now rejected. A NaN or
+  infinite `leeway` is rejected instead of silently disabling expiry checks, and `additional_claims` may now use
+  `scope` when a different `scope_claim` is configured.
+- Rate-limit response headers now report the most restrictive quota across the pre-authentication and
+  post-authentication phases. Previously a generous per-user limit overwrote a nearly exhausted per-IP limit, so
+  clients saw `ratelimit-remaining: 49` right before a 429.
+- The in-memory `RateLimiter.check()` no longer discards history that a longer-window rule sharing the same `scope`
+  still counts, which let clients exceed the longer quota. Retry-After for a denied request in a shared scope (in
+  memory and Redis) now waits until enough entries expire to fall under that rule's limit instead of only the oldest
+  one, so clients that honour it are not immediately denied again.
+- WebSocket handlers are inspected once at registration. Annotations imported only under `TYPE_CHECKING` no longer
+  fail every connection, the connection can be received under any parameter name annotated `WebSocket` (including
+  `Annotated[WebSocket, ...]`), and a handler that returns without accepting is recorded with the outcome
+  `not_accepted` instead of `success`.
+- A lifespan handler that yields more than once now has its cleanup run immediately at shutdown instead of at garbage
+  collection, and a startup failure after the handler started no longer leaves the app reporting that its lifespan is
+  already active.
+- Duplicate explicit route names are rejected when the route is added (HTTP and WebSocket alike). Previously they were
+  accepted and then caused the next, unrelated blueprint registration to fail.
+- `HTTPException` is hashable and compared by identity like other exceptions, `str(abort(403, "no"))` is `"no"`
+  instead of empty, it pickles with its headers, and `abort()` is annotated `-> Never` so type checkers treat the code
+  after it as unreachable.
+- URL-encoded forms decode percent-escapes with the declared `charset` and reject invalid bytes with a 400, instead of
+  decoding them as UTF-8 and silently replacing bad bytes with U+FFFD.
+- `Request.cookies` now reads every `Cookie` header, with the first value winning for a repeated name, matching
+  `cookie_values()`. Previously only the last header was parsed.
+- 1xx, 204 and 304 responses no longer send `content-length` or `content-type` (RFC 9110), and constructing one with a
+  body raises `ValueError`. `Response.content_type` is now backed by the header, so assigning it after construction
+  changes what is sent. Tuple responses such as `("body", 999)` are validated like any other response.
+- Static files: `If-None-Match` uses RFC 9110 weak comparison and accepts lists and `*`; archives such as `.tar.gz`,
+  `.tar.bz2` and `.xz` are served as downloads with their archive type instead of a `Content-Encoding` browsers cannot
+  decode; the content type comes from the requested name rather than a symlink target; and path resolution and
+  `stat()` run off the event loop.
+- A client disconnecting from a streaming or SSE response is logged as `http-client-disconnected` at INFO instead of
+  an ERROR-level `response-send-failed` event, and `EventSourceResponse` rejects a `heartbeat` that is not shorter
+  than `idle_timeout` (which would close quiet streams before the first ping).
+- Validation: one unresolvable model annotation no longer makes every field of that model reject all values; `Model |
+  None` reports the model's field errors; `FormValidationError.errors` groups list-field errors under the field name;
+  numeric query, header and form text must be plain ASCII decimals (`"1_000"`, `" 12 "` and non-ASCII digits are
+  rejected); `Literal`, `Enum` and `UUID` require exact JSON types; `set[Model]` with unhashable items and
+  `__post_init__` failures return 422 instead of 500; error messages no longer echo internal type names; and model
+  type hints are cached per class.
+- OpenAPI now matches runtime behaviour: handlers returning `None` are documented as 204 with no content, `bytes`
+  responses as `text/plain`, untyped path segments with the handler's annotated type, operation IDs contain only
+  `[A-Za-z0-9_]` (the static route produced `static:/static_get`), and docstring descriptions keep paragraph breaks
+  and indentation. Tuple route response models are rejected at registration because a returned tuple is read as
+  `(body, status)`.
+- The test client behaves more like a real server and browser: `scope["path"]` is percent-decoded and non-ASCII paths
+  and query strings are percent-encoded instead of raising `UnicodeEncodeError`; followed redirects honour the scheme
+  of an absolute `Location`, stop at other origins instead of replaying them against the app, and drop body headers
+  when switching to GET; cookies set with `Max-Age=0` or a past `Expires` are removed from the jar; closing a
+  WebSocket session after a server-side close still waits for the handler to finish; and repeated response headers are
+  decoded consistently for HTTP, streaming and WebSocket responses.
+- The synchronous test client runs its worker loop with `asyncio.Runner`, so leftover tasks, async generators and the
+  default executor are shut down cleanly, and a lifespan that crashes now raises its own error immediately instead of
+  a 5-second timeout.
+- `flasgo openapi -o` and other CLI file outputs keep an existing file's permissions (or use the umask for new files)
+  instead of always writing `0600`, and a failed write no longer leaves a hidden temporary file behind. The `openapi`
+  command also rejects NaN/Infinity like the other JSON commands.
+- SSRF guard: malformed URLs and invalid hostnames (unterminated IPv6 literals, empty or over-long labels, spaces)
+  raise `SSRFViolation` instead of leaking `ValueError`/`UnicodeError`; internationalized hosts are converted to their
+  IDNA ASCII form for allowlist matching, resolution and `host_header`; and IPv6 site-local addresses (`fec0::/10`)
+  are treated as private.
+- Settings validation: `SESSION_COOKIE_MAX_AGE` must be a positive integer (zero or negative values silently broke
+  every session), and `ALLOWED_HOSTS` entries that are not a hostname, IP address or `.suffix` pattern are rejected at
+  startup. In particular `"*"` previously matched nothing and returned 400 for every request; policy check FG002 no
+  longer describes it as unrestricted. `Settings.get()` returns only settings fields, not methods, and cookie
+  `Expires` / static `Last-Modified` dates no longer depend on the process locale.
+- `WebSocket.query_params` now enforces `MAX_FORM_FIELDS` like HTTP requests do.
+- A Flasgo-owned OpenTelemetry tracer provider is flushed, not shut down, when a lifespan ends, so later lifespan
+  cycles on the same app (for example a second test client context) keep exporting spans. The SDK still shuts it down
+  at interpreter exit.
+- Endpoints whose annotations cannot be resolved at runtime (for example names imported only under `TYPE_CHECKING`, in
+  modules without `from __future__ import annotations`) no longer fail registration with a raw `NameError` from
+  `inspect.signature`; unmarked parameters and return types fall back to forward references as intended.
+- `url_for()` percent-encodes literal path text (for example `/café`) and omits query values that are `None` instead
+  of rendering `?q=None`. The helper now lives in `flasgo.routing.build_url` (still importable from
+  `flasgo.blueprints`).
+- Route paths with a repeated parameter name, an unknown converter, or a malformed placeholder such as `<int: id>` now
+  raise a clear `ValueError`; previously they raised `re.PatternError` or registered silently as literal paths.
+- `dict[str, T]` validation reports every invalid value instead of stopping at the first, matching list and model
+  validation.
+- When the Redis rate limiter is at key capacity, `Retry-After` reflects when the earliest bucket expires instead of a
+  fixed 1 second, avoiding a retry storm against Redis.
+- Receiving from a WebSocket after the client disconnected raises `WebSocketDisconnect` with the client's close code,
+  instead of a `RuntimeError` telling the handler to accept the socket first.
+- `CSRF_TRUSTED_ORIGINS` entries are validated at startup. Entries that can never match (non-http(s) schemes such as
+  `chrome-extension://`, or origins with a path or query) now raise a clear `ValueError` instead of silently rejecting
+  every request from that origin.
+- Synchronous rendering of templates configured with `enable_async=True` (including the module-level
+  `render_template(..., enable_async=True)`) works again outside a running event loop; it only raises inside one.
+- The async dev-server reloader always stops the server child process, including on Ctrl+C and SIGTERM, instead of
+  leaving it running and holding its port.
+- The in-memory rate limiter reports an exact `Retry-After` at key capacity, even after the earliest-expiring client
+  made another request.
+- Unicode entries in `SSRF_ALLOWED_HOSTS` match requests to the same internationalized host.
+- The test client follows same-origin redirects whose `Location` spells out the default port (for example
+  `http://localhost:80/`).
+- Unannotated path parameters are documented as strings in OpenAPI again.
+- CLI file output no longer temporarily changes the process umask to decide the new file's permissions.
+
 ## [0.9.1] - 2026-09-06
 
 ### Added

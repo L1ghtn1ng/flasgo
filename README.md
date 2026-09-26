@@ -260,6 +260,9 @@ unsupported; enforce public-to-private network boundaries at a trusted proxy or 
 
 - Host header allowlist (`localhost`, `127.0.0.1` by default).
 - HMAC-signed, session-bound CSRF double-submit cookie defense for unsafe methods.
+- CSRF Origin/Referer checks. `CSRF_TRUSTED_ORIGINS` accepts exact origins (`https://partner.example`),
+  scheme-qualified wildcards (`https://*.example.com`), bare hosts (`partner.example`), and bare suffixes
+  (`.example.com`). Bare entries only trust the request's own scheme, so an HTTPS app never trusts a plain-HTTP origin.
 - Signed session cookies (HMAC-SHA256).
 - No-store cache headers by default to reduce sensitive data caching (CWE-524 mitigation).
 - Static file path traversal and symlink escape protections.
@@ -551,7 +554,7 @@ handing off.
   `Flasgo.delete`, `Flasgo.websocket`, `Flasgo.lifespan`, `Flasgo.state`, `Flasgo.before_request`,
   `Flasgo.after_request`, `Flasgo.errorhandler`
 - App integrations: `Flasgo.register_auth_backend`, `Flasgo.authorize`, `Flasgo.ratelimit`,
-  `Flasgo.configure_templates`, `Flasgo.render_template`, `Flasgo.configure_static`, `Flasgo.test_client`,
+  `Flasgo.configure_templates`, `Flasgo.render_template`, `Flasgo.render_template_async`, `Flasgo.configure_static`, `Flasgo.test_client`,
   `Flasgo.resolve_outbound_url`, `Flasgo.aresolve_outbound_url`, `Flasgo.openapi_spec`
 - Parameter and validation helpers: `Body`, `Query`, `Header`, `Cookie`, `Form`, `Depends`, `ValidationIssue`,
   `RequestValidationError`, `FormValidationError`
@@ -561,8 +564,8 @@ handing off.
   `extract_bearer_token`, `jwt_backend`, `encode_jwt`
 - Rate limiting: `RateLimitRule`, `rate_limit`
 - WebSockets: `WebSocket`, `WebSocketDisconnect`, `WebSocketException`
-- Testing: `TestClient`, `TestResponse`, `SyncWebSocketSession`, `AsyncWebSocketSession`,
-  `WebSocketHandshakeError`
+- Testing: `TestClient`, `TestResponse`, `AsyncTestStream`, `SyncWebSocketSession`,
+  `AsyncWebSocketSession`, `WebSocketHandshakeError`
 - Flask-style globals and responses: `request`, `session`, `current_user`, `jsonify`, `redirect`,
   `Response.redirect`, `is_safe_redirect_target`
 - Templating: `BaseLoader`, `SecureTemplateLoader`, `JinjaTemplates`, `Template`, `TemplateNotFound`,
@@ -653,6 +656,9 @@ If you only need the rendered string, use the app helper:
 ```python
 html = app.render_template("home.html", {"title": "Welcome"})
 ```
+
+Templates configured with `enable_async=True` must be rendered from an async handler with
+`await app.render_template_async(...)`; the synchronous helpers raise a clear error instead of blocking the event loop.
 
 ## Forms
 

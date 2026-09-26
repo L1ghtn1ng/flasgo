@@ -1,9 +1,14 @@
-from __future__ import annotations
-
 import asyncio
+import importlib.util
+import logging
+import textwrap
+import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Annotated, Any, cast
 
 import pytest
+
 from flasgo import (
     Flasgo,
     IsAuthenticated,
@@ -141,7 +146,6 @@ def test_websocket_authentication_failures_are_throttled_before_backend() -> Non
     def backend(request: object) -> None:
         nonlocal calls
         calls += 1
-        return None
 
     app = Flasgo(
         settings={
@@ -174,7 +178,6 @@ def test_websocket_default_route_limit_runs_before_authentication() -> None:
     def backend(request: object) -> None:
         nonlocal calls
         calls += 1
-        return None
 
     app = Flasgo(settings={"CSRF_ENABLED": False, "SECURITY_FAILURE_RATE_LIMIT": 0})
     app.register_auth_backend("test", backend)
@@ -308,3 +311,190 @@ def test_response_send_failure_never_attempts_a_second_response() -> None:
     asyncio.run(app(scope, receive, send))
 
     assert messages == ["http.response.start", "http.response.body"]
+
+
+def test_websocket_handler_parameter_is_resolved_at_registration() -> None:
+    """Handlers may take the connection under any name via an annotation, including Annotated metadata."""
+    app = Flasgo()
+
+    @app.websocket("/named", public=True)
+    async def named(conn: WebSocket) -> None:
+        await conn.accept()
+        await conn.send_text("named")
+
+    @app.websocket("/annotated", public=True)
+    async def annotated(conn: Annotated[WebSocket, {"doc": "connection"}]) -> None:
+        await conn.accept()
+        await conn.send_text("annotated")
+
+    @app.websocket("/items/<int:item_id>", public=True)
+    async def with_params(websocket: WebSocket, item_id: int) -> None:
+        await websocket.accept()
+        await websocket.send_text(str(item_id))
+
+    with app.test_client() as client:
+        for path, expected in (("/named", "named"), ("/annotated", "annotated"), ("/items/7", "7")):
+            with client.websocket_connect(path) as websocket:
+                assert websocket.receive_text() == expected
+
+
+def test_websocket_handler_with_type_checking_only_annotation_registers(tmp_path: Path) -> None:
+    """Names imported only under TYPE_CHECKING must not break every connection with NameError."""
+    module_path = tmp_path / "ws_forward_ref_app.py"
+    module_path.write_text(
+        textwrap.dedent(
+            """
+            from typing import TYPE_CHECKING
+
+            from flasgo import Flasgo, WebSocket
+
+            if TYPE_CHECKING:
+                from decimal import Decimal
+
+            app = Flasgo()
+
+
+            @app.websocket("/socket", public=True)
+            async def socket(websocket: WebSocket, hint: "Decimal | None" = None) -> None:
+                await websocket.accept()
+                await websocket.send_text("ok")
+            """
+        )
+    )
+    spec = importlib.util.spec_from_file_location("ws_forward_ref_app", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with module.app.test_client() as client, client.websocket_connect("/socket") as websocket:
+        assert websocket.receive_text() == "ok"
+
+
+def test_websocket_handler_that_never_accepts_is_not_logged_as_success(caplog: pytest.LogCaptureFixture) -> None:
+    app = Flasgo()
+
+    @app.websocket("/noaccept", public=True)
+    async def noaccept(websocket: WebSocket) -> None:
+        return None
+
+    # Lifespan startup disables propagation on the "flasgo" logger, so capture on the logger itself.
+    websocket_logger = logging.getLogger("flasgo.websocket")
+    websocket_logger.addHandler(caplog.handler)
+    try:
+        with (
+            caplog.at_level("INFO", logger="flasgo.websocket"),
+            app.test_client() as client,
+            pytest.raises(WebSocketHandshakeError),
+            client.websocket_connect("/noaccept"),
+        ):
+            pass
+    finally:
+        websocket_logger.removeHandler(caplog.handler)
+
+    outcomes = [getattr(record, "outcome", None) for record in caplog.records if getattr(record, "event", None) == "websocket-complete"]
+    assert outcomes == ["not_accepted"]
+
+
+async def _drive_lifespan(app: Flasgo, *events: str) -> list[str]:
+    incoming = [{"type": f"lifespan.{event}"} for event in events]
+    sent: list[str] = []
+
+    async def receive() -> dict[str, str]:
+        return incoming.pop(0)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(str(message["type"]))
+
+    await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+    return sent
+
+
+def test_lifespan_handler_that_yields_twice_is_closed_immediately() -> None:
+    app = Flasgo()
+    events: list[str] = []
+
+    @app.lifespan
+    async def lifespan(_app: Flasgo) -> AsyncGenerator[None]:
+        try:
+            yield
+            yield
+        finally:
+            events.append("cleanup")
+
+    async def run() -> None:
+        assert await _drive_lifespan(app, "startup", "shutdown") == ["lifespan.startup.complete", "lifespan.shutdown.failed"]
+        assert events == ["cleanup"]
+
+    asyncio.run(run())
+
+
+def test_lifespan_can_start_again_after_a_failed_startup() -> None:
+    app = Flasgo()
+    attempts: list[int] = []
+
+    @app.lifespan
+    async def lifespan(_app: Flasgo) -> AsyncGenerator[None]:
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise RuntimeError("first start fails")
+        yield
+
+    async def run() -> None:
+        assert await _drive_lifespan(app, "startup") == ["lifespan.startup.failed"]
+        assert await _drive_lifespan(app, "startup", "shutdown") == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+
+    asyncio.run(run())
+
+
+def test_websocket_client_waits_for_the_app_after_a_server_close() -> None:
+    """After the server closes, leaving the session must still run the handler to completion."""
+    app = Flasgo()
+    events: list[str] = []
+
+    @app.websocket("/bye", public=True)
+    async def bye(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close(1000)
+        await asyncio.sleep(0.01)
+        events.append("handler-finished")
+
+    with app.test_client() as client, client.websocket_connect("/bye") as websocket, pytest.raises(WebSocketDisconnect):
+        websocket.receive_text()
+    assert events == ["handler-finished"]
+
+
+def test_test_client_surfaces_lifespan_crashes_immediately() -> None:
+    """An app that raises on the lifespan scope must fail fast with its own error, not a 5 second timeout."""
+
+    async def broken_app(scope: dict[str, object], receive: object, send: object) -> None:
+        raise ValueError("lifespan exploded")
+
+    from flasgo.testing import TestClient
+
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="lifespan exploded"), TestClient(cast(Any, broken_app)):
+        pass
+    assert time.monotonic() - started < 2
+
+
+def test_websocket_query_params_enforce_max_form_fields() -> None:
+    app = Flasgo(settings={"MAX_FORM_FIELDS": 2})
+    outcomes: list[str] = []
+
+    @app.websocket("/q", public=True)
+    async def query(websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            params = websocket.query_params
+        except Exception as exc:
+            outcomes.append(type(exc).__name__)
+            raise
+        await websocket.send_text(",".join(sorted(params)))
+
+    with app.test_client() as client:
+        with client.websocket_connect("/q?a=1&b=2") as websocket:
+            assert websocket.receive_text() == "a,b"
+        with client.websocket_connect("/q?a=1&b=2&c=3") as websocket, pytest.raises(WebSocketDisconnect):
+            websocket.receive_text()
+    assert outcomes == ["_RequestRejection"]

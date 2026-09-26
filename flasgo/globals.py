@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from .app import request as _get_request
@@ -15,15 +13,45 @@ if TYPE_CHECKING:
 
 
 class _ContextProxy[T]:
+    """Module-level stand-in that forwards every operation to the object bound to the current request."""
+
+    __slots__ = ("_getter", "_name")
+
     def __init__(self, getter: Callable[[], T], name: str) -> None:
-        self._getter = getter
-        self._name = name
+        object.__setattr__(self, "_getter", getter)
+        object.__setattr__(self, "_name", name)
 
     def _current(self) -> T:
         return self._getter()
 
     def __getattr__(self, item: str) -> Any:
+        if item.startswith("__") and item.endswith("__"):
+            # Protocol probes (copy, pickle, dir) must not require an active request context.
+            raise AttributeError(item)
         return getattr(self._current(), item)
+
+    def __setattr__(self, item: str, value: Any) -> None:
+        # Writes must reach the request-bound object; storing them on the shared proxy would leak across requests.
+        setattr(self._current(), item, value)
+
+    def __delattr__(self, item: str) -> None:
+        delattr(self._current(), item)
+
+    def __contains__(self, key: object) -> bool:
+        return key in cast(Any, self._current())
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(cast(Any, self._current()))
+
+    def __len__(self) -> int:
+        return len(cast(Any, self._current()))
+
+    def __bool__(self) -> bool:
+        return bool(self._current())
+
+    def __delitem__(self, key: Any) -> None:
+        current = cast(Any, self._current())
+        del current[key]
 
     def __getitem__(self, key: Any) -> Any:
         current = cast(Any, self._current())

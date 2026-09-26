@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 import asyncio
 import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, overload, override
 from urllib.parse import parse_qs
 
 from .exceptions import HTTPException, _RequestRejection
@@ -16,7 +14,6 @@ if TYPE_CHECKING:
     from .auth import User
     from .session import Session
 
-_T = TypeVar("_T")
 
 DEFAULT_MAX_MULTIPART_PARTS = 1_000
 DEFAULT_MAX_FORM_FIELDS = 1_000
@@ -28,6 +25,21 @@ def _scope_positive_int(scope: Scope, key: str, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return default
+
+
+def parse_query_params(scope: Scope) -> dict[str, list[str]]:
+    """Decode an HTTP or WebSocket scope's query string, enforcing the ``MAX_FORM_FIELDS`` limit."""
+    max_fields = _scope_positive_int(scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
+    raw = bytes(scope.get("query_string", b"")).decode("latin-1")
+    try:
+        return parse_qs(raw, keep_blank_values=True, max_num_fields=max_fields)
+    except ValueError as exc:
+        raise _RequestRejection(413, "Query string exceeds MAX_FORM_FIELDS.", "form_limit") from exc
+
+
+def scope_header_values(scope: Scope, name: bytes) -> tuple[str, ...]:
+    """Return every value of a lowercase header name from an ASGI scope, preserving duplicates."""
+    return tuple(value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == name)
 
 
 def _reject_json_constant(value: str) -> Any:
@@ -67,19 +79,6 @@ def _count_multipart_part_delimiters(body: bytes, boundary: bytes) -> int:
 
 def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
     return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in raw_headers}
-
-
-def _parse_cookies(cookie_header: str | None) -> dict[str, str]:
-    if not cookie_header:
-        return {}
-    cookies: dict[str, str] = {}
-    for chunk in cookie_header.split(";"):
-        item = chunk.strip()
-        if not item or "=" not in item:
-            continue
-        key, value = item.split("=", 1)
-        cookies[key.strip()] = value.strip()
-    return cookies
 
 
 def _parse_cookie_values(cookie_headers: list[str]) -> dict[str, list[str]]:
@@ -135,15 +134,18 @@ class FormData(Mapping[str, str]):
         self._fields = {key: list(values) for key, values in (fields or {}).items()}
         self._files = {key: list(values) for key, values in (files or {}).items()}
 
+    @override
     def __getitem__(self, key: str) -> str:
         values = self._fields.get(key)
         if not values:
             raise KeyError(key)
         return values[0]
 
+    @override
     def __iter__(self) -> Iterator[str]:
         return iter(self._fields)
 
+    @override
     def __len__(self) -> int:
         return len(self._fields)
 
@@ -151,7 +153,7 @@ class FormData(Mapping[str, str]):
     def get(self, key: object, /) -> str | None: ...
 
     @overload
-    def get(self, key: object, /, default: _T) -> str | _T: ...
+    def get[T](self, key: object, /, default: T) -> str | T: ...
 
     def get(self, key: object, /, default: object = None) -> str | object:
         values = self._fields.get(key)
@@ -266,7 +268,6 @@ class Request:
     headers: dict[str, str] = field(init=False)
     _body: bytes | None = field(default=None, init=False)
     _form: FormData | None = field(default=None, init=False)
-    _form_loaded: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.headers = _decode_headers(self.scope.get("headers", []))
@@ -294,11 +295,7 @@ class Request:
     @property
     def query_params(self) -> Mapping[str, list[str]]:
         """Decode query parameters while enforcing the configured field-count limit."""
-        max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
-        try:
-            return parse_qs(self.query_string, keep_blank_values=True, max_num_fields=max_fields)
-        except ValueError as exc:
-            raise _RequestRejection(413, "Query string exceeds MAX_FORM_FIELDS.", "form_limit") from exc
+        return parse_query_params(self.scope)
 
     @property
     def content_type(self) -> str:
@@ -307,13 +304,12 @@ class Request:
 
     @property
     def cookies(self) -> dict[str, str]:
-        return _parse_cookies(self.headers.get("cookie"))
+        """Return cookies from every ``Cookie`` header; the first value wins for a repeated name."""
+        return {name: values[0] for name, values in _parse_cookie_values(list(self.header_values("cookie"))).items()}
 
     def header_values(self, name: str) -> tuple[str, ...]:
         """Return every wire-level value for a case-insensitive header name."""
-
-        normalized = name.lower().encode("latin-1")
-        return tuple(value.decode("latin-1") for key, value in self.scope.get("headers", []) if key.lower() == normalized)
+        return scope_header_values(self.scope, name.lower().encode("latin-1"))
 
     def cookie_values(self, name: str) -> tuple[str, ...]:
         """Return every value for an exact, case-sensitive cookie name."""
@@ -399,8 +395,8 @@ class Request:
 
     async def form(self) -> FormData:
         """Parse supported form encodings while retaining bounded diagnostic rejection reasons."""
-        if self._form_loaded:
-            return self._form or FormData()
+        if self._form is not None:
+            return self._form
 
         max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
         content_type, params = _parse_content_type(self.headers.get("content-type"))
@@ -412,7 +408,11 @@ class Request:
                 error_detail="Invalid form encoding. Use a supported charset such as UTF-8.",
             )
             try:
-                parsed = parse_qs(decoded, keep_blank_values=True, max_num_fields=max_fields)
+                # Percent-escapes must be decoded with the declared charset too, and strictly: silently replacing
+                # invalid bytes with U+FFFD would accept input that multipart parsing rejects.
+                parsed = parse_qs(decoded, keep_blank_values=True, max_num_fields=max_fields, encoding=charset, errors="strict")
+            except UnicodeDecodeError as exc:
+                raise HTTPException(400, "Invalid form encoding. Use a supported charset such as UTF-8.") from exc
             except ValueError as exc:
                 raise _RequestRejection(413, "Form data exceeds MAX_FORM_FIELDS.", "form_limit") from exc
             form = FormData(fields=parsed)
@@ -434,5 +434,4 @@ class Request:
             form = FormData()
 
         self._form = form
-        self._form_loaded = True
         return form

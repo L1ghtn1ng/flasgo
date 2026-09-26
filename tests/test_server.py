@@ -1,13 +1,15 @@
-from __future__ import annotations
-
 import asyncio
 import os
+import subprocess
+import sys
+import threading
 import types
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+
 from flasgo import Flasgo
 from flasgo import server as server_module
 
@@ -45,6 +47,112 @@ def test_run_with_reload_spawns_current_command(monkeypatch: pytest.MonkeyPatch,
     assert calls["target_type"] == "command"
     assert calls["env"] == "true"
     assert calls["ignore_permission_denied"] is True
+
+
+def test_dev_server_reload_watches_on_the_loop_and_restarts_the_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The reloader runs on the event loop thread and restarts (then finally stops) the server child."""
+    events: list[tuple[str, object]] = []
+
+    async def fake_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        events.append(("watch", (paths, threading.current_thread() is threading.main_thread(), ignore_permission_denied)))
+        yield {(1, str(tmp_path / "app.py"))}
+
+    def fake_start(command: str) -> str:
+        events.append(("start", (command, os.environ.get(server_module._RELOAD_ENV))))
+        return f"child-{sum(kind == 'start' for kind, _ in events)}"
+
+    def fake_stop(process: object, **_: object) -> None:
+        events.append(("stop", process))
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=fake_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", fake_start)
+    monkeypatch.setattr(server_module, "_stop_reload_child", fake_stop)
+    monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    asyncio.run(server_module.run_dev_server(Flasgo(), "127.0.0.1", 0, reload=True, reload_dirs=[tmp_path]))
+
+    assert events == [
+        ("start", ("/usr/bin/python3 app.py", "true")),
+        ("watch", ((str(tmp_path.resolve()),), True, True)),
+        ("stop", "child-1"),
+        ("start", ("/usr/bin/python3 app.py", "true")),
+        ("stop", "child-2"),
+    ]
+    assert server_module._RELOAD_ENV not in os.environ
+
+
+def test_cancelling_the_reloader_stops_the_server_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """watchfiles.arun_process skipped child cleanup on cancellation, leaving a server holding its port."""
+    started: list[subprocess.Popen[bytes]] = []
+    child_running = threading.Event()
+    real_start = server_module._start_reload_child
+
+    def start(command: str) -> subprocess.Popen[bytes]:
+        process = real_start(command)
+        started.append(process)
+        child_running.set()
+        return process
+
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", start)
+    monkeypatch.setattr(server_module.sys, "orig_argv", [sys.executable, "-c", "import time; time.sleep(60)"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        assert await asyncio.to_thread(child_running.wait, 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert started[0].poll() is not None
+
+
+@pytest.mark.parametrize("cancellations", [1, 2])
+def test_cancelling_the_reloader_while_a_child_is_starting_stops_that_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cancellations: int
+) -> None:
+    """Cancellation during the worker-thread spawn, even repeated (two SIGTERMs), must not orphan the child."""
+    started: list[subprocess.Popen[bytes]] = []
+    spawning = threading.Event()
+    release = threading.Event()
+    real_start = server_module._start_reload_child
+
+    def slow_start(command: str) -> subprocess.Popen[bytes]:
+        spawning.set()
+        release.wait(10)
+        process = real_start(command)
+        started.append(process)
+        return process
+
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", slow_start)
+    monkeypatch.setattr(server_module.sys, "orig_argv", [sys.executable, "-c", "import time; time.sleep(60)"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        assert await asyncio.to_thread(spawning.wait, 10)
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())  # also waits for the worker thread, which stops a child it spawned after cancellation
+    assert len(started) == 1
+    assert started[0].poll() is not None
 
 
 def test_app_run_uses_debug_reload_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,3 +214,124 @@ def test_dev_server_uses_hardened_uvicorn_configuration(monkeypatch: pytest.Monk
     assert seen["ws_max_size"] == 4096
     assert seen["ws_per_message_deflate"] is False
     assert seen["limit_concurrency"] == 100
+    assert seen["ws"] == "websockets-sansio"
+    assert seen["server_header"] is False
+
+
+def test_dev_server_websocket_implementation_loads_without_deprecation_warnings() -> None:
+    import warnings
+
+    import uvicorn
+
+    config = uvicorn.Config(Flasgo(), ws="websockets-sansio", lifespan="off", server_header=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config.load()
+    assert config.ws_protocol_class is not None
+
+
+def test_cancelled_reloader_waits_for_the_child_to_stop_without_blocking_the_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The reloader must not return while its child still holds the port, yet the loop must stay responsive."""
+    stopping = threading.Event()
+    release = threading.Event()
+    stopped: list[object] = []
+
+    def slow_stop(process: object, **_: object) -> None:
+        stopping.set()
+        release.wait(10)
+        stopped.append(process)
+
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", lambda command: "child")
+    monkeypatch.setattr(server_module, "_stop_reload_child", slow_stop)
+    monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        assert await asyncio.to_thread(stopping.wait, 10)
+        task.cancel()  # a second SIGTERM must not cut the stop short
+        ticks = 0
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+            ticks += 1
+        assert ticks == 5  # the loop keeps running while the child is being stopped
+        assert not task.done()  # ...but the reloader has not returned yet
+        assert stopped == []
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped == ["child"]
+
+    asyncio.run(run())
+
+
+class _FakeChild:
+    """Minimal Popen stand-in recording how the reloader tried to stop it."""
+
+    def __init__(self, signal_error: BaseException | None = None) -> None:
+        self.signal_error = signal_error
+        self.calls: list[str] = []
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def send_signal(self, signum: int) -> None:
+        self.calls.append("sigint")
+        if self.signal_error is not None:
+            raise self.signal_error
+        self.returncode = -signum
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.calls.append("wait")
+        return self.returncode or 0
+
+    def kill(self) -> None:
+        self.calls.append("kill")
+        self.returncode = -9
+
+
+def test_stop_falls_back_to_sigkill_when_sigint_cannot_be_sent() -> None:
+    child = _FakeChild(signal_error=PermissionError("not permitted"))
+    server_module._stop_reload_child(cast(Any, child))
+    assert child.calls == ["sigint", "kill", "wait"]
+
+
+def test_stop_treats_an_already_exited_child_as_stopped() -> None:
+    child = _FakeChild(signal_error=ProcessLookupError())
+    server_module._stop_reload_child(cast(Any, child))
+    assert child.calls == ["sigint"]
+
+
+def test_failed_child_stop_is_reported_instead_of_hidden_by_cancellation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """If the child cannot be stopped, the caller must learn it may still hold the port, not just see a cancellation."""
+
+    def broken_stop(process: object, **_: object) -> None:
+        raise OSError("kill failed")
+
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
+    monkeypatch.setattr(server_module, "_start_reload_child", lambda command: "child")
+    monkeypatch.setattr(server_module, "_stop_reload_child", broken_stop)
+    monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(RuntimeError, match="may still hold its port") as failure:
+            await task
+        assert isinstance(failure.value.__cause__, OSError)
+
+    asyncio.run(run())

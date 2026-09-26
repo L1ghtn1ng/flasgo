@@ -1,13 +1,14 @@
-from __future__ import annotations
-
 import inspect
 import math
+import re
 import types
+import weakref
+from annotationlib import Format
 from collections.abc import Mapping, Sequence
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal, Union, cast, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 from uuid import UUID
 
 from .request import FormData, UploadedFile
@@ -52,7 +53,8 @@ class FormValidationError(RequestValidationError):
     def errors(self) -> dict[str, list[str]]:
         grouped: dict[str, list[str]] = {}
         for issue in self.issues:
-            field = str(issue.location[-1]) if len(issue.location) > 1 else "__all__"
+            # Group by the form field, not a nested list index such as ("form", "tags", 0).
+            field = str(issue.location[1]) if len(issue.location) > 1 else "__all__"
             grouped.setdefault(field, []).append(issue.message)
         return grouped
 
@@ -145,7 +147,7 @@ def validate_form_model(
     hints = _model_hints(annotation)
     input_fields = tuple(item for item in fields(annotation) if item.init)
     known = {item.name for item in input_fields}
-    provided = {*form, *form.files}
+    provided = dict.fromkeys([*form, *form.files])
     for name in provided:
         if name in known:
             continue
@@ -217,8 +219,10 @@ def to_jsonable(value: object) -> object:
         }
     if isinstance(value, Enum):
         return to_jsonable(value.value)
-    if isinstance(value, (UUID, date, datetime)):
-        return value.isoformat() if not isinstance(value, UUID) else str(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, date):  # also covers datetime
+        return value.isoformat()
     if isinstance(value, Mapping):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
@@ -249,7 +253,7 @@ class SchemaRegistry:
 
     def schema_for(self, annotation: object, *, input_model: bool = False) -> dict[str, Any]:
         annotation = _unwrap_annotated(annotation)
-        if annotation in {inspect.Signature.empty, Any, object}:
+        if annotation is inspect.Signature.empty or annotation is Any or annotation is object:
             return {}
         if annotation is str:
             return {"type": "string"}
@@ -267,7 +271,7 @@ class SchemaRegistry:
             return {"type": "string", "format": "date"}
         if annotation is datetime:
             return {"type": "string", "format": "date-time"}
-        if annotation in {None, type(None)}:
+        if annotation is None or annotation is types.NoneType:
             return {"type": "null"}
         if annotation is UploadedFile:
             return {"type": "string", "format": "binary"}
@@ -281,10 +285,13 @@ class SchemaRegistry:
         origin = get_origin(annotation)
         args = get_args(annotation)
         if origin in {list, set}:
-            return {
+            schema: dict[str, Any] = {
                 "type": "array",
                 "items": self.schema_for(args[0] if args else Any, input_model=input_model),
             }
+            if origin is set:
+                schema["uniqueItems"] = True
+            return schema
         if origin is tuple:
             if len(args) == 2 and args[1] is Ellipsis:
                 return {
@@ -309,7 +316,7 @@ class SchemaRegistry:
             values = list(args)
             base = _enum_type_schema(values, registry=self, input_model=input_model)
             return {**base, "enum": values}
-        if origin in {Union, types.UnionType}:
+        if origin is Union:
             return {"anyOf": [self.schema_for(arg, input_model=input_model) for arg in args]}
         return {}
 
@@ -377,9 +384,9 @@ def _validate_value(
 ) -> object:
     budget.consume(location=location, depth=depth)
     annotation = _unwrap_annotated(annotation)
-    if annotation in {Any, object, inspect.Signature.empty}:
+    if annotation is Any or annotation is object or annotation is inspect.Signature.empty:
         return value
-    if annotation in {None, type(None)}:
+    if annotation is None or annotation is types.NoneType:
         if value is None:
             return None
         raise _problem(location, "type_error", "Expected null.")
@@ -429,11 +436,15 @@ def _validate_value(
                 extend_validation_issues(issues, exc.issues, location=location, budget=budget)
         if issues:
             raise _InvalidValue(issues)
-        return annotation(**kwargs)
+        try:
+            return annotation(**kwargs)
+        except (TypeError, ValueError) as exc:
+            # A model's __post_init__ may reject a combination of individually valid fields.
+            raise _problem(location, "value_error", "Value is not valid for this model.") from exc
 
     origin = get_origin(annotation)
     args = get_args(annotation)
-    if origin in {Union, types.UnionType}:
+    if origin is Union:
         failures: list[_InvalidValue] = []
         for member in args:
             try:
@@ -448,10 +459,15 @@ def _validate_value(
             except _InvalidValue as exc:
                 if _has_validation_limit(exc.issues):
                     raise
-                failures.append(exc)
-        raise _problem(location, "type_error", "Value does not match any allowed type.") from failures[-1]
+                if member is not types.NoneType:
+                    failures.append(exc)
+        if value is not None and len(failures) == 1:
+            # ``Model | None`` with a non-null value: report the model's own field errors, not a generic mismatch.
+            raise failures[0]
+        raise _problem(location, "type_error", "Value does not match any allowed type.") from (failures[-1] if failures else None)
     if origin is Literal:
-        if value in args and type(value) in {type(item) for item in args}:
+        # Compare types too: False == 0 and 1.0 == 1 must not satisfy Literal[0] or Literal[1].
+        if any(value == allowed and type(value) is type(allowed) for allowed in args):
             return value
         if from_text and isinstance(value, str):
             for allowed in args:
@@ -498,24 +514,39 @@ def _validate_value(
                 extend_validation_issues(issues, exc.issues, location=location, budget=budget)
         if issues:
             raise _InvalidValue(issues)
-        return _collection_value(origin, items)
+        try:
+            return _collection_value(origin, items)
+        except TypeError as exc:
+            # set[Model] with an unhashable (eq=True, non-frozen) dataclass item.
+            raise _problem(location, "type_error", "Set items must be hashable.") from exc
     if origin in {dict, Mapping}:
         if not isinstance(value, Mapping):
             raise _problem(location, "type_error", "Expected an object.")
         key_type, item_type = args if len(args) == 2 else (str, Any)
         if key_type is not str:
             raise _problem(location, "type_error", "Only string-keyed mappings are supported.")
-        return {
-            str(key): _validate_value(
-                item_type,
-                item,
-                location=(*location, _safe_location_part(key)),
-                from_text=from_text,
-                budget=budget,
-                depth=depth + 1,
-            )
-            for key, item in value.items()
-        }
+        result: dict[str, object] = {}
+        issues = []
+        for key, item in value.items():
+            if _issues_truncated(issues):
+                break
+            try:
+                result[str(key)] = _validate_value(
+                    item_type,
+                    item,
+                    location=(*location, _safe_location_part(key)),
+                    from_text=from_text,
+                    budget=budget,
+                    depth=depth + 1,
+                )
+            except _InvalidValue as exc:
+                if _has_validation_limit(exc.issues):
+                    raise
+                # Report every bad value, as list and model validation do, not only the first.
+                extend_validation_issues(issues, exc.issues, location=location, budget=budget)
+        if issues:
+            raise _InvalidValue(issues)
+        return result
 
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         if from_text and isinstance(value, str):
@@ -533,10 +564,13 @@ def _validate_value(
                     continue
                 if converted == member.value and type(converted) is type(member.value):
                     return member
-        try:
-            return annotation(value)
-        except (TypeError, ValueError) as exc:
-            raise _problem(location, "enum_error", "Value is not a valid enum member.") from exc
+        if isinstance(value, annotation):
+            return value
+        for member in annotation:
+            # Enum(value) coerces across types (True -> IntEnum member 1), so require an exact-type match.
+            if value == member.value and type(value) is type(member.value):
+                return member
+        raise _problem(location, "enum_error", "Value is not a valid enum member.")
     if annotation is str:
         if isinstance(value, str):
             return value
@@ -554,28 +588,34 @@ def _validate_value(
     if annotation is int:
         if isinstance(value, int) and not isinstance(value, bool):
             return value
-        if from_text and isinstance(value, str):
+        if from_text and isinstance(value, str) and _INTEGER_TEXT.fullmatch(value):
             try:
                 return int(value, 10)
             except ValueError:
                 pass
         raise _problem(location, "type_error", "Expected an integer.")
     if annotation is float:
-        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value)):
-            return float(value)
-        if from_text and isinstance(value, str):
-            try:
+        parsed: float | None = None
+        try:
+            # JSON integers are unbounded, so float() can overflow; treat that like any other non-finite number.
+            if (isinstance(value, int | float) and not isinstance(value, bool)) or (
+                from_text and isinstance(value, str) and _FLOAT_TEXT.fullmatch(value)
+            ):
                 parsed = float(value)
-                if math.isfinite(parsed):
-                    return parsed
-            except ValueError:
-                pass
+        except OverflowError, ValueError:
+            parsed = None
+        if parsed is not None and math.isfinite(parsed):
+            return parsed
         raise _problem(location, "type_error", "Expected a finite number.")
     if annotation is UUID:
+        if isinstance(value, UUID):
+            return value
         try:
-            return value if isinstance(value, UUID) else UUID(str(value))
+            if isinstance(value, str):
+                return UUID(value)
         except ValueError as exc:
             raise _problem(location, "uuid_error", "Expected a UUID.") from exc
+        raise _problem(location, "uuid_error", "Expected a UUID.")
     if annotation is date:
         if isinstance(value, date):
             return value
@@ -584,6 +624,7 @@ def _validate_value(
                 return date.fromisoformat(value)
             except ValueError as exc:
                 raise _problem(location, "date_error", "Expected an ISO date value.") from exc
+        raise _problem(location, "date_error", "Expected an ISO date value.")
     if annotation is datetime:
         if isinstance(value, datetime):
             return value
@@ -592,11 +633,13 @@ def _validate_value(
                 return datetime.fromisoformat(value)
             except ValueError as exc:
                 raise _problem(location, "date_error", "Expected an ISO datetime value.") from exc
+        raise _problem(location, "date_error", "Expected an ISO datetime value.")
     if annotation is UploadedFile and isinstance(value, UploadedFile):
         return value
     if isinstance(annotation, type) and isinstance(value, cast(type[Any], annotation)):
         return value
-    raise _problem(location, "type_error", f"Unsupported or invalid value for {annotation!r}.")
+    # Never echo the annotation: it would expose internal type and module names to clients.
+    raise _problem(location, "type_error", "Invalid value.")
 
 
 def _validate_text_values(
@@ -676,7 +719,7 @@ def _uploaded_file_annotation(annotation: object) -> object | None:
         return annotation
     origin = get_origin(annotation)
     args = get_args(annotation)
-    if origin in {Union, types.UnionType}:
+    if origin is Union:
         non_null = tuple(item for item in args if item not in {None, type(None)})
         if len(non_null) == 1:
             return _uploaded_file_annotation(non_null[0])
@@ -695,16 +738,34 @@ def _collection_value(origin: object, values: Sequence[object]) -> object:
 
 
 def _unwrap_annotated(annotation: object) -> object:
-    from typing import Annotated
-
     return get_args(annotation)[0] if get_origin(annotation) is Annotated else annotation
 
 
+# Plain ASCII decimal text only: int()/float() also accept "1_000", surrounding spaces, and non-ASCII digits.
+_INTEGER_TEXT = re.compile(r"[+-]?[0-9]+")
+_FLOAT_TEXT = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_MODEL_HINTS: weakref.WeakKeyDictionary[type[Any], dict[str, object]] = weakref.WeakKeyDictionary()
+
+
 def _model_hints(model: type[Any]) -> dict[str, object]:
+    """Resolve a model's field annotations, caching complete resolutions per class.
+
+    One unresolvable annotation (for example a name imported only under ``TYPE_CHECKING``) must not discard the
+    others, so fall back to ``FORWARDREF`` and leave only that field as a ``ForwardRef``.
+    """
+    cached = _MODEL_HINTS.get(model)
+    if cached is not None:
+        return cached
     try:
-        return get_type_hints(model, include_extras=True)
+        hints = get_type_hints(model, include_extras=True)
     except NameError, TypeError:
-        return {}
+        try:
+            # Partial results are not cached: the missing name may be defined later in the module.
+            return get_type_hints(model, include_extras=True, format=Format.FORWARDREF)
+        except NameError, TypeError:
+            return {}
+    _MODEL_HINTS[model] = hints
+    return hints
 
 
 def _enum_type_schema(

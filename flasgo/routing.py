@@ -1,9 +1,9 @@
-from __future__ import annotations
-
+import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, urlencode
 
 from .response import ResponseValue
 
@@ -11,8 +11,8 @@ if TYPE_CHECKING:
     from .cors import CORSConfig
     from .params import EndpointPlan
 
-Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
-WebSocketEndpoint = Callable[..., Awaitable[None] | None]
+type Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
+type WebSocketEndpoint = Callable[..., Awaitable[None] | None]
 
 _CONVERTERS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "str": (r"[^/]+", str),
@@ -35,6 +35,7 @@ class MatchResult:
     cors: CORSConfig | None
     methods: frozenset[str]
     response_model: object = None
+    route_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -43,24 +44,14 @@ class WebSocketMatchResult:
     params: dict[str, Any]
     route_path: str
     name: str | None
+    websocket_parameter: str | None = None
 
 
-@dataclass(slots=True)
-class Route:
+class _PathPattern:
+    """Path-shape helpers shared by HTTP and WebSocket routes (which provide ``raw_path``)."""
+
+    __slots__ = ()
     raw_path: str
-    methods: frozenset[str]
-    endpoint: Endpoint
-    endpoint_plan: EndpointPlan
-    name: str | None = None
-    cors: CORSConfig | None = None
-    public: bool = False
-    response_model: object = None
-    _regex: re.Pattern[str] | None = None
-    _casts: dict[str, Callable[[str], Any]] | None = None
-
-    def __post_init__(self) -> None:
-        _validate_route(self.raw_path, self.name)
-        self._regex, self._casts = _compile_path(self.raw_path)
 
     @property
     def shape(self) -> str:
@@ -81,6 +72,27 @@ class Route:
     def specificity(self) -> tuple[int, int, int]:
         """Return a stable route precedence key, with literals and narrow converters first."""
         return _route_specificity(self.raw_path)
+
+
+@dataclass(slots=True)
+class Route(_PathPattern):
+    raw_path: str
+    methods: frozenset[str]
+    endpoint: Endpoint
+    endpoint_plan: EndpointPlan
+    name: str | None = None
+    cors: CORSConfig | None = None
+    public: bool = False
+    response_model: object = None
+    route_id: str = field(init=False, repr=False)
+    _regex: re.Pattern[str] = field(init=False, repr=False)
+    _casts: dict[str, Callable[[str], Any]] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _validate_route(self.raw_path, self.name)
+        self._regex, self._casts = _compile_path(self.raw_path)
+        # Stable identity for shared rate-limit buckets, computed once rather than per request.
+        self.route_id = json.dumps([self.raw_path, sorted(self.methods)])
 
     def match(self, path: str, method: str) -> MatchResult | None:
         """
@@ -107,6 +119,7 @@ class Route:
             cors=self.cors,
             methods=self.methods,
             response_model=self.response_model,
+            route_id=self.route_id,
         )
 
     def path_matches(self, path: str) -> bool:
@@ -124,32 +137,18 @@ class Route:
 
 
 @dataclass(slots=True)
-class WebSocketRoute:
+class WebSocketRoute(_PathPattern):
     raw_path: str
     endpoint: WebSocketEndpoint
     name: str | None = None
     public: bool = False
-    _regex: re.Pattern[str] | None = None
-    _casts: dict[str, Callable[[str], Any]] | None = None
+    websocket_parameter: str | None = None
+    _regex: re.Pattern[str] = field(init=False, repr=False)
+    _casts: dict[str, Callable[[str], Any]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         _validate_route(self.raw_path, self.name)
         self._regex, self._casts = _compile_path(self.raw_path)
-
-    @property
-    def shape(self) -> str:
-        """Return the route language without parameter names."""
-        return _route_shape(self.raw_path)
-
-    @property
-    def contract_shape(self) -> str:
-        """Return the route shape without converter or parameter names."""
-        return _route_contract_shape(self.raw_path)
-
-    @property
-    def specificity(self) -> tuple[int, int, int]:
-        """Return a stable route precedence key, with literals and narrow converters first."""
-        return _route_specificity(self.raw_path)
 
     def match(self, path: str) -> WebSocketMatchResult | None:
         params = _match_path(path, self._regex, self._casts)
@@ -160,6 +159,7 @@ class WebSocketRoute:
             params=params,
             route_path=self.raw_path,
             name=self.name,
+            websocket_parameter=self.websocket_parameter,
         )
 
 
@@ -171,9 +171,19 @@ def _validate_route(path: str, name: str | None) -> None:
         raise ValueError("Route paths must not contain control characters.")
     if name is not None and any(ord(char) < 32 or ord(char) == 127 for char in name):
         raise ValueError("Route names must not contain control characters.")
-    path_converters = [match for match in _PARAM_PATTERN.finditer(path) if (match.group("converter") or "str") == "path"]
-    if len(path_converters) > 1:
+    matches = list(_PARAM_PATTERN.finditer(path))
+    if sum((match.group("converter") or "str") == "path" for match in matches) > 1:
         raise ValueError("A route may contain at most one path converter.")
+    for match in matches:
+        converter = match.group("converter")
+        if converter is not None and converter not in _CONVERTERS:
+            raise ValueError(f"Unknown route converter {converter!r} in {path!r}.")
+    names = [match.group("name") for match in matches]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Route {path!r} repeats a parameter name.")
+    if any(char in _PARAM_PATTERN.sub("", path) for char in "<>"):
+        # e.g. "<int: id>" would otherwise register silently as a literal path.
+        raise ValueError(f"Route {path!r} has a malformed <converter:name> placeholder.")
 
 
 def _route_shape(path: str) -> str:
@@ -291,11 +301,9 @@ def _compile_path(
 
 def _match_path(
     path: str,
-    regex: re.Pattern[str] | None,
-    casts: dict[str, Callable[[str], Any]] | None,
+    regex: re.Pattern[str],
+    casts: dict[str, Callable[[str], Any]],
 ) -> dict[str, Any] | None:
-    if regex is None or casts is None:
-        return None
     regex_match = regex.fullmatch(path)
     if regex_match is None:
         return None
@@ -309,3 +317,56 @@ def _match_path(
             # limit) means the value is not a valid match, not a server error.
             return None
     return params
+
+
+def build_url(path: str, values: dict[str, Any]) -> str:
+    """
+    Build a safe relative URL by substituting validated route parameters and encoding remaining values as query parameters.
+
+    Literal path text is percent-encoded, and query values of ``None`` are omitted (as in Werkzeug).
+
+    Parameters:
+        path (str): Route path containing optional parameter placeholders.
+        values (dict[str, Any]): Values for route parameters and query parameters.
+
+    Returns:
+        str: The resulting relative URL.
+
+    Raises:
+        ValueError: If a required parameter is missing, invalid, or unsafe, or if the resulting URL is not a safe relative URL.
+    """
+    if path.startswith("//") or any(char in _PARAM_PATTERN.sub("", path) for char in "\\?#"):
+        raise ValueError("Route cannot be reversed to a safe relative URL.")
+    values = dict(values)
+    pieces: list[str] = []
+    position = 0
+    for match in _PARAM_PATTERN.finditer(path):
+        pieces.append(quote(path[position : match.start()], safe=_URL_LITERAL_SAFE))
+        pieces.append(_url_parameter(match, values))
+        position = match.end()
+    pieces.append(quote(path[position:], safe=_URL_LITERAL_SAFE))
+    result = "".join(pieces)
+    if result.startswith("//"):
+        raise ValueError("Route cannot be reversed to a safe relative URL.")
+    query = {key: value for key, value in values.items() if value is not None}
+    return result + ("?" + urlencode(query, doseq=True) if query else "")
+
+
+# Keep "%" so already-encoded literals (such as an ASGI root_path) are not double-encoded.
+_URL_LITERAL_SAFE = "/%:@!$&'()*+,;=-._~"
+
+
+def _url_parameter(match: re.Match[str], values: dict[str, Any]) -> str:
+    name = match.group("name")
+    if name not in values:
+        raise ValueError(f"Missing URL parameter: {name}")
+    value = values.pop(name)
+    converter = match.group("converter") or "str"
+    text = str(value)
+    pattern, cast = _CONVERTERS[converter]
+    if not re.fullmatch(pattern, text):
+        raise ValueError(f"Invalid URL parameter: {name}")
+    cast(text)
+    if any(part in {".", ".."} for part in text.split("/")) or "\\" in text:
+        raise ValueError(f"Unsafe URL parameter: {name}")
+    return quote(text, safe="/" if converter == "path" else "")

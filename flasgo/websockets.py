@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import re
 import time
@@ -7,9 +5,8 @@ from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs
 
-from .request import _reject_json_constant
+from .request import _reject_json_constant, parse_query_params
 from .response import _validate_set_cookie
 from .types import Message, Receive, Scope, Send
 
@@ -84,8 +81,8 @@ class WebSocket:
 
     @property
     def query_params(self) -> Mapping[str, list[str]]:
-        raw = bytes(self.scope.get("query_string", b"")).decode("latin-1")
-        return parse_qs(raw, keep_blank_values=True)
+        """Decode query parameters with the same ``MAX_FORM_FIELDS`` limit as HTTP requests."""
+        return parse_query_params(self.scope)
 
     @property
     def client_ip(self) -> str | None:
@@ -248,10 +245,11 @@ class WebSocket:
                 return
 
     async def _receive_message(self) -> Message:
-        if self._application_state is not _ApplicationState.ACCEPTED:
-            raise RuntimeError("Accept the WebSocket before receiving messages.")
         if self._client_state is _ClientState.DISCONNECTED:
-            raise WebSocketDisconnect()
+            # Checked first: the peer already left, so report that rather than a generic "closed" error.
+            raise WebSocketDisconnect(self.close_code or 1000, self.close_reason)
+        if self._application_state is not _ApplicationState.ACCEPTED:
+            raise RuntimeError(self._not_open_message("receiving"))
         message = await self._receive()
         message_type = message.get("type")
         if message_type == "websocket.disconnect":
@@ -281,8 +279,13 @@ class WebSocket:
 
     async def _send_message(self, message: Message) -> None:
         if self._application_state is not _ApplicationState.ACCEPTED:
-            raise RuntimeError("Accept the WebSocket before sending messages.")
+            raise RuntimeError(self._not_open_message("sending"))
         await self._safe_send(message)
+
+    def _not_open_message(self, action: str) -> str:
+        if self._application_state is _ApplicationState.CONNECTING:
+            return f"Accept the WebSocket before {action} messages."
+        return f"The WebSocket is closed; it can no longer be used for {action} messages."
 
     async def _safe_send(self, message: Message) -> None:
         try:

@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import json
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import InitVar, dataclass, field, is_dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self, override
 from urllib.parse import urlsplit
 
 from .types import Send
@@ -16,8 +14,72 @@ if TYPE_CHECKING:
     from .background import BackgroundTasks
     from .templating import JinjaTemplates
 
-Headers = Mapping[str, str]
-_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+type Headers = Mapping[str, str]
+# RFC 9110 token: header names, method names, and cookie/header wire names.
+HTTP_TOKEN_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+class ResponseHeaders(dict[str, str]):
+    """Response header mapping that stores names lowercased.
+
+    HTTP header names are case-insensitive, so ``headers["Content-Type"] = ...`` must replace the
+    existing ``content-type`` entry rather than emit a second, conflicting header.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, data: Mapping[str, str] | Iterable[tuple[str, str]] = (), /) -> None:
+        super().__init__()
+        self.update(data)
+
+    @override
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(key.lower(), value)
+
+    @override
+    def __getitem__(self, key: str) -> str:
+        return super().__getitem__(key.lower())
+
+    @override
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key.lower())
+
+    @override
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and super().__contains__(key.lower())
+
+    @override
+    def __ior__(self, other: Any, /) -> Self:
+        self.update(other)
+        return self
+
+    @override
+    def __or__(self, other: Any, /) -> ResponseHeaders:
+        merged = ResponseHeaders(self)
+        merged.update(other)
+        return merged
+
+    @override
+    def get(self, key: str, default: Any = None, /) -> Any:  # ty: ignore[invalid-method-override]
+        return super().get(key.lower(), default)
+
+    @override
+    def pop(self, key: str, /, *default: Any) -> Any:  # ty: ignore[invalid-method-override]
+        return super().pop(key.lower(), *default)
+
+    @override
+    def setdefault(self, key: str, default: str, /) -> str:
+        return super().setdefault(key.lower(), default)
+
+    @override
+    def update(self, other: Any = (), /, **kwargs: str) -> None:
+        items: Iterable[tuple[str, str]] = other.items() if isinstance(other, Mapping) else other
+        for key, value in [*items, *kwargs.items()]:
+            self[key] = value
+
+    @override
+    def copy(self) -> ResponseHeaders:
+        return ResponseHeaders(self)
 
 
 class DataclassResponse(Protocol):
@@ -39,19 +101,30 @@ class Response:
     status_code: int = 200
     headers: dict[str, str] = field(default_factory=dict)
     cookies: list[str] = field(default_factory=list)
-    content_type: str = "text/plain; charset=utf-8"
+    # Only an initializer argument; afterwards ``content_type`` is a property backed by the header (defined below).
+    content_type: InitVar[str] = "text/plain; charset=utf-8"
     allow_public_cache: bool = False
     background: BackgroundTasks | None = None
 
-    def __post_init__(self) -> None:
-        self.headers = {key.lower(): value for key, value in self.headers.items()}
-        self.headers.setdefault("content-type", self.content_type)
+    def __post_init__(self, content_type: str) -> None:
+        self.headers = ResponseHeaders(self.headers)
+        self.headers.setdefault("content-type", content_type)
         self.prepare()
 
     def prepare(self) -> None:
         if not 100 <= self.status_code <= 599:
             raise ValueError("HTTP response status codes must be between 100 and 599.")
-        self.headers["content-length"] = str(len(self.body))
+        if not isinstance(self.headers, ResponseHeaders):
+            # Callers may replace the mapping wholesale; re-normalize so mixed-case names cannot duplicate.
+            self.headers = ResponseHeaders(self.headers)
+        if not status_allows_body(self.status_code):
+            # RFC 9110 forbids content on 1xx/204/304, and a 304's content headers would overwrite cached metadata.
+            if self.body:
+                raise ValueError(f"HTTP {self.status_code} responses must not have a body.")
+            self.headers.pop("content-length", None)
+            self.headers.pop("content-type", None)
+        else:
+            self.headers["content-length"] = str(len(self.body))
         for key, value in self.headers.items():
             _validate_header(key, value)
         for cookie in self.cookies:
@@ -223,6 +296,26 @@ class Response:
         self.background.add_task(func, *args, **kwargs)
 
 
+def _get_content_type(self: Response) -> str:
+    return self.headers.get("content-type", "")
+
+
+def _set_content_type(self: Response, value: str) -> None:
+    self.headers["content-type"] = value
+
+
+Response.content_type = property(  # ty: ignore[invalid-assignment]
+    _get_content_type,
+    _set_content_type,
+    doc="The ``content-type`` header; assigning it updates the header that is sent.",
+)
+
+
+def status_allows_body(status_code: int) -> bool:
+    """Return whether an HTTP status may carry content (not 1xx, 204, or 304)."""
+    return status_code >= 200 and status_code not in {204, 304}
+
+
 ResponseValue = Response | DataclassResponse | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
 
 
@@ -253,8 +346,6 @@ def to_response(value: ResponseValue) -> Response:
         if len(value) == 3:
             body, status_code, headers = value
             return _tuple_to_response(body, status_code, headers)
-    from dataclasses import is_dataclass
-
     if is_dataclass(value) and not isinstance(value, type):
         from .validation import to_jsonable
 
@@ -277,26 +368,22 @@ def _tuple_to_response(
     if headers:
         if not all(isinstance(key, str) and isinstance(value, str) for key, value in headers.items()):
             raise TypeError("Response tuple headers must be a mapping of string names to string values.")
-        response.headers.update({str(key).lower(): str(value) for key, value in headers.items()})
-        for key, value in response.headers.items():
-            _validate_header(key, value)
-    response.headers["content-length"] = str(len(response.body))
+        response.headers.update(headers)
+    response.prepare()
     return response
 
 
 def _validate_header(name: str, value: str) -> None:
     """Validate header syntax and enforce cookie-specific rules for Set-Cookie."""
-    if not _HEADER_NAME_RE.fullmatch(name):
+    if not HTTP_TOKEN_RE.fullmatch(name):
+        # The token pattern is ASCII-only and excludes CR, LF, and NUL.
         msg = f"Invalid header name: {name!r}"
         raise ValueError(msg)
-    if any(char in name for char in ("\r", "\n", "\x00")):
-        msg = f"Invalid header name: {name!r}"
-        raise ValueError(msg)
-    if any(char in value for char in ("\r", "\n", "\x00")):
+    if any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in value):
+        # Reject every control character except HTAB here, rather than letting the server fail mid-response.
         msg = f"Invalid header value for {name!r}"
         raise ValueError(msg)
     try:
-        name.encode("ascii")
         value.encode("latin-1")
     except UnicodeEncodeError as exc:
         raise ValueError(f"HTTP header {name!r} is not Latin-1 encodable.") from exc

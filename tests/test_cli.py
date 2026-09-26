@@ -1,14 +1,21 @@
-from __future__ import annotations
-
 import json
+import os
+import stat
 import sys
+import textwrap
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from openapi_spec_validator import OpenAPIV32SpecValidator, validate
+
 from flasgo import Flasgo
 from flasgo import cli as cli_module
-from openapi_spec_validator import OpenAPIV32SpecValidator, validate
+
+
+@pytest.fixture(autouse=True)
+def _isolate_imports(restore_import_state: None) -> None:
+    """Every CLI test imports throwaway modules such as ``app`` that must not leak into later tests."""
 
 
 def test_load_app_from_python_file(tmp_path: Path) -> None:
@@ -363,15 +370,14 @@ def test_load_app_replaces_cached_package_parent(tmp_path: Path) -> None:
 def test_routes_openapi_and_check_commands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     app_file = tmp_path / "app.py"
     app_file.write_text(
-        "\n".join(
-            (
-                "from flasgo import Flasgo",
-                "app = Flasgo(settings={'CSRF_ENABLED': False})",
-                "@app.get('/users/<int:user_id>', name='user')",
-                "async def user(user_id: int): return {'id': user_id}",
-                "@app.websocket('/events', name='events')",
-                "async def events(websocket): pass",
-            )
+        textwrap.dedent(
+            """\
+            from flasgo import Flasgo
+            app = Flasgo(settings={'CSRF_ENABLED': False})
+            @app.get('/users/<int:user_id>', name='user')
+            async def user(user_id: int): return {'id': user_id}
+            @app.websocket('/events', name='events')
+            async def events(websocket): pass"""
         ),
         encoding="utf-8",
     )
@@ -396,14 +402,71 @@ def test_routes_openapi_and_check_commands(tmp_path: Path, capsys: pytest.Captur
 def test_atomic_write_replaces_symlink_entry_without_following_target(tmp_path: Path) -> None:
     target = tmp_path / "victim.txt"
     target.write_text("keep", encoding="utf-8")
+    target.chmod(0o644)
     output = tmp_path / "openapi.json"
     output.symlink_to(target)
 
-    cli_module._atomic_write(output, "generated")
+    previous = os.umask(0o077)
+    try:
+        cli_module._atomic_write(output, "generated")
+    finally:
+        os.umask(previous)
 
     assert target.read_text(encoding="utf-8") == "keep"
     assert not output.is_symlink()
     assert output.read_text(encoding="utf-8") == "generated"
+    # The replacement is a new file under the caller's umask, not a copy of the symlink target's 0644 mode.
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_atomic_write_uses_umask_for_new_files_and_keeps_existing_modes(tmp_path: Path) -> None:
+    previous = os.umask(0o022)
+    try:
+        created = tmp_path / "new.json"
+        cli_module._atomic_write(created, "{}")
+        assert stat.S_IMODE(created.stat().st_mode) == 0o644
+
+        existing = tmp_path / "existing.json"
+        existing.write_text("old", encoding="utf-8")
+        existing.chmod(0o640)
+        cli_module._atomic_write(existing, "new")
+        assert stat.S_IMODE(existing.stat().st_mode) == 0o640
+    finally:
+        os.umask(previous)
+
+
+def test_atomic_write_never_exposes_a_private_files_new_contents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replacing a 0600 file must not create a group/world-readable temporary copy, even before the chmod."""
+    private = tmp_path / "private.json"
+    private.write_text("old", encoding="utf-8")
+    private.chmod(0o600)
+    modes_while_writing: list[int] = []
+    real_fsync = cli_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        modes_while_writing.append(stat.S_IMODE(os.fstat(descriptor).st_mode))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(cli_module.os, "fsync", recording_fsync)
+    previous = os.umask(0o022)
+    try:
+        cli_module._atomic_write(private, "secret")
+    finally:
+        os.umask(previous)
+
+    assert modes_while_writing == [0o600]
+    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    assert private.read_text(encoding="utf-8") == "secret"
+
+
+def test_atomic_write_removes_the_temporary_file_when_writing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_fsync(_fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_module.os, "fsync", failing_fsync)
+    with pytest.raises(OSError, match="disk full"):
+        cli_module._atomic_write(tmp_path / "out.json", "{}")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_check_fails_when_app_registration_rejects_duplicate_routes(
@@ -413,15 +476,14 @@ def test_check_fails_when_app_registration_rejects_duplicate_routes(
     """Report conflicting application routes as a failed check with a useful diagnostic."""
     app_file = tmp_path / "bad_app.py"
     app_file.write_text(
-        "\n".join(
-            (
-                "from flasgo import Flasgo",
-                "app = Flasgo(settings={'CSRF_ENABLED': False})",
-                "@app.get('/duplicate')",
-                "async def first(): return 'one'",
-                "@app.get('/duplicate')",
-                "async def second(): return 'two'",
-            )
+        textwrap.dedent(
+            """\
+            from flasgo import Flasgo
+            app = Flasgo(settings={'CSRF_ENABLED': False})
+            @app.get('/duplicate')
+            async def first(): return 'one'
+            @app.get('/duplicate')
+            async def second(): return 'two'"""
         ),
         encoding="utf-8",
     )

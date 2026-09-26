@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 import asyncio
 import logging
 from collections import deque
 
-import flasgo.ratelimit as ratelimit_module
 import pytest
+
+import flasgo.ratelimit as ratelimit_module
+from _helpers import extract_cookie
 from flasgo import (
     Flasgo,
     HasScope,
@@ -23,14 +23,6 @@ from flasgo.app import session
 from flasgo.ratelimit import RateLimiter, RateLimitRule
 from flasgo.security import SecurityConfig
 from flasgo.testing import TestClient
-
-
-def _extract_cookie(set_cookie_header: str, name: str) -> str | None:
-    for line in set_cookie_header.split("\n"):
-        raw = line.strip()
-        if raw.startswith(f"{name}="):
-            return raw.split(";", 1)[0].split("=", 1)[1]
-    return None
 
 
 def test_async_route_and_json_response() -> None:
@@ -99,6 +91,33 @@ def test_ratelimit_decorator_blocks_client_ip_and_adds_retry_headers() -> None:
         "detail": "Too many requests from this client. Wait before retrying.",
     }
     assert calls == 2
+
+
+def test_ratelimit_headers_report_the_most_restrictive_phase() -> None:
+    """A generous per-user limit checked after auth must not hide a nearly exhausted per-IP limit."""
+    app = Flasgo()
+
+    def validate_token(token: str) -> User | None:
+        return User(id="alice", is_authenticated=True) if token == "token-123" else None
+
+    app.register_auth_backend("bearer", bearer_token_backend(validate_token))
+
+    @app.get("/limited")
+    @app.authorize(IsAuthenticated(), backend="bearer")
+    @app.ratelimit(2, per=60)
+    @app.ratelimit(50, per=60, key_func=lambda req: current_user.id)
+    def limited() -> str:
+        return "ok"
+
+    client = TestClient(app)
+    headers = {"authorization": "Bearer token-123"}
+    first = client.get("/limited", headers=headers)
+    second = client.get("/limited", headers=headers)
+
+    assert first.headers["ratelimit-limit"] == "2"
+    assert first.headers["ratelimit-remaining"] == "1"
+    assert second.headers["ratelimit-remaining"] == "0"
+    assert client.get("/limited", headers=headers).status_code == 429
 
 
 def test_ratelimit_scope_can_cover_multiple_endpoints() -> None:
@@ -193,6 +212,56 @@ def test_ratelimit_rejects_new_keys_without_evicting_active_quotas(monkeypatch: 
 
         now = 61.0
         assert (await limiter.check(rule, request("new-client"), endpoint_id="endpoint")).allowed
+
+    asyncio.run(run_checks())
+
+
+def _limiter_request() -> Request:
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request({"headers": [], "client": ("127.0.0.1", 5000)}, receive)
+
+
+def test_ratelimit_check_keeps_history_for_longer_windows_sharing_a_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short-window check must not discard history that a longer-window rule in the same scope still counts."""
+    limiter = RateLimiter()
+    now = 0.0
+    long_rule = RateLimitRule(3, window_seconds=100, scope="shared")
+    short_rule = RateLimitRule(10, window_seconds=1, scope="shared")
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def run_checks() -> None:
+        nonlocal now
+        for _ in range(3):
+            assert (await limiter.check(long_rule, _limiter_request(), endpoint_id="long")).allowed
+        assert not (await limiter.check(long_rule, _limiter_request(), endpoint_id="long")).allowed
+        now = 2.0
+        assert (await limiter.check(short_rule, _limiter_request(), endpoint_id="short")).allowed
+        assert not (await limiter.check(long_rule, _limiter_request(), endpoint_id="long")).allowed
+
+    asyncio.run(run_checks())
+
+
+def test_ratelimit_retry_after_accounts_for_entries_beyond_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With more entries than the limit in a shared scope, Retry-After must cover every entry that has to expire."""
+    limiter = RateLimiter()
+    now = 0.0
+    generous = RateLimitRule(100, window_seconds=60, scope="shared")
+    strict = RateLimitRule(5, window_seconds=60, scope="shared")
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def run_checks() -> None:
+        nonlocal now
+        for second in range(50):
+            now = float(second)
+            assert (await limiter.check(generous, _limiter_request(), endpoint_id="generous")).allowed
+        now = 50.0
+        denied = await limiter.check(strict, _limiter_request(), endpoint_id="strict")
+        assert not denied.allowed
+        assert denied.retry_after == 55
+        now = 50.0 + denied.retry_after
+        assert (await limiter.check(strict, _limiter_request(), endpoint_id="strict")).allowed
 
     asyncio.run(run_checks())
 
@@ -362,7 +431,7 @@ def test_csrf_accepts_double_submit_token() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     response = client.post(
@@ -391,7 +460,7 @@ def test_csrf_rejects_unsigned_fixed_token_when_origin_checks_are_disabled() -> 
         },
     )
 
-    replacement = _extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf")
+    replacement = extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert response.status_code == 403
     assert replacement is not None
     assert replacement.startswith("v1.")
@@ -412,7 +481,7 @@ def test_csrf_rejects_non_ascii_tokens_without_raising() -> None:
         },
     )
     assert response.status_code == 403
-    assert _extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf") is not None
+    assert extract_cookie(response.headers.get("set-cookie", ""), "flasgo-csrf") is not None
 
 
 @pytest.mark.parametrize("part", ["nonce", "signature"])
@@ -427,7 +496,7 @@ def test_csrf_rejects_tampered_signed_tokens(part: str) -> None:
     def submit() -> str:
         return "ok"
 
-    token = _extract_cookie(app.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    token = extract_cookie(app.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
     assert token is not None
     version, nonce, signature = token.split(".")
     if part == "nonce":
@@ -454,7 +523,7 @@ def test_csrf_token_is_invalid_under_a_different_secret() -> None:
     def seed() -> str:
         return "seed"
 
-    token = _extract_cookie(source.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    token = extract_cookie(source.test_client().get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
     assert token is not None
 
     target = Flasgo(settings={"SECRET_KEY": "b" * 32})
@@ -496,7 +565,7 @@ def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> Non
         return "logged out"
 
     seed_response = app.test_client().get("/seed")
-    old_csrf = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    old_csrf = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert old_csrf is not None
 
     login_response = app.test_client().post(
@@ -507,8 +576,8 @@ def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> Non
             "origin": "http://localhost",
         },
     )
-    session_cookie = _extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-session")
-    new_csrf = _extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    session_cookie = extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-session")
+    new_csrf = extract_cookie(login_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert login_response.status_code == 200
     assert session_cookie is not None
     assert new_csrf is not None
@@ -541,7 +610,7 @@ def test_csrf_rotates_with_the_signed_session_and_rejects_the_old_token() -> Non
             "origin": "http://localhost",
         },
     )
-    logged_out_csrf = _extract_cookie(logout_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    logged_out_csrf = extract_cookie(logout_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert logout_response.status_code == 200
     assert logged_out_csrf is not None
     assert logged_out_csrf != new_csrf
@@ -580,7 +649,7 @@ def test_signed_session_cookie_round_trip() -> None:
 
     first = client.get("/counter")
     assert first.json() == {"count": 1}
-    session_cookie = _extract_cookie(first.headers.get("set-cookie", ""), "flasgo-session")
+    session_cookie = extract_cookie(first.headers.get("set-cookie", ""), "flasgo-session")
     assert session_cookie is not None
 
     second = client.get("/counter", headers={"cookie": f"flasgo-session={session_cookie}"})
@@ -665,7 +734,7 @@ def test_default_secret_is_not_predictable_literal() -> None:
 
 
 def test_short_secret_rejected_when_debug_false() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="SECRET_KEY must be at least 32 characters"):
         Flasgo(settings={"DEBUG": False, "SECRET_KEY": "short"})
 
 
@@ -682,7 +751,7 @@ def test_csrf_rejects_mismatched_origin() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     response = client.post(
@@ -709,7 +778,7 @@ def test_csrf_trusted_origin_scheme_is_case_insensitive() -> None:
 
     client = TestClient(app)
     seed_response = client.get("/seed")
-    csrf_token = _extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
+    csrf_token = extract_cookie(seed_response.headers.get("set-cookie", ""), "flasgo-csrf")
     assert csrf_token is not None
 
     trusted = client.post(
@@ -1000,17 +1069,146 @@ def test_auth_backend_exception_fails_closed() -> None:
 
     client = TestClient(app)
     response = client.get("/private")
-    assert response.status_code == 401
-    assert "Provide valid credentials" in response.text
+    # A crashing backend is a server fault: fail closed with 500 rather than asking for new credentials.
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert "backend exploded" not in response.text
 
 
 def test_register_auth_backend_rejects_empty_name() -> None:
     app = Flasgo()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Auth backend name must not be empty"):
         app.register_auth_backend("   ", lambda req: None)
 
 
 def test_authorize_rejects_empty_backend_name() -> None:
     app = Flasgo()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Auth backend name must not be empty"):
         app.authorize(IsAuthenticated(), backend="  ")
+
+
+def test_after_request_runs_for_routing_and_auth_denials() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+    seen: list[tuple[str, int]] = []
+
+    @app.after_request
+    def record(req: Request, response: Response) -> Response:
+        seen.append((req.path, response.status_code))
+        response.headers["x-after"] = "1"
+        return response
+
+    @app.get("/open")
+    def open_route() -> str:
+        return "ok"
+
+    @app.get("/private")
+    @app.authorize(IsAuthenticated())
+    def private() -> str:
+        return "secret"
+
+    client = TestClient(app)
+    responses = [client.get("/open"), client.get("/missing"), client.post("/open"), client.get("/private")]
+
+    assert seen == [("/open", 200), ("/missing", 404), ("/open", 405), ("/private", 401)]
+    assert all(response.headers["x-after"] == "1" for response in responses)
+
+
+def test_http_exception_behaves_like_a_normal_exception() -> None:
+    import pickle
+
+    from flasgo import HTTPException, abort
+
+    first, second = HTTPException(404), HTTPException(404)
+    assert first != second
+    assert len({first, second}) == 2
+    with pytest.raises(HTTPException) as raised:
+        abort(403, "no", {"retry-after": "5"})
+    assert str(raised.value) == "no"
+    assert raised.value.args == (403, "no")
+    restored = pickle.loads(pickle.dumps(raised.value))
+    assert (restored.status_code, restored.detail, restored.headers) == (403, "no", {"retry-after": "5"})
+
+
+def test_bodyless_statuses_omit_content_headers() -> None:
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.delete("/items/<int:item_id>")
+    def remove(item_id: int) -> None:
+        return None
+
+    response = TestClient(app).delete("/items/1")
+    assert response.status_code == 204
+    assert "content-length" not in response.headers
+    assert "content-type" not in response.headers
+    with pytest.raises(ValueError, match="must not have a body"):
+        Response(b"stale", status_code=304)
+
+
+def test_response_content_type_attribute_tracks_the_header() -> None:
+    response = Response.text("{}")
+    response.content_type = "application/json"
+    assert response.headers["content-type"] == "application/json"
+    assert Response(b"", headers={"Content-Type": "text/csv"}).content_type == "text/csv"
+
+
+def test_tuple_responses_validate_status_and_headers_like_responses() -> None:
+    from flasgo.response import to_response
+
+    response = to_response(("created", 201, {"X-Id": "7"}))
+    assert (response.status_code, response.headers["x-id"], response.headers["content-length"]) == (201, "7", "7")
+    with pytest.raises(ValueError, match="between 100 and 599"):
+        to_response(("body", 999))
+
+
+@pytest.mark.parametrize("method", ["put", "patch", "delete"])
+def test_csrf_protects_every_unsafe_method_decorator(method: str) -> None:
+    app = Flasgo()
+
+    @app.get("/seed")
+    def seed() -> str:
+        return "seed"
+
+    getattr(app, method)("/item")(lambda: "ok")
+
+    client = TestClient(app)
+    token = extract_cookie(client.get("/seed").headers.get("set-cookie", ""), "flasgo-csrf")
+    assert token is not None
+    send = getattr(client, method)
+    assert send("/item", headers={"origin": "http://localhost"}).status_code == 403
+    allowed = send("/item", headers={"cookie": f"flasgo-csrf={token}", "x-csrf-token": token, "origin": "http://localhost"})
+    assert allowed.status_code == 200
+
+
+def test_ratelimit_capacity_retry_after_tracks_extended_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry-After at capacity must follow the true earliest expiry even after an active bucket is extended."""
+    limiter = RateLimiter(max_keys=2)
+    now = 0.0
+    rule = RateLimitRule(5, window_seconds=10, key_func=lambda req: req.headers.get("x-key"))
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: now)
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    def request(key: str) -> Request:
+        return Request({"headers": [(b"x-key", key.encode("ascii"))], "client": ("127.0.0.1", 5000)}, receive)
+
+    async def run_checks() -> None:
+        nonlocal now
+        assert (await limiter.check(rule, request("alpha"), endpoint_id="endpoint")).allowed
+        now = 1.0
+        assert (await limiter.check(rule, request("beta"), endpoint_id="endpoint")).allowed
+        now = 2.0
+        early = await limiter.check(rule, request("gamma"), endpoint_id="endpoint")
+        assert not early.allowed
+        assert early.retry_after == 8  # alpha expires first, at 10
+        now = 5.0
+        assert (await limiter.check(rule, request("alpha"), endpoint_id="endpoint")).allowed  # alpha now expires at 15
+        now = 9.5
+        denied = await limiter.check(rule, request("gamma"), endpoint_id="endpoint")
+        assert not denied.allowed
+        assert denied.retry_after == 2  # beta, at 11, is now the earliest; a cached 10 would say 1
+        now = 9.5 + denied.retry_after
+        assert (await limiter.check(rule, request("gamma"), endpoint_id="endpoint")).allowed
+        assert set(limiter._buckets) == {("endpoint", "alpha"), ("endpoint", "gamma")}
+
+    asyncio.run(run_checks())

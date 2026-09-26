@@ -8,20 +8,23 @@ version = "0.9.1"
 description = "Async-first Python web framework with Flask ergonomics and Django-inspired security defaults."
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "BSD 3-Clause" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [{ name = "Jay Townsend" }]
 maintainers = [{ name = "Jay Townsend" }]
 keywords = ["asgi", "async", "flasgo", "framework", "jinja2", "security", "web"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
 ]
 dependencies = [
     "uvicorn[standard]==0.52.4",
@@ -68,17 +71,35 @@ dev = [
   "ty==0.0.79",
 ]
 
+[tool.hatch.build.targets.sdist]
+# An explicit list keeps untracked local files (editor, agent, and shell config) out of source distributions.
+include = [
+    "/flasgo",
+    "/tests",
+    "/benchmarks",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/MIGRATING_FROM_FLASK.md",
+    "/METRICS.md",
+    "/release.md",
+    "/pyproject.toml",
+]
+
 [tool.ruff]
 line-length = 140
 indent-width = 4
 target-version = "py314"
-src = ["flasgo", "tests"]
+# "." makes the flasgo package first-party for import sorting; "tests" covers tests/_helpers.py.
+src = [".", "tests"]
 
 [tool.ruff.format]
 indent-style = "space"
 
 [tool.ruff.lint]
-select = ["E",
+select = [
+    "E",
     "F",
     "I",
     "B",
@@ -87,12 +108,55 @@ select = ["E",
     "RUF",
     "SIM",
     "PIE",
-    "PERF"]
+    "PERF",
+    "C4",
+    "DTZ",
+    "ERA",
+    "FLY",
+    "FURB",
+    "G",
+    "INP",
+    "ISC",
+    "LOG",
+    "PGH",
+    "PLR1711",
+    "PLR1714",
+    "PLW",
+    "PT",
+    "PTH",
+    "PYI",
+    "Q",
+    "RET",
+    "RSE",
+    "S",
+    "SLOT",
+    "T20",
+    "TID",
+]
 
 ignore = [
     "RUF036",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, use fixed tokens, pickle round-trips, spawn helper processes, and pass 0.0.0.0 to the CLI.
+"tests/**" = ["S101", "S104", "S105", "S106", "S301", "S603"]
+"flasgo/{cli,server}.py" = ["T201"]
+"benchmarks/**" = ["T201"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -ra"
+pythonpath = ["."]
+strict = true
+filterwarnings = ["error"]
+faulthandler_timeout = 60
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.src]
+include = ["flasgo", "tests", "benchmarks"]
+
+[tool.ty.terminal]
+error-on-warning = true

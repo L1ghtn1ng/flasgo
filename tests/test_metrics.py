@@ -1,27 +1,15 @@
-from __future__ import annotations
-
 import asyncio
 import sys
 from typing import Any
 
-from flasgo import CORSConfig, Flasgo
-from flasgo.metrics import Metrics
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-_TOKEN = "metrics-token-" + "m" * 32
-
-
-def _app(**settings: object) -> Flasgo:
-    return Flasgo(
-        settings={
-            "CSRF_ENABLED": False,
-            "METRICS_ENABLED": True,
-            "METRICS_BEARER_TOKEN": _TOKEN,
-            **settings,
-        }
-    )
+from _helpers import METRICS_TOKEN as _TOKEN
+from _helpers import metrics_app as _app
+from flasgo import CORSConfig, Flasgo
+from flasgo.metrics import Metrics
 
 
 def _scrape(app: Flasgo, *, accept: str | None = None) -> str:

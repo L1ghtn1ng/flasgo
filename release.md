@@ -7,8 +7,9 @@ This file documents how releases are cut and published for `flasgo`.
 - CI workflow: `.github/workflows/ci.yml`
   - Runs on pushes to `main` and pull requests.
   - Verifies the lockfile, installs the development environment with `--frozen`, and checks dependency consistency.
-  - Executes `ruff`, `ty`, the full `pytest` suite, and an OSV dependency audit.
-  - Builds both distribution formats and rejects whitespace errors with `git diff --check`.
+  - Executes `ruff check`, `ruff format --check`, `ty`, and an OSV dependency audit, then builds both distribution
+    formats, smoke-tests the wheel, and rejects whitespace errors with `git diff --check`.
+  - Runs the full `pytest` suite against Redis and Valkey, plus a non-blocking Python 3.15-dev job.
 - Publish workflow: `.github/workflows/release-pypi.yml`
   - Runs on git tags matching `v*`.
   - Verifies tag version equals `pyproject.toml` `project.version`.
@@ -45,6 +46,7 @@ uv lock --check
 uv sync --frozen --group dev
 uv pip check
 uv run --frozen ruff check .
+uv run --frozen ruff format --check .
 uv run --frozen ty check
 uv run --frozen pytest
 uv audit --frozen

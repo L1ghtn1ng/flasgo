@@ -1,30 +1,25 @@
-from __future__ import annotations
-
 import importlib
-import secrets
+import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast, get_type_hints
+from typing import Any, cast
 
-from .security import SecurityConfig
-
-
-def _default_security_headers() -> dict[str, str]:
-    return {
-        "x-content-type-options": "nosniff",
-        "x-frame-options": "DENY",
-        "referrer-policy": "strict-origin-when-cross-origin",
-        "x-xss-protection": "0",
-        "permissions-policy": "camera=(), microphone=(), geolocation=()",
-        "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
-        "content-security-policy": "default-src 'self'; frame-ancestors 'none'",
-    }
+from .security import (
+    SecurityConfig,
+    StrictBoolFields,
+    allowed_host_pattern,
+    canonical_origin,
+    default_secret_key,
+    default_security_headers,
+    validate_cookie_name,
+)
 
 
 @dataclass
-class Settings:
+class Settings(StrictBoolFields):
     DEBUG: bool = False
-    SECRET_KEY: str = field(default_factory=lambda: secrets.token_urlsafe(48))
+    SECRET_KEY: str = field(default_factory=default_secret_key)
 
     ALLOWED_HOSTS: set[str] = field(default_factory=lambda: {"127.0.0.1", "localhost"})
     ENFORCE_ALLOWED_HOSTS: bool = True
@@ -90,25 +85,8 @@ class Settings:
     SSRF_ALLOW_UNRESOLVABLE_HOSTS: bool = False
     SSRF_RESOLUTION_TIMEOUT_SECONDS: float | None = 5.0
 
-    SECURITY_HEADERS: dict[str, str] = field(default_factory=_default_security_headers)
+    SECURITY_HEADERS: dict[str, str] = field(default_factory=default_security_headers)
     EXTRA: dict[str, Any] = field(default_factory=dict, repr=False)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        """Reject wrong-typed boolean assignments throughout the settings lifetime."""
-        annotation = type(self).__annotations__.get(name)
-        if annotation in {bool, "bool"} and not isinstance(value, bool):
-            raise TypeError(f"{name} must be a bool.")
-        object.__setattr__(self, name, value)
-
-    def __post_init__(self) -> None:
-        """Reject wrong-typed booleans before any security setting is consumed."""
-        self._validate_boolean_fields()
-
-    def _validate_boolean_fields(self) -> None:
-        """Validate boolean fields, including after a caller mutates an existing instance."""
-        for name, annotation in get_type_hints(type(self)).items():
-            if annotation is bool and not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be a bool.")
 
     def to_security_config(self) -> SecurityConfig:
         return SecurityConfig(
@@ -165,7 +143,8 @@ class Settings:
         return cls.from_mapping(values)
 
     def get(self, key: str, default: Any = None) -> Any:
-        if hasattr(self, key):
+        # Only settings fields, not methods such as ``get`` or ``to_security_config``.
+        if key in self.__dataclass_fields__:
             return getattr(self, key)
         return self.EXTRA.get(key, default)
 
@@ -186,3 +165,126 @@ def load_settings(source: SettingsInput | None) -> Settings:
         module = importlib.import_module(source)
         return Settings.from_object(module)
     return Settings.from_object(source)
+
+
+_INSECURE_SENTINEL = "dev-insecure-secret-change-this"
+_BEARER_TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
+
+
+def validate_app_config(settings: Settings, security: SecurityConfig) -> None:
+    """Reject invalid settings and security configuration before the application serves requests."""
+    if not security.secret_key:
+        raise ValueError("SECRET_KEY must be configured. Set it to a long random value before starting Flasgo.")
+    if security.secret_key == _INSECURE_SENTINEL:
+        raise ValueError("SECRET_KEY uses an insecure default value. Replace it with a unique random secret.")
+    if len(security.secret_key) < 32:
+        raise ValueError("SECRET_KEY must be at least 32 characters.")
+    same_site = security.session_cookie_same_site.strip().lower()
+    if same_site not in {"lax", "strict", "none"}:
+        raise ValueError("SESSION_COOKIE_SAME_SITE must be one of 'Lax', 'Strict', or 'None'.")
+    if same_site == "none" and not security.session_cookie_secure:
+        raise ValueError("SESSION_COOKIE_SAME_SITE='None' requires SESSION_COOKIE_SECURE=True.")
+    validate_cookie_name(security.session_cookie_name)
+    validate_cookie_name(security.csrf_cookie_name)
+    max_age = security.session_cookie_max_age
+    if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
+        # Zero or negative values make every session cookie expire immediately.
+        raise ValueError("SESSION_COOKIE_MAX_AGE must be a positive number of seconds.")
+    for pattern in security.allowed_hosts:
+        if not isinstance(pattern, str) or allowed_host_pattern(pattern) is None:
+            raise ValueError(
+                f"ALLOWED_HOSTS entry {pattern!r} is not a hostname, IP address, or '.suffix' pattern. "
+                "Wildcards such as '*' are not supported; list each host or use '.example.com'."
+            )
+    if security.max_request_body_bytes <= 0:
+        raise ValueError("MAX_REQUEST_BODY_BYTES must be greater than 0.")
+    if security.max_request_head_bytes <= 0:
+        raise ValueError("MAX_REQUEST_HEAD_BYTES must be greater than 0.")
+    if security.request_read_timeout_seconds <= 0:
+        raise ValueError("REQUEST_READ_TIMEOUT_SECONDS must be greater than 0.")
+    if security.max_multipart_parts <= 0:
+        raise ValueError("MAX_MULTIPART_PARTS must be greater than 0.")
+    if security.max_form_fields <= 0:
+        raise ValueError("MAX_FORM_FIELDS must be greater than 0.")
+    ssrf_timeout = settings.SSRF_RESOLUTION_TIMEOUT_SECONDS
+    if ssrf_timeout is not None and ssrf_timeout <= 0:
+        raise ValueError("SSRF_RESOLUTION_TIMEOUT_SECONDS must be greater than 0 or None.")
+    if security.max_validation_depth <= 0:
+        raise ValueError("MAX_VALIDATION_DEPTH must be greater than 0.")
+    if security.max_validation_work <= 0:
+        raise ValueError("MAX_VALIDATION_WORK must be greater than 0.")
+    if security.max_validation_issues < 2:
+        raise ValueError("MAX_VALIDATION_ISSUES must be at least 2.")
+    if security.security_failure_window_seconds <= 0:
+        raise ValueError("SECURITY_FAILURE_WINDOW_SECONDS must be greater than 0.")
+    if not settings.SSRF_ALLOWED_SCHEMES:
+        raise ValueError("SSRF_ALLOWED_SCHEMES must not be empty. Include at least one scheme such as 'https'.")
+    if not isinstance(settings.OTEL_SERVICE_NAME, str) or not settings.OTEL_SERVICE_NAME.strip():
+        raise ValueError("OTEL_SERVICE_NAME must not be empty.")
+    if settings.OTEL_SERVICE_VERSION is not None and not isinstance(settings.OTEL_SERVICE_VERSION, str):
+        raise ValueError("OTEL_SERVICE_VERSION must be a string or None.")
+    if (
+        isinstance(settings.OTEL_TRACE_SAMPLE_RATIO, bool)
+        or not isinstance(settings.OTEL_TRACE_SAMPLE_RATIO, int | float)
+        or not 0 <= settings.OTEL_TRACE_SAMPLE_RATIO <= 1
+    ):
+        raise ValueError("OTEL_TRACE_SAMPLE_RATIO must be between 0 and 1 inclusive.")
+    if any(not isinstance(path, str) or not path.startswith("/") for path in settings.OTEL_EXCLUDED_PATHS):
+        raise ValueError("Every OTEL_EXCLUDED_PATHS entry must start with '/'.")
+    if not settings.DOCS_PATH.startswith("/"):
+        raise ValueError("DOCS_PATH must start with '/'. Example: '/docs'.")
+    if not settings.OPENAPI_PATH.startswith("/"):
+        raise ValueError("OPENAPI_PATH must start with '/'. Example: '/openapi.json'.")
+    if settings.DOCS_PATH == settings.OPENAPI_PATH:
+        raise ValueError("DOCS_PATH and OPENAPI_PATH must be different so each endpoint has its own URL.")
+    if settings.DOCS_AUTH_BACKEND is not None and (
+        not isinstance(settings.DOCS_AUTH_BACKEND, str) or not settings.DOCS_AUTH_BACKEND.strip()
+    ):
+        raise ValueError("DOCS_AUTH_BACKEND must be a non-empty registered backend name or None.")
+    if any(not isinstance(url, str) or not url.strip() for url in settings.API_SERVERS):
+        raise ValueError("API_SERVERS entries must be non-empty URL strings.")
+    if settings.LOG_FORMAT.strip().lower() not in {"text", "json"}:
+        raise ValueError("LOG_FORMAT must be 'text' or 'json'.")
+    if settings.LOG_LEVEL.upper() not in logging.getLevelNamesMapping():
+        raise ValueError("LOG_LEVEL must be a standard Python logging level such as INFO or WARNING.")
+    if settings.WEBSOCKET_MAX_MESSAGE_BYTES <= 0:
+        raise ValueError("WEBSOCKET_MAX_MESSAGE_BYTES must be greater than 0.")
+    if settings.WEBSOCKET_MAX_MESSAGES_PER_MINUTE <= 0:
+        raise ValueError("WEBSOCKET_MAX_MESSAGES_PER_MINUTE must be greater than 0.")
+    if settings.SERVER_LIMIT_CONCURRENCY <= 0:
+        raise ValueError("SERVER_LIMIT_CONCURRENCY must be greater than 0.")
+    for origin in settings.WEBSOCKET_ALLOWED_ORIGINS:
+        if canonical_origin(origin) is None:
+            raise ValueError("WEBSOCKET_ALLOWED_ORIGINS entries must be exact http:// or https:// origins without paths.")
+    for entry in security.csrf_trusted_origins:
+        if not _valid_csrf_trusted_origin(entry):
+            # An entry that can never match would otherwise silently reject every request from that origin.
+            raise ValueError(
+                f"CSRF_TRUSTED_ORIGINS entry {entry!r} is not supported. Use an http(s) origin such as "
+                "'https://partner.example', a wildcard such as 'https://*.example.com', a host, or a '.example.com' suffix."
+            )
+    if not settings.METRICS_PATH.startswith("/"):
+        raise ValueError("METRICS_PATH must start with '/'.")
+    if not isinstance(settings.METRICS_EVENT_LOOP_ENABLED, bool):
+        raise ValueError("METRICS_EVENT_LOOP_ENABLED must be a boolean.")
+    interval = settings.METRICS_EVENT_LOOP_INTERVAL_SECONDS
+    if isinstance(interval, bool) or not isinstance(interval, int | float) or not 0.01 <= interval <= 60:
+        raise ValueError("METRICS_EVENT_LOOP_INTERVAL_SECONDS must be between 0.01 and 60.")
+    if settings.METRICS_ENABLED:
+        token = settings.METRICS_BEARER_TOKEN
+        if not isinstance(token, str) or len(token) < 32 or _BEARER_TOKEN_RE.fullmatch(token) is None:
+            raise ValueError("METRICS_BEARER_TOKEN must contain at least 32 bearer-safe ASCII characters when metrics are enabled.")
+        if settings.METRICS_PATH in {settings.DOCS_PATH, settings.OPENAPI_PATH}:
+            raise ValueError("METRICS_PATH must not conflict with DOCS_PATH or OPENAPI_PATH.")
+
+
+def _valid_csrf_trusted_origin(entry: object) -> bool:
+    """Accept only the entry forms that CSRF origin matching understands."""
+    if not isinstance(entry, str):
+        return False
+    text = entry.strip().lower()
+    if "://" not in text:
+        return allowed_host_pattern(text) is not None
+    scheme, _, authority = text.partition("://")
+    authority = authority.removeprefix("*.")
+    return canonical_origin(f"{scheme}://{authority}") is not None

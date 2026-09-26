@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
@@ -31,7 +29,7 @@ class AsyncTestStream:
         if message["type"] == "http.response.start":
             self.status_code = message["status"]
             for key, value in message.get("headers", []):
-                name, text = key.decode("latin-1"), value.decode("latin-1")
+                name, text = key.decode("latin-1").lower(), value.decode("latin-1")
                 self.headers[name] = self.headers[name] + "\n" + text if name in self.headers else text
             self.started.set()
         elif message["type"] == "http.response.body":
@@ -44,7 +42,8 @@ class AsyncTestStream:
         Raises:
             RuntimeError: If the application finishes without starting a response.
         """
-        assert self.task is not None
+        if self.task is None:
+            raise RuntimeError("The test stream has not been started.")
         waiter = asyncio.create_task(self.started.wait())
         try:
             await asyncio.wait({waiter, self.task}, return_when=asyncio.FIRST_COMPLETED)
@@ -65,7 +64,8 @@ class AsyncTestStream:
         Raises:
             RuntimeError: If the application ends before the response is complete.
         """
-        assert self.task is not None
+        if self.task is None:
+            raise RuntimeError("The test stream has not been started.")
         while True:
             if not self.queue.empty():
                 message = self.queue.get_nowait()

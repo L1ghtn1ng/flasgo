@@ -68,12 +68,19 @@ async def measure(enabled: bool, streaming: bool, routes: int, requests: int, ro
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
+        status = 0
+
         async def send(message):
             """Count response body bytes without retaining or transporting the payload."""
-            nonlocal size
+            nonlocal size, status
+            if message["type"] == "http.response.start":
+                status = message["status"]
             size += len(message.get("body", b""))
 
         await app(scope(path), receive, send)
+        if status != 200:
+            # Otherwise a settings or validation change would silently benchmark error responses.
+            raise RuntimeError(f"Benchmark request to {path} returned {status}, expected 200.")
         return size
 
     events = asyncio.Queue()

@@ -1,16 +1,12 @@
-from __future__ import annotations
-
 import inspect
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from types import TracebackType
-from typing import Any
+from typing import Any, cast, override
 
 from .params import (
-    Cookie,
     Depends,
     EndpointPlan,
-    Header,
     ParameterBinding,
     Provider,
     _validate_dependency_scopes,
@@ -32,6 +28,7 @@ from .validation import (
 
 
 class _DependencyStack(AsyncExitStack):
+    @override
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
@@ -153,12 +150,13 @@ async def _resolve_plan(
             if binding.source == "request":
                 value = request
             elif binding.source == "path":
-                value = validate_value(
-                    binding.annotation,
-                    path_params[binding.name],
-                    location=("path", binding.name),
-                    budget=budget,
-                )
+                raw = path_params[binding.name]
+                # Untyped ``<name>`` segments arrive as text and need text coercion (``"5"`` -> ``5``), while
+                # converter segments such as ``<int:name>`` are already typed.
+                if isinstance(raw, str):
+                    value = validate_text_values(binding.annotation, [raw], location=("path", binding.name), budget=budget)
+                else:
+                    value = validate_value(binding.annotation, raw, location=("path", binding.name), budget=budget)
             elif binding.source == "query":
                 key = binding_wire_name(binding)
                 values = request.query_params.get(key, [])
@@ -170,16 +168,12 @@ async def _resolve_plan(
                 else:
                     value = validate_text_values(binding.annotation, values, location=("query", key), budget=budget)
             elif binding.source == "header":
-                marker = binding.marker
-                assert isinstance(marker, Header)
                 key = binding_wire_name(binding)
                 values = request.header_values(key)
                 if is_collection_annotation(binding.annotation):
                     values = tuple(item.strip(" \t") for value in values for item in value.split(","))
                 value = _resolve_text_binding(binding, values, location=("header", key), budget=budget)
             elif binding.source == "cookie":
-                marker = binding.marker
-                assert isinstance(marker, Cookie)
                 key = binding_wire_name(binding)
                 values = request.cookie_values(key)
                 if len(values) > 1:
@@ -190,8 +184,8 @@ async def _resolve_plan(
             elif binding.source == "form":
                 value = await _resolve_form(binding, request, body_cache, budget)
             elif binding.source == "dependency" and binding.dependency is not None:
-                marker = binding.marker
-                assert isinstance(marker, Depends)
+                # Dependency bindings are always compiled with a Depends marker.
+                marker = cast(Depends, binding.marker)
                 context = request.scope.get("flasgo.dependencies")
                 if not isinstance(context, DependencyContext):
                     raise RuntimeError("Dependency resolution requires a DependencyContext in request.scope['flasgo.dependencies'].")

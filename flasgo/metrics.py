@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import time
 from collections.abc import Iterator
@@ -7,6 +5,7 @@ from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
+from ._otel import current_trace_ids
 from .exceptions import HTTPException
 
 if TYPE_CHECKING:
@@ -28,17 +27,8 @@ def _framework_version() -> str:
 
 def _trace_exemplar() -> dict[str, str] | None:
     """Return trace identifiers only when an optional OpenTelemetry span is active."""
-    try:
-        from opentelemetry import trace
-    except ImportError:
-        return None
-    context = trace.get_current_span().get_span_context()
-    if not context.is_valid:
-        return None
-    return {
-        "trace_id": format(context.trace_id, "032x"),
-        "span_id": format(context.span_id, "016x"),
-    }
+    ids = current_trace_ids()
+    return None if ids is None else {"trace_id": ids[0], "span_id": ids[1]}
 
 
 def normalize_http_method(method: str) -> str:
@@ -320,7 +310,7 @@ class Metrics:
         route: str,
         status: int,
         duration: float,
-        response_body_size: int | None,
+        response_body_size: int,
         response_sent: bool,
     ) -> None:
         """Observe a completed HTTP attempt and distinguish response send failures."""
@@ -330,7 +320,7 @@ class Metrics:
         exemplar = _trace_exemplar()
         self.http_requests.labels(**labels).inc(exemplar=exemplar)
         self.http_duration.labels(**distribution_labels).observe(duration, exemplar=exemplar)
-        if response_sent and response_body_size is not None:
+        if response_sent:
             self.http_response_body_size.labels(**distribution_labels).observe(response_body_size, exemplar=exemplar)
         else:
             self.http_response_send_failures.labels(**labels).inc(exemplar=exemplar)

@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 import asyncio
+import contextvars
 import json
 import queue
 import threading
@@ -8,9 +7,11 @@ from collections.abc import Coroutine, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from http.cookies import SimpleCookie
-from typing import Any, cast
-from urllib.parse import urlencode, urljoin, urlsplit
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from http.cookies import Morsel, SimpleCookie
+from typing import Any, Self, cast
+from urllib.parse import SplitResult, quote, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 from .testing_stream import AsyncTestStream
@@ -24,21 +25,80 @@ type RequestHeaders = Mapping[str, str] | Sequence[tuple[str, str]]
 
 
 def _flatten_data(data: RequestData) -> list[tuple[str, str]]:
+    items = data.items() if isinstance(data, Mapping) else data
     pairs: list[tuple[str, str]] = []
-    if isinstance(data, Mapping):
-        for key, value in data.items():
-            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-                pairs.extend((str(key), str(item)) for item in value)
-                continue
-            pairs.append((str(key), str(value)))
-        return pairs
-
-    for key, value in data:
+    for key, value in items:
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
             pairs.extend((str(key), str(item)) for item in value)
-            continue
-        pairs.append((str(key), str(value)))
+        else:
+            pairs.append((str(key), str(value)))
     return pairs
+
+
+_PATH_SAFE = "/%:@!$&'()*+,;=-._~"
+_QUERY_SAFE = "=&%+:/?@!$'()*,;-._~"
+
+
+def _target_scope(target: str) -> dict[str, Any]:
+    """Build ASGI path fields the way a real server does.
+
+    ``path`` is percent-decoded while ``raw_path`` and ``query_string`` stay encoded as ASCII, so non-ASCII
+    text in a test URL is percent-encoded instead of failing a latin-1 encode.
+    """
+    parsed = urlsplit(target)
+    raw_path = quote(parsed.path or "/", safe=_PATH_SAFE)
+    return {
+        "path": unquote(raw_path),
+        "raw_path": raw_path.encode("ascii"),
+        "query_string": quote(parsed.query, safe=_QUERY_SAFE).encode("ascii"),
+    }
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def _same_authority(target: SplitResult, host: str) -> bool:
+    """Compare a redirect target with the Host the client sent, treating default ports as implicit.
+
+    ``http://localhost:80/next`` and ``https://localhost/next`` both stay on host ``localhost``.
+    """
+    default_port = _DEFAULT_PORTS.get(target.scheme)
+    try:
+        requested = urlsplit(f"//{host}")
+        return target.hostname == requested.hostname and (target.port or default_port) == (requested.port or default_port)
+    except ValueError:
+        return False
+
+
+def _header_value(headers: RequestHeaders | None, name: str) -> str | None:
+    if headers is None:
+        return None
+    items = cast(Mapping[str, str], headers).items() if isinstance(headers, Mapping) else headers
+    return next((value for key, value in items if key.lower() == name), None)
+
+
+def _without_headers(headers: RequestHeaders | None, names: set[str]) -> list[tuple[str, str]] | None:
+    if headers is None:
+        return None
+    items = cast(Mapping[str, str], headers).items() if isinstance(headers, Mapping) else headers
+    return [(key, value) for key, value in items if key.lower() not in names]
+
+
+def _cookie_expired(morsel: Morsel[str]) -> bool:
+    """Treat ``Max-Age<=0`` or a past ``Expires`` as deletion, as browsers do (Secure is not enforced on localhost)."""
+    max_age = morsel["max-age"]
+    if max_age:
+        try:
+            return int(max_age) <= 0
+        except ValueError:
+            return False
+    expires = morsel["expires"]
+    if expires:
+        try:
+            return parsedate_to_datetime(expires) <= datetime.now(UTC)
+        except TypeError, ValueError:
+            return False
+    return False
 
 
 def _merge_cookie_headers(cookie_header: str | None, jar: dict[str, str]) -> str | None:
@@ -124,11 +184,10 @@ class TestClient:
         self._lifespan_send: asyncio.Queue[Message] | None = None
         self._lifespan_task: asyncio.Task[None] | None = None
 
-    def __enter__(self) -> TestClient:
+    def __enter__(self) -> Self:
         if self._mode is not None:
             raise RuntimeError("TestClient contexts may not be re-entered.")
         self._mode = "sync"
-        self._loop = asyncio.new_event_loop()
         self._work_queue = queue.Queue()
         self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._loop_thread.start()
@@ -145,7 +204,7 @@ class TestClient:
         finally:
             self._stop_sync_loop()
 
-    async def __aenter__(self) -> TestClient:
+    async def __aenter__(self) -> Self:
         if self._mode is not None:
             raise RuntimeError("TestClient contexts may not be re-entered.")
         self._mode = "async"
@@ -166,21 +225,18 @@ class TestClient:
             self._mode = None
 
     def _run_loop(self) -> None:
-        loop = self._loop
         work_queue = self._work_queue
-        if loop is None or work_queue is None:
+        if work_queue is None:
             return
-        asyncio.set_event_loop(loop)
-        while True:
-            item = work_queue.get()
-            if item is None:
-                break
-            coro, future = item
-            try:
-                future.set_result(loop.run_until_complete(coro))
-            except BaseException as exc:
-                future.set_exception(exc)
-        loop.close()
+        # Runner cancels leftover tasks and shuts down async generators and the default executor on exit.
+        with asyncio.Runner() as runner:
+            while (item := work_queue.get()) is not None:
+                coro, future = item
+                try:
+                    # A fresh context per call keeps the isolation run_until_complete() gave each submission.
+                    future.set_result(runner.run(coro, context=contextvars.copy_context()))
+                except BaseException as exc:
+                    future.set_exception(exc)
 
     def _stop_sync_loop(self) -> None:
         if self._work_queue is not None:
@@ -217,9 +273,19 @@ class TestClient:
             "asgi": {"version": "3.0", "spec_version": "2.0"},
             "state": {},
         }
-        self._lifespan_task = asyncio.create_task(self.app(scope, receive, send))
+        lifespan_task = asyncio.create_task(self.app(scope, receive, send))
+        self._lifespan_task = lifespan_task
         await self._lifespan_receive.put({"type": "lifespan.startup"})
-        result = await asyncio.wait_for(self._lifespan_send.get(), timeout=5)
+        reply = asyncio.ensure_future(send_queue.get())
+        # Watch the app task too: if it raises instead of replying, surface that error rather than a timeout.
+        done, _ = await asyncio.wait({reply, lifespan_task}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        if reply not in done:
+            reply.cancel()
+            if lifespan_task in done:
+                await lifespan_task
+                raise RuntimeError("Application lifespan exited without completing startup.")
+            raise TimeoutError("Application lifespan startup did not complete within 5 seconds.")
+        result = reply.result()
         if result.get("type") != "lifespan.startup.complete":
             if self._lifespan_task is not None:
                 await self._lifespan_task
@@ -489,27 +555,36 @@ class TestClient:
         current_json = json
         current_data = data
         current_files = files
-        current_path = path
+        current_headers = headers
+        host = (_header_value(headers, "host") or "localhost").lower()
+        current_url = f"{scheme}://{host}{path}"
 
         for _ in range(10):
             location = current_response.location
             if current_response.status_code not in {301, 302, 303, 307, 308} or location is None:
                 current_response.history = history
                 return current_response
+            current_url = urljoin(current_url, location)
+            target = urlsplit(current_url)
+            if not _same_authority(target, host):
+                # A redirect to another origin leaves the application under test; do not replay it locally.
+                current_response.history = history
+                return current_response
 
             history.append(current_response)
-            current_path = urljoin(current_path, location)
+            scheme = target.scheme or scheme
             if current_response.status_code in {301, 302, 303} and current_method not in {"GET", "HEAD"}:
                 current_method = "GET"
                 current_body = None
                 current_json = None
                 current_data = None
                 current_files = None
+                current_headers = _without_headers(current_headers, {"content-type", "content-length"})
 
             current_response = await self._send(
                 current_method,
-                current_path,
-                headers=headers,
+                urlunsplit(("", "", target.path or "/", target.query, "")),
+                headers=current_headers,
                 body=current_body,
                 json=current_json,
                 data=current_data,
@@ -601,7 +676,6 @@ class TestClient:
         """
         payload, content_type = _encode_request_body(body=body, json=json, data=data, files=files)
 
-        parsed = urlsplit(path)
         if headers is None:
             header_items: list[tuple[str, str]] = []
         elif isinstance(headers, Mapping):
@@ -631,9 +705,7 @@ class TestClient:
             "http_version": "1.1",
             "method": method.upper(),
             "scheme": scheme.lower(),
-            "path": parsed.path or "/",
-            "raw_path": (parsed.path or "/").encode("latin-1"),
-            "query_string": parsed.query.encode("latin-1"),
+            **_target_scope(path),
             "headers": raw_headers,
             "client": ("127.0.0.1", 50000),
             "server": ("localhost", 80),
@@ -678,14 +750,7 @@ class TestClient:
         if start_message is None:
             raise RuntimeError("No response start message from application")
 
-        decoded_headers: dict[str, str] = {}
-        for key_raw, value_raw in start_message.get("headers", []):
-            key = key_raw.decode("latin-1").lower()
-            value = value_raw.decode("latin-1")
-            if key in decoded_headers:
-                decoded_headers[key] = f"{decoded_headers[key]}\n{value}"
-            else:
-                decoded_headers[key] = value
+        decoded_headers = _decode_raw_headers(start_message.get("headers", []))
 
         self._update_cookies(decoded_headers.get("set-cookie"))
         return TestResponse(
@@ -698,7 +763,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         origin: str | None = "http://localhost",
         subprotocols: Sequence[str] = (),
         scheme: str = "ws",
@@ -719,7 +784,7 @@ class TestClient:
         self,
         path: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         origin: str | None = "http://localhost",
         subprotocols: Sequence[str] = (),
         scheme: str = "ws",
@@ -743,7 +808,7 @@ class TestClient:
             cookie = SimpleCookie()
             cookie.load(raw_cookie)
             for key, morsel in cookie.items():
-                if morsel.value:
+                if morsel.value and not _cookie_expired(morsel):
                     self._cookies[key] = morsel.value
                 else:
                     self._cookies.pop(key, None)
@@ -755,7 +820,7 @@ class _WebSocketTransport:
         client: TestClient,
         path: str,
         *,
-        headers: dict[str, str] | None,
+        headers: RequestHeaders | None,
         origin: str | None,
         subprotocols: Sequence[str],
         scheme: str,
@@ -774,10 +839,10 @@ class _WebSocketTransport:
         self.closed = False
 
     async def start(self) -> None:
-        parsed = urlsplit(self.path)
         normalized_headers = {"host": "localhost"}
         if self.headers:
-            normalized_headers.update({key.lower(): value for key, value in self.headers.items()})
+            items = cast(Mapping[str, str], self.headers).items() if isinstance(self.headers, Mapping) else self.headers
+            normalized_headers.update({key.lower(): value for key, value in items})
         if self.origin is not None:
             normalized_headers["origin"] = self.origin
         cookie_header = _merge_cookie_headers(normalized_headers.get("cookie"), self.client._cookies)
@@ -802,9 +867,7 @@ class _WebSocketTransport:
             "asgi": {"version": "3.0", "spec_version": "2.5"},
             "http_version": "1.1",
             "scheme": self.scheme,
-            "path": parsed.path or "/",
-            "raw_path": (parsed.path or "/").encode("latin-1"),
-            "query_string": parsed.query.encode("latin-1"),
+            **_target_scope(self.path),
             "headers": raw_headers,
             "client": ("127.0.0.1", 50000),
             "server": ("localhost", 80),
@@ -843,7 +906,7 @@ class _WebSocketTransport:
         await self._put({"type": "websocket.receive", "bytes": value})
 
     async def send_json(self, value: object) -> None:
-        await self.send_text(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
+        await self.send_text(_json_dumps(value))
 
     async def receive_text(self) -> str:
         message = await self._next_output()
@@ -865,8 +928,8 @@ class _WebSocketTransport:
         return json.loads(await self.receive_text())
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        if self.closed:
-            return
+        # Even after the server closed the socket the app task may still be running (or have failed), so always
+        # deliver the disconnect and await it; otherwise its exceptions are lost and the task leaks.
         self.closed = True
         if self._task is not None and not self._task.done():
             await self._put({"type": "websocket.disconnect", "code": code, "reason": reason})
@@ -908,7 +971,7 @@ class SyncWebSocketSession:
     def response_headers(self) -> dict[str, str]:
         return dict(self._transport.response_headers)
 
-    def __enter__(self) -> SyncWebSocketSession:
+    def __enter__(self) -> Self:
         self._client._submit(self._transport.start())
         return self
 
@@ -949,7 +1012,7 @@ class AsyncWebSocketSession:
     def response_headers(self) -> dict[str, str]:
         return dict(self._transport.response_headers)
 
-    async def __aenter__(self) -> AsyncWebSocketSession:
+    async def __aenter__(self) -> Self:
         await self._transport.start()
         return self
 
@@ -979,9 +1042,12 @@ class AsyncWebSocketSession:
 
 
 def _decode_raw_headers(raw_headers: Sequence[tuple[bytes, bytes]]) -> dict[str, str]:
+    """Decode response headers with lowercase names, joining repeated values (such as Set-Cookie) with newlines."""
     decoded: dict[str, str] = {}
     for key_raw, value_raw in raw_headers:
-        decoded[key_raw.decode("latin-1").lower()] = value_raw.decode("latin-1")
+        key = key_raw.decode("latin-1").lower()
+        value = value_raw.decode("latin-1")
+        decoded[key] = f"{decoded[key]}\n{value}" if key in decoded else value
     return decoded
 
 
@@ -997,7 +1063,7 @@ def _encode_request_body(
         raise ValueError("Use only one of body, json, or data/files per request.")
 
     if json is not None:
-        return json_module_dumps(json).encode("utf-8"), "application/json"
+        return _json_dumps(json).encode("utf-8"), "application/json"
     if files is not None:
         return _encode_multipart(data, files)
     if data is not None:
@@ -1007,5 +1073,5 @@ def _encode_request_body(
     return b"", None
 
 
-def json_module_dumps(value: object) -> str:
+def _json_dumps(value: object) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)

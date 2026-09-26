@@ -6,6 +6,7 @@ import time
 from uuid import uuid4
 
 import pytest
+
 from flasgo import (
     Flasgo,
     MemoryStore,
@@ -97,11 +98,13 @@ def test_server_sessions_revoke_rotate_and_reject_stale_updates() -> None:
         backend = ServerSideSessions(MemoryStore())
         original = Session({"user": "alice"}, modified=True)
         first = await backend.save(original, max_age=60)
-        assert first is not None and "alice" not in first
+        assert first is not None
+        assert "alice" not in first
         stale = await backend.load(first)
         original.regenerate()
         second = await backend.save(original, max_age=60)
-        assert second and second != first
+        assert second
+        assert second != first
         assert (await backend.load(first)).data == {}
         stale["user"] = "revived"
         with pytest.raises(HTTPException) as error:
@@ -159,7 +162,8 @@ def test_session_backend_integrates_cookies_csrf_and_logout() -> None:
     login_response = client.get("/login")
     cookies = login_response.headers["set-cookie"]
     assert "alice" not in cookies
-    assert "HttpOnly" in cookies and "Secure" in cookies
+    assert "HttpOnly" in cookies
+    assert "Secure" in cookies
     assert client.post("/logout").status_code == 403
     token = client.cookies["flasgo-csrf"]
     response = client.post("/logout", headers={"x-csrf-token": token, "origin": "http://localhost"})
@@ -200,7 +204,8 @@ def test_redis_sessions_use_real_atomic_storage(redis_url: str) -> None:
             stale = await backend.load(token)
             session.regenerate()
             rotated = await backend.save(session, max_age=1)
-            assert rotated and rotated != token
+            assert rotated
+            assert rotated != token
             stale["value"] = 1
             with pytest.raises(HTTPException):
                 await backend.save(stale, max_age=1)
@@ -256,7 +261,10 @@ def test_redis_capacity_pressure_preserves_active_quotas(redis_url: str) -> None
         rule = RateLimitRule(1, 60)
         try:
             assert (await limiter.check(rule, request_for("one"), endpoint_id="route")).allowed
-            assert not (await limiter.check(rule, request_for("two"), endpoint_id="route")).allowed
+            capacity = await limiter.check(rule, request_for("two"), endpoint_id="route")
+            assert not capacity.allowed
+            # Retry-After tracks the earliest bucket expiry (about the 60 s window), not a fixed 1 second.
+            assert 50 <= capacity.retry_after <= 60
             assert not (await limiter.check(rule, request_for("one"), endpoint_id="route")).allowed
         finally:
             await store.aclose()
@@ -266,7 +274,7 @@ def test_redis_capacity_pressure_preserves_active_quotas(redis_url: str) -> None
 
 def test_redis_timeouts_are_bounded_and_fail_closed() -> None:
     class Client:
-        async def eval(self, *args):
+        async def evalsha(self, *args):
             """
             Wait indefinitely until the operation is cancelled.
             """
@@ -365,5 +373,26 @@ def test_redis_concurrent_session_writes_and_revocation_are_atomic(redis_url: st
                 await backend.save(loaded, max_age=60)
         finally:
             await store.aclose()
+
+    asyncio.run(run())
+
+
+def test_memory_store_capacity_recovers_when_the_earliest_entry_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    import flasgo.stores as stores_module
+
+    now = 0.0
+    monkeypatch.setattr(stores_module.time, "monotonic", lambda: now)
+    store = MemoryStore(max_keys=2)
+
+    async def run() -> None:
+        nonlocal now
+        assert await store.create("long", b"1", ttl=100)
+        assert await store.create("short", b"2", ttl=100)
+        # Shortening an entry's lifetime must be tracked, or the full store would stay closed until t=100.
+        assert await store.replace("short", b"2", b"3", ttl=5)
+        with pytest.raises(StoreUnavailable):
+            await store.create("new", b"4", ttl=100)
+        now = 6.0
+        assert await store.create("new", b"4", ttl=100)
 
     asyncio.run(run())

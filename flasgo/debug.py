@@ -1,11 +1,10 @@
-from __future__ import annotations
-
 import os
 import platform
 import traceback
+from functools import cache
 from pathlib import Path
 
-from jinja2 import Environment, TemplateError
+from jinja2 import Environment, Template, TemplateError
 
 from .request import Request
 from .response import Response
@@ -31,6 +30,15 @@ _DEBUG_ENVIRONMENT_KEYS = frozenset(
 )
 
 
+_DEBUG_TEMPLATES = Path(__file__).parent / "debug_templates"
+
+
+@cache
+def _debug_error_template() -> Template:
+    source = (_DEBUG_TEMPLATES / "debug_error.html").read_text(encoding="utf-8")
+    return Environment(autoescape=True).from_string(source)
+
+
 class Debug:
     """
     Provides debug error pages for template errors during development.
@@ -52,26 +60,19 @@ class Debug:
         template_name: str = getattr(exc, "filename", None) or getattr(exc, "name", None) or "Unknown"
         lineno: int | None = getattr(exc, "lineno", None)
 
-        debug_template_path = Path(__file__).parent / "debug_templates" / "debug_error.html"
-        template_content = debug_template_path.read_text()
-
         safe_environ: dict[str, str] = {k: v for k, v in os.environ.items() if k in _DEBUG_ENVIRONMENT_KEYS}
 
-        html = (
-            Environment(autoescape=True)
-            .from_string(template_content)
-            .render(
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-                template_name=template_name,
-                lineno=lineno,
-                stack_trace=stack_trace,
-                request_method=req.method,
-                request_path=req.path,
-                environ=safe_environ,
-                platform=platform.platform(),
-                pid=os.getpid(),
-            )
+        html = _debug_error_template().render(
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            template_name=template_name,
+            lineno=lineno,
+            stack_trace=stack_trace,
+            request_method=req.method,
+            request_path=req.path,
+            environ=safe_environ,
+            platform=platform.platform(),
+            pid=os.getpid(),
         )
         return Response.html(html, status_code=500)
 
@@ -84,8 +85,7 @@ class Debug:
         if req.method != "GET":
             return Response.text("Method Not Allowed", status_code=405)
 
-        css_path = Path(__file__).parent / "debug_templates" / "debug_error.css"
-        css_content = css_path.read_text()
+        css_content = (_DEBUG_TEMPLATES / "debug_error.css").read_text(encoding="utf-8")
         return Response(
             body=css_content.encode("utf-8"),
             content_type="text/css; charset=utf-8",

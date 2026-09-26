@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import json
 import math
 from uuid import uuid4
 
-from .ratelimit import RateLimitDecision, RateLimitRule, _rate_limit_key
+from .ratelimit import RateLimitDecision, RateLimitRule, rate_limit_key
 from .request import Request
 from .stores import RedisStore, StoreUnavailable
 
@@ -25,7 +23,11 @@ for i = 1, n do
         if not redis.call('ZSCORE', KEYS[1], key) then missing = missing + 1 end
     end
 end
-if redis.call('ZCARD', KEYS[1]) + missing > max_keys then return {} end
+if redis.call('ZCARD', KEYS[1]) + missing > max_keys then
+    -- Registry scores are bucket expiry times, so the lowest one is when capacity next frees up.
+    local earliest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+    return {{-1, math.max(1, math.ceil(((tonumber(earliest[2]) or (now + 1000)) - now) / 1000))}}
+end
 local results, allowed = {}, true
 for i = 1, n do
     local key = KEYS[2*i]
@@ -37,7 +39,11 @@ for i = 1, n do
     local reset = math.max(1, math.ceil(((tonumber(first[2]) or now) + window - now) / 1000))
     if count >= limit then
         allowed = false
-        results[i] = {0, limit, 0, reset, reset}
+        -- A shared scope can hold more entries than this rule's limit, so wait for the entry whose expiry
+        -- brings the count back under the limit rather than the oldest one.
+        local blocking = redis.call('ZRANGEBYSCORE', key, '(' .. (now-window), '+inf', 'WITHSCORES', 'LIMIT', count - limit, 1)
+        local retry = math.max(1, math.ceil(((tonumber(blocking[2]) or now) + window - now) / 1000))
+        results[i] = {0, limit, 0, retry, retry}
     else
         results[i] = {1, limit, math.max(0, limit-count-1), reset, 0}
     end
@@ -116,14 +122,15 @@ class RedisRateLimiter:
         keys = [self.store.prefix + "ratelimit-registry"]
         args: list[str | int] = [self.max_keys, uuid4().hex]
         for rule, endpoint_id in rules:
-            identity = _rate_limit_key(rule, req)
+            identity = rate_limit_key(rule, req)
             key = self.store.key("ratelimit:" + json.dumps([rule.scope or endpoint_id, identity]))
             keys.extend((key, key + ":window"))
             args.extend((rule.requests, math.ceil(rule.window_seconds * 1000)))
         rows = await self.store.evaluate(_LIMIT_SCRIPT, keys, args)
-        if rows == []:
+        if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], list) and rows[0][:1] == [-1]:
             req.scope["flasgo.rate_limit_capacity"] = True
-            return [RateLimitDecision(False, rule.requests, 0, 1, 1) for rule, _ in rules]
+            wait = max(1, int(rows[0][1]))
+            return [RateLimitDecision(False, rule.requests, 0, wait, wait) for rule, _ in rules]
         if not isinstance(rows, list) or len(rows) != len(rules):
             raise StoreUnavailable("Shared limiter returned invalid accounting data.")
         try:

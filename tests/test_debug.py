@@ -1,8 +1,7 @@
-from __future__ import annotations
+from jinja2.exceptions import TemplateNotFound, TemplateSyntaxError
 
 from flasgo import Flasgo
 from flasgo.testing import TestClient
-from jinja2.exceptions import TemplateNotFound, TemplateSyntaxError
 
 
 def test_render_template_debug_error_returns_none_when_debug_disabled() -> None:

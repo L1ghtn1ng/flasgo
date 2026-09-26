@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import asyncio
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -13,6 +12,10 @@ _PRIVATE_NETWORKS = (
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("fc00::/7"),
 )
+
+
+_DNS_LABEL = r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?"
+_DNS_NAME_RE = re.compile(rf"(?=.{{1,253}}$){_DNS_LABEL}(?:\.{_DNS_LABEL})*")
 
 
 class SSRFViolation(ValueError):
@@ -85,7 +88,11 @@ class SSRFGuard:
         if not self.config.enabled:
             return None
 
-        parsed = urlsplit(url)
+        try:
+            parsed = urlsplit(url)
+        except ValueError as exc:
+            # For example an unterminated IPv6 literal ("http://[::1"); callers only expect SSRFViolation.
+            raise SSRFViolation("Outbound URL is malformed.") from exc
         scheme = parsed.scheme.lower()
         if scheme not in self.config.allowed_schemes:
             msg = f"Blocked outbound URL scheme: {scheme!r}"
@@ -97,7 +104,7 @@ class SSRFGuard:
         hostname = parsed.hostname
         if not hostname:
             raise SSRFViolation("Outbound URL must include a hostname.")
-        host = hostname.lower()
+        host = _ascii_host(hostname.lower())
 
         if self.config.allowed_hosts and not _host_allowed(host, self.config.allowed_hosts):
             raise SSRFViolation(f"Host {host!r} is not in SSRF allowlist.")
@@ -121,14 +128,14 @@ class SSRFGuard:
             ):
                 raise SSRFViolation(f"Blocked outbound URL resolved to restricted address: {address}")
 
-        pinned_address = sorted(addresses, key=lambda item: item.packed)[0] if addresses else None
+        pinned_address = min(addresses, key=lambda item: item.packed) if addresses else None
         return SSRFResolvedURL(
             original_url=url,
             url=_replace_hostname(parsed, pinned_address, port=port, explicit_port=explicit_port) if pinned_address is not None else url,
             hostname=host,
             port=port,
             address=pinned_address,
-            host_header=_host_header(parsed, port=port, explicit_port=explicit_port),
+            host_header=_host_header(host, port=port, explicit_port=explicit_port),
         )
 
     def _resolve_ips(self, host: str, *, port: int | None) -> set[IPAddress]:
@@ -138,7 +145,8 @@ class SSRFGuard:
 
         try:
             infos = socket.getaddrinfo(host, port or 0, type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:
+        except (socket.gaierror, UnicodeError) as exc:
+            # UnicodeError: the resolver's IDNA step rejects empty or over-long labels such as "a..b".
             return self._resolution_failed(host, exc)
         return self._addresses_from_infos(infos, host)
 
@@ -153,7 +161,7 @@ class SSRFGuard:
                 infos = await loop.getaddrinfo(host, port or 0, type=socket.SOCK_STREAM)
         except TimeoutError as exc:
             raise SSRFViolation(f"Timed out resolving outbound host {host!r}.") from exc
-        except socket.gaierror as exc:
+        except (socket.gaierror, UnicodeError) as exc:
             return self._resolution_failed(host, exc)
         return self._addresses_from_infos(infos, host)
 
@@ -192,13 +200,23 @@ def _host_allowed(host: str, allowed_hosts: set[str]) -> bool:
         if pattern == "*":
             return True
         if pattern.startswith("."):
-            suffix = pattern[1:]
-            if host == suffix or host.endswith(pattern):
+            suffix = _ascii_pattern(pattern[1:])
+            if suffix is not None and (host == suffix or host.endswith(f".{suffix}")):
                 return True
             continue
-        if host == pattern:
+        if host == _ascii_pattern(pattern):
             return True
     return False
+
+
+def _ascii_pattern(pattern: str) -> str | None:
+    """IDNA-encode an allowlist entry so it compares equal to the ASCII form request hosts are normalized to."""
+    if pattern.isascii():
+        return pattern
+    try:
+        return pattern.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None  # an entry that is not a valid hostname can never match
 
 
 def _parse_ip_literal(host: str) -> IPAddress | None:
@@ -218,8 +236,20 @@ def _url_port(parsed: SplitResult, explicit_port: int | None) -> int:
     return 0
 
 
-def _host_header(parsed: SplitResult, *, port: int, explicit_port: int | None) -> str:
-    hostname = parsed.hostname or ""
+def _ascii_host(host: str) -> str:
+    """Return the IDNA (punycode) form of a DNS name so allowlists, Host headers, and resolution all agree."""
+    if _parse_ip_literal(host) is not None:
+        return host
+    try:
+        ascii_host = host if host.isascii() else host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise SSRFViolation("Outbound URL has an invalid internationalized hostname.") from exc
+    if _DNS_NAME_RE.fullmatch(ascii_host.removesuffix(".")) is None:
+        raise SSRFViolation("Outbound URL has an invalid hostname.")
+    return ascii_host
+
+
+def _host_header(hostname: str, *, port: int, explicit_port: int | None) -> str:
     if ":" in hostname and not hostname.startswith("["):
         hostname = f"[{hostname}]"
     if port == 0 or explicit_port is None:
@@ -260,6 +290,8 @@ def _ip_is_disallowed(address: IPAddress, *, allow_private_networks: bool) -> bo
         inspected = inspected.ipv4_mapped
     if inspected.is_loopback or inspected.is_link_local or inspected.is_multicast or inspected.is_reserved or inspected.is_unspecified:
         return True
-    if any(inspected in network for network in _PRIVATE_NETWORKS if inspected.version == network.version):
+    # Deprecated IPv6 site-local space (fec0::/10) is still routed privately but Python reports it as global.
+    site_local = isinstance(inspected, ipaddress.IPv6Address) and inspected.is_site_local
+    if site_local or any(inspected in network for network in _PRIVATE_NETWORKS if inspected.version == network.version):
         return not allow_private_networks
     return not inspected.is_global

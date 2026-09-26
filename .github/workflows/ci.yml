@@ -9,8 +9,91 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.19"
+
 jobs:
+  checks:
+    name: Lint, types, audit, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            releases.astral.sh:443
+            api.github.com:443
+            api.osv.dev:443
+            files.pythonhosted.org:443
+            github.com:443
+            pypi.org:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      # setup-uv reads its version manifest from raw.githubusercontent.com, so every job's egress allowlist needs it.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Verify environment
+        run: uv pip check
+
+      - name: Lint
+        run: uv run --frozen ruff check .
+
+      - name: Check formatting
+        run: uv run --frozen ruff format --check .
+
+      - name: Type check
+        run: uv run --frozen ty check
+
+      - name: Audit dependencies
+        run: uv audit --frozen
+
+      - name: Build package
+        run: uv build
+
+      - name: Smoke-test the wheel
+        # Run outside the checkout: Python puts the working directory first on sys.path, so running from the
+        # repository would import flasgo from the source tree instead of the built wheel.
+        working-directory: ${{ runner.temp }}
+        run: >
+          uv run --isolated --no-project --with "$GITHUB_WORKSPACE"/dist/*.whl python -c
+          "import importlib.resources as r, os, flasgo;
+          source = os.path.realpath(flasgo.__file__);
+          assert not source.startswith(os.path.realpath(os.environ['GITHUB_WORKSPACE']) + os.sep), source;
+          assert (r.files('flasgo') / 'py.typed').is_file();
+          assert (r.files('flasgo') / 'debug_templates' / 'debug_error.html').is_file()"
+
+      - name: Check patch hygiene
+        run: git diff --check
+
   test:
+    name: Tests (${{ matrix.store }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -36,7 +119,6 @@ jobs:
             127.0.0.1:6379
             releases.astral.sh:443
             api.github.com:443
-            api.osv.dev:443
             files.pythonhosted.org:443
             github.com:443
             pypi.org:443
@@ -56,31 +138,58 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: "latest"
-
-      - name: Verify lockfile
-        run: uv lock --check
+          version: ${{ env.UV_VERSION }}
 
       - name: Install dependencies
         run: uv sync --frozen --group dev
 
-      - name: Verify environment
-        run: uv pip check
-
-      - name: Lint
-        run: uv run --frozen ruff check .
-
-      - name: Type check
-        run: uv run --frozen ty check
-
       - name: Run tests
         run: uv run --frozen pytest
 
-      - name: Audit dependencies
-        run: uv audit --frozen
+  test-next-python:
+    # Early warning for the next CPython release; failures here do not block merges.
+    name: Tests (Python 3.15-dev, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      UV_PYTHON: "3.15"
 
-      - name: Build package
-        run: uv build
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          # Pre-release Pythons often lack wheels (for example pydantic-core), so Rust crates are built from source.
+          allowed-endpoints: >
+            releases.astral.sh:443
+            api.github.com:443
+            files.pythonhosted.org:443
+            github.com:443
+            index.crates.io:443
+            pypi.org:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            static.crates.io:443
 
-      - name: Check patch hygiene
-        run: git diff --check
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.15-dev"
+          allow-prereleases: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run tests
+        run: uv run --frozen pytest

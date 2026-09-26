@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -9,10 +7,10 @@ from collections import deque
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 from contextvars import Context, copy_context
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, override
 
 from .contracts import project_response, validate_response_model
-from .response import Response
+from .response import Response, status_allows_body
 from .types import Receive, Send
 from .validation import ValidationBudget
 
@@ -92,10 +90,11 @@ class StreamingResponse(Response):
         self._metrics_outcome = "producer_failure"
         super().__init__(body=b"", status_code=status_code, headers=dict(headers or {}), content_type=content_type)
 
+    @override
     def prepare(self) -> None:
         """Prepare the streaming response headers and validate that the status permits a response body."""
         super().prepare()
-        if self.status_code < 200 or self.status_code in {204, 304}:
+        if not status_allows_body(self.status_code):
             raise ValueError("Streaming responses require a status that permits a response body.")
         self.headers.pop("content-length", None)
         self.headers.pop("transfer-encoding", None)
@@ -219,7 +218,8 @@ class StreamingResponse(Response):
                         break
                     if not isinstance(chunk, bytes | str):
                         raise TypeError("Stream chunks must be bytes or str.")
-                    if len(chunk) > self.max_chunk_bytes:
+                    if isinstance(chunk, str) and len(chunk) > self.max_chunk_bytes:
+                        # Cheap early reject before encoding: UTF-8 is never shorter than the character count.
                         raise ValueError("Stream chunk exceeds max_chunk_bytes.")
                     payload = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
                     if len(payload) > self.max_chunk_bytes:
@@ -244,6 +244,7 @@ class StreamingResponse(Response):
                 return
             raise RuntimeError("Unexpected ASGI event after the request body was consumed.")
 
+    @override
     async def send(self, send: Send, *, head_only: bool = False) -> None:
         """
         Send the streaming response through ASGI and monitor the client connection.
@@ -294,7 +295,7 @@ def _consume_detached_cleanup_task(task: asyncio.Future[Any]) -> None:
 
 def _admit_cleanup(response: StreamingResponse) -> bool:
     """Reserve active capacity or enqueue cleanup; reject overflow explicitly."""
-    global _active_cleanups
+    global _active_cleanups  # noqa: PLW0603 - intentionally process-wide, guarded by _active_cleanups_lock
     with _active_cleanups_lock:
         if _active_cleanups >= _MAX_ACTIVE_CLEANUPS:
             if len(_pending_cleanups) >= _MAX_PENDING_CLEANUPS:
@@ -308,7 +309,7 @@ def _admit_cleanup(response: StreamingResponse) -> bool:
 
 def _release_cleanup_slot() -> None:
     """Transfer released capacity to queued cleanup on its owning event loop."""
-    global _active_cleanups
+    global _active_cleanups  # noqa: PLW0603 - intentionally process-wide, guarded by _active_cleanups_lock
     with _active_cleanups_lock:
         _active_cleanups -= 1
         pending = _pending_cleanups.popleft() if _pending_cleanups else None
@@ -402,6 +403,9 @@ class EventSourceResponse(StreamingResponse):
             max_chunk_bytes (int): Maximum size of each streamed chunk in bytes.
         """
         _positive_timeout(heartbeat, "heartbeat")
+        if heartbeat >= idle_timeout:
+            # Heartbeats are the only output of a quiet stream, so the idle timeout would close it before the first ping.
+            raise ValueError("SSE heartbeat must be shorter than idle_timeout.")
         validate_response_model(item_model)
         source = aiter(events)
 

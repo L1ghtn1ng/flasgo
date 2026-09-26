@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import os
 import queue
@@ -7,18 +5,19 @@ import subprocess
 import sys
 import textwrap
 import threading
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import cast
+from typing import Any, cast
 
+import jwt
 import pytest
-from flasgo import Flasgo, HasScope, IsAuthenticated, WebSocket, encode_jwt, jwt_backend
-from flasgo.logging import log_event
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-import jwt
+from flasgo import Flasgo, HasScope, IsAuthenticated, WebSocket, encode_jwt, jwt_backend
+from flasgo.logging import log_event
 
 _JWT_SECRET = "this-is-a-test-secret-with-at-least-32-bytes"
 
@@ -72,25 +71,42 @@ def test_jwt_backend_enforces_algorithm_issuer_audience_expiry_and_scopes() -> N
 
 
 def test_jwt_backend_rejects_weak_secrets_and_reserved_claim_overrides() -> None:
-    try:
+    with pytest.raises(ValueError, match="at least 32 bytes"):
         jwt_backend("short", issuer="issuer", audience="audience")
-    except ValueError as exc:
-        assert "at least 32 bytes" in str(exc)
-    else:
-        raise AssertionError("A weak HS256 secret was accepted.")
+    with pytest.raises(ValueError, match="reserved claims"):
+        encode_jwt("alice", _JWT_SECRET, issuer="issuer", audience="audience", additional_claims={"sub": "mallory"})
 
-    try:
-        encode_jwt(
-            "alice",
-            _JWT_SECRET,
-            issuer="issuer",
-            audience="audience",
-            additional_claims={"sub": "mallory"},
-        )
-    except ValueError as exc:
-        assert "reserved claims" in str(exc)
-    else:
-        raise AssertionError("A reserved JWT claim was overridden.")
+
+@pytest.mark.parametrize("scope", ["read admin", "read\tadmin", 'say"hi"', "back\\slash", "caf\u00e9"])
+def test_encode_jwt_rejects_scopes_that_would_split_or_break_the_scope_claim(scope: str) -> None:
+    """The scope claim is space-delimited, so "read admin" would otherwise decode as the two scopes read and admin."""
+    with pytest.raises(ValueError, match="RFC 6749 scope tokens"):
+        encode_jwt("alice", _JWT_SECRET, issuer="issuer", audience="audience", scopes=[scope])
+
+
+def test_jwt_backend_rejects_list_scope_claims_containing_whitespace() -> None:
+    app = Flasgo()
+    app.register_auth_backend("jwtAuth", jwt_backend(_JWT_SECRET, issuer="issuer", audience="audience"))
+
+    @app.get("/me")
+    @app.authorize(IsAuthenticated(), backend="jwtAuth")
+    def me() -> str:
+        return "ok"
+
+    now = datetime.now(UTC)
+    claims = {"sub": "alice", "iss": "issuer", "aud": "audience", "iat": now, "exp": now + timedelta(minutes=5)}
+    client = app.test_client()
+    listed = jwt.encode({**claims, "scope": ["read", "write"]}, _JWT_SECRET, algorithm="HS256")
+    smuggled = jwt.encode({**claims, "scope": ["read admin"]}, _JWT_SECRET, algorithm="HS256")
+    assert client.get("/me", headers={"authorization": f"Bearer {listed}"}).status_code == 200
+    assert client.get("/me", headers={"authorization": f"Bearer {smuggled}"}).status_code == 401
+
+
+@pytest.mark.parametrize("leeway", [float("nan"), float("inf"), -1, True])
+def test_jwt_backend_rejects_leeway_that_disables_expiry(leeway: float) -> None:
+    """NaN or infinite leeway would make PyJWT accept long-expired tokens."""
+    with pytest.raises(ValueError, match="finite, non-negative"):
+        jwt_backend(_JWT_SECRET, issuer="issuer", audience="audience", leeway=leeway)
 
 
 @pytest.mark.parametrize("scope_claim", ["sub", "iss", "aud", "exp", "iat", "nbf", "jti", "alg"])
@@ -404,3 +420,48 @@ def test_owned_provider_exports_otlp_protobuf_and_flushes_on_shutdown(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_owned_tracer_provider_keeps_exporting_across_lifespan_cycles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second lifespan cycle on the same app must still export spans instead of silently dropping them."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "set_tracer_provider", lambda _provider: None)
+    monkeypatch.setattr("flasgo.telemetry._build_tracer_provider", lambda settings: provider)
+    app = Flasgo(settings={"CSRF_ENABLED": False, "OTEL_ENABLED": True})
+
+    @app.get("/")
+    def home() -> str:
+        return "ok"
+
+    for _ in range(2):
+        with app.test_client() as client:
+            client.get("/")
+
+    assert len(exporter.get_finished_spans()) >= 2
+    provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"subject": ""}, "subject must not be empty"),
+        ({"expires_in": 0}, "expires_in must be greater than 0"),
+        ({"scopes": ["read", " "]}, "must not contain empty values"),
+        ({"issuer": ""}, "issuer must not be empty"),
+        ({"audience": ""}, "audience must not be empty"),
+    ],
+)
+def test_encode_jwt_rejects_invalid_configuration(kwargs: dict[str, object], message: str) -> None:
+    options: dict[str, Any] = {"subject": "alice", "issuer": "issuer", "audience": "audience", **kwargs}
+    subject = options.pop("subject")
+    with pytest.raises(ValueError, match=message):
+        encode_jwt(subject, _JWT_SECRET, **options)
+
+
+def test_jwt_backend_rejects_empty_issuer_and_audience() -> None:
+    with pytest.raises(ValueError, match="issuer must not be empty"):
+        jwt_backend(_JWT_SECRET, issuer="", audience="audience")
+    with pytest.raises(ValueError, match="audience must not be empty"):
+        jwt_backend(_JWT_SECRET, issuer="issuer", audience="")

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from flasgo import Flasgo, cli
 
 

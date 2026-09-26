@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 import json
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any, TextIO
+from typing import Any, TextIO, override
+
+from ._otel import current_trace_ids
 
 _FIELD_RE = re.compile(r"[^a-zA-Z0-9_.:/@+\\-]")
 _OWNED_HANDLER = "_flasgo_owned_handler"
@@ -21,6 +21,7 @@ def sanitize_log_value(value: object, *, limit: int = 256) -> str:
 class FlasgoJSONFormatter(logging.Formatter):
     """Format bounded Flasgo event fields as one JSON object."""
 
+    @override
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
@@ -34,10 +35,13 @@ class FlasgoJSONFormatter(logging.Formatter):
             payload[key] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = self.formatStack(record.stack_info)
         return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=str, allow_nan=False)
 
 
 class _FlasgoTextFormatter(logging.Formatter):
+    @override
     def format(self, record: logging.LogRecord) -> str:
         pieces = [record.getMessage()]
         for key in (
@@ -56,7 +60,14 @@ class _FlasgoTextFormatter(logging.Formatter):
             value = getattr(record, key, None)
             if value is not None:
                 pieces.append(f"{key}={value}")
-        return f"{record.levelname.lower()} {' '.join(pieces)}"
+        line = f"{record.levelname.lower()} {' '.join(pieces)}"
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            line = f"{line}\n{record.exc_text}"
+        if record.stack_info:
+            line = f"{line}\n{self.formatStack(record.stack_info)}"
+        return line
 
 
 def configure_logging(
@@ -70,6 +81,9 @@ def configure_logging(
     normalized = format.strip().lower()
     if normalized not in {"text", "json"}:
         raise ValueError("LOG_FORMAT must be 'text' or 'json'.")
+    if isinstance(level, str):
+        # logging.setLevel only accepts upper-case names, while LOG_LEVEL validation is case-insensitive.
+        level = level.strip().upper()
     logger = logging.getLogger("flasgo")
     logger.setLevel(level)
     handler = next((item for item in logger.handlers if getattr(item, _OWNED_HANDLER, False)), None)
@@ -77,6 +91,8 @@ def configure_logging(
         handler = logging.StreamHandler(stream)
         setattr(handler, _OWNED_HANDLER, True)
         logger.addHandler(handler)
+    elif stream is not None and isinstance(handler, logging.StreamHandler):
+        handler.setStream(stream)
     handler.setLevel(level)
     handler.setFormatter(FlasgoJSONFormatter() if normalized == "json" else _FlasgoTextFormatter())
     logger.propagate = False
@@ -89,16 +105,13 @@ def log_event(
     event: str,
     **fields: object,
 ) -> None:
+    if not logger.isEnabledFor(level):
+        # Skip sanitizing fields for records that would be discarded (for example before configure_logging).
+        return
     safe_fields: dict[str, object] = {"event": sanitize_log_value(event, limit=64)}
-    try:
-        from opentelemetry import trace
-
-        span_context = trace.get_current_span().get_span_context()
-        if span_context.is_valid:
-            safe_fields["trace_id"] = format(span_context.trace_id, "032x")
-            safe_fields["span_id"] = format(span_context.span_id, "016x")
-    except ImportError:
-        pass
+    trace_ids = current_trace_ids()
+    if trace_ids is not None:
+        safe_fields["trace_id"], safe_fields["span_id"] = trace_ids
     for key, value in fields.items():
         if value is None:
             continue

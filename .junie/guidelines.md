@@ -17,10 +17,12 @@ This document defines the engineering baseline for work in this repository.
 
 ## Python 3.14 Best Practices
 
+- Annotations are evaluated lazily (PEP 649); do not add `from __future__ import annotations`.
 - Use modern typing syntax:
   - `type` aliases (not `TypeAlias`)
   - `X | Y` unions
   - precise return types for all public functions
+  - `@typing.override` on methods that override a base class
 - Use `dataclass(slots=True)` for small data containers unless mutation patterns require otherwise.
 - Prefer `collections.abc` imports for protocols/types (`Callable`, `Mapping`, etc.).
 - Keep functions focused and side effects explicit.
@@ -37,11 +39,12 @@ This document defines the engineering baseline for work in this repository.
 
 ```bash
 uv run ruff check .
+uv run ruff format --check .
 uv run ty check
 uv run pytest
 ```
 
-All three commands must pass before considering a change complete.
+All four commands must pass before considering a change complete (CI runs the same checks).
 
 ## Dependency Management Rules
 

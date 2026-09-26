@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import json
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -152,9 +151,7 @@ def policy_snapshot(app: Flasgo) -> dict[str, Any]:
             "security_logging": security.log_security_events,
             "rate_limit_capacity": getattr(app._rate_limiter, "max_keys", None),
             "rate_limit_backend": type(app._rate_limiter).__name__,
-            "session_backend": type(getattr(app, "_session_backend", None)).__name__
-            if getattr(app, "_session_backend", None)
-            else "signed_cookie",
+            "session_backend": type(app._session_backend).__name__ if app._session_backend is not None else "signed_cookie",
         },
         "internal_endpoints": {
             "docs": {
@@ -186,9 +183,9 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
     checks = (
         (app.settings.DEBUG, "FG001", "DEBUG is enabled."),
         (
-            not security.enforce_allowed_hosts or "*" in security.allowed_hosts,
+            not security.enforce_allowed_hosts,
             "FG002",
-            "Host validation is disabled or unrestricted.",
+            "Host validation is disabled.",
         ),
         (
             not security.session_cookie_secure or not security.session_cookie_http_only,
@@ -275,8 +272,6 @@ def _index_routes(routes: list[Any]) -> dict[str, dict[str, Any]]:
     Raises:
         ValueError: If a route is malformed, uses an unsupported protocol or non-string method, or duplicates another route.
     """
-    import json
-
     indexed = {}
     for route in routes:
         if not isinstance(route, dict) or not isinstance(route.get("path"), str) or not isinstance(route.get("methods"), list):

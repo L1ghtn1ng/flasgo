@@ -1,18 +1,16 @@
-from __future__ import annotations
-
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import quote, urlencode
+from typing import TYPE_CHECKING, Any, Literal, override
 
 from .auth import PermissionLike
 from .cors import CORSConfig
 from .params import Depends
 from .ratelimit import RateLimitRule, endpoint_rate_limits, rate_limit
-from .registration import RouteDecorators
-from .routing import _CONVERTERS, _PARAM_PATTERN, Endpoint, _validate_route
+from .registration import RouteDecorators, route_methods
+from .routing import Endpoint, _validate_route
+from .routing import build_url as build_url  # re-exported for backward compatibility
 
 if TYPE_CHECKING:
     from .app import Flasgo
@@ -84,6 +82,7 @@ class Blueprint(RouteDecorators):
         self.cors: CORSConfig | Literal[False] | None = cors
         self._registrations: list[_Registration | Blueprint] = []
 
+    @override
     def add_route(
         self,
         path: str,
@@ -109,6 +108,7 @@ class Blueprint(RouteDecorators):
             response_model (object): The model used to describe or validate responses.
             dependencies (Sequence[Depends]): Dependencies applied to the route.
         """
+        method_names = route_methods(methods)
         _validate_route(path, name)
         endpoint_name = name or getattr(endpoint, "__name__", "")
         if not endpoint_name:
@@ -117,7 +117,7 @@ class Blueprint(RouteDecorators):
             _Registration(
                 path,
                 endpoint,
-                tuple(methods),
+                method_names,
                 endpoint_name,
                 cors,
                 public,
@@ -240,52 +240,3 @@ def _copy_endpoint(endpoint: Endpoint) -> Endpoint:
         return endpoint(**kwargs)
 
     return registered
-
-
-def build_url(path: str, values: dict[str, Any]) -> str:
-    """
-    Build a safe relative URL by substituting validated route parameters and encoding remaining values as query parameters.
-
-    Parameters:
-        path (str): Route path containing optional parameter placeholders.
-        values (dict[str, Any]): Values for route parameters and query parameters.
-
-    Returns:
-        str: The resulting relative URL.
-
-    Raises:
-        ValueError: If a required parameter is missing, invalid, or unsafe, or if the resulting URL is not a safe relative URL.
-    """
-    values = dict(values)
-
-    def substitute(match: re.Match[str]) -> str:
-        """
-        Substitute a validated URL parameter in a route path.
-
-        Parameters:
-            match (re.Match[str]): The matched route parameter.
-
-        Returns:
-            str: The URL-encoded parameter value.
-
-        Raises:
-            ValueError: If the parameter is missing, invalid, or contains unsafe path components.
-        """
-        name = match.group("name")
-        if name not in values:
-            raise ValueError(f"Missing URL parameter: {name}")
-        value = values.pop(name)
-        converter = match.group("converter") or "str"
-        text = str(value)
-        pattern, cast = _CONVERTERS[converter]
-        if not re.fullmatch(pattern, text):
-            raise ValueError(f"Invalid URL parameter: {name}")
-        cast(text)
-        if any(part in {".", ".."} for part in text.split("/")) or "\\" in text:
-            raise ValueError(f"Unsafe URL parameter: {name}")
-        return quote(text, safe="/" if converter == "path" else "")
-
-    result = _PARAM_PATTERN.sub(substitute, path)
-    if result.startswith("//") or "\\" in result or "?" in result or "#" in result:
-        raise ValueError("Route cannot be reversed to a safe relative URL.")
-    return result + ("?" + urlencode(values, doseq=True) if values else "")

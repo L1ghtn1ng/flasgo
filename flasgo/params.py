@@ -1,19 +1,15 @@
-from __future__ import annotations
-
 import inspect
-import re
 from annotationlib import Format, ForwardRef
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
 from .request import Request
-from .routing import Endpoint
+from .response import HTTP_TOKEN_RE
+from .routing import Endpoint, _route_parameter_names
 
 type Provider = Callable[..., Any]
 
-_PATH_PARAM_PATTERN = re.compile(r"<(?:(?:[a-zA-Z_]\w*):)?(?P<name>[a-zA-Z_]\w*)>")
-_WIRE_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _RESERVED_OPENAPI_HEADERS = frozenset({"accept", "authorization", "content-type", "cookie"})
 
 
@@ -85,6 +81,7 @@ class Depends:
 
 
 type ParameterMarker = Body | Query | Header | Cookie | Form | Depends
+_MARKER_TYPES = (Body, Query, Header, Cookie, Form, Depends)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +123,7 @@ def compile_endpoint_plan(
         EndpointPlan: The compiled endpoint plan.
     """
 
-    path_names = {match.group("name") for match in _PATH_PARAM_PATTERN.finditer(route_path)}
+    path_names = set(_route_parameter_names(route_path))
     plan = _compile_callable(endpoint, path_names=path_names, stack=())
     extra = []
     for index, marker in enumerate(dependencies):
@@ -144,8 +141,7 @@ def compile_endpoint_plan(
         )
     plan = replace(plan, dependencies=tuple(extra))
     _validate_dependency_scopes(plan)
-    body_sources = _body_sources(plan, seen=set())
-    if len(body_sources) > 1:
+    if sum(binding.source in {"body", "form"} for binding in walk_bindings(plan)) > 1:
         endpoint_name = _callable_name(endpoint)
         raise TypeError(
             f"Endpoint {endpoint_name!r} declares multiple Body()/Form() inputs across its dependency graph. "
@@ -179,7 +175,9 @@ def _compile_callable(
         chain = " -> ".join(getattr(item, "__name__", repr(item)) for item in (*stack, endpoint))
         raise TypeError(f"Dependency cycle detected: {chain}")
 
-    signature = inspect.signature(endpoint)
+    # FORWARDREF: under PEP 649 the default VALUE format raises NameError for any unresolvable annotation
+    # (for example a TYPE_CHECKING-only import) before the resolution fallback below can run.
+    signature = inspect.signature(endpoint, annotation_format=Format.FORWARDREF)
     try:
         hints = get_type_hints(inspect.unwrap(endpoint), include_extras=True)
     except (NameError, TypeError) as exc:
@@ -194,7 +192,7 @@ def _compile_callable(
             raise TypeError(f"Endpoint parameter {parameter.name!r} on {_callable_name(endpoint)!r} must be keyword-compatible.")
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             continue
-        if isinstance(parameter.default, (Body, Query, Header, Cookie, Form, Depends)):
+        if isinstance(parameter.default, _MARKER_TYPES):
             raise TypeError(
                 f"Parameter {parameter.name!r} on {_callable_name(endpoint)!r} uses a marker as its default. "
                 "Use Annotated[T, Marker()] so static type checking remains correct."
@@ -266,40 +264,30 @@ def _compile_callable(
 
 def _split_marker(annotation: object, *, endpoint: Provider, parameter: str) -> tuple[object, ParameterMarker | None]:
     if get_origin(annotation) is not Annotated:
+        if _has_nested_marker(annotation):
+            raise TypeError(
+                f"Parameter {parameter!r} on {_callable_name(endpoint)!r} nests a Flasgo marker inside another type, "
+                "where it would be ignored. Put the marker on the outside, e.g. Annotated[str | None, Header()]."
+            )
         return annotation, None
     args = get_args(annotation)
-    markers = [item for item in args[1:] if isinstance(item, (Body, Query, Header, Cookie, Form, Depends))]
+    markers = [item for item in args[1:] if isinstance(item, _MARKER_TYPES)]
     if len(markers) > 1:
         raise TypeError(f"Parameter {parameter!r} on {_callable_name(endpoint)!r} has more than one Flasgo marker.")
     return args[0], markers[0] if markers else None
 
 
+def _has_nested_marker(annotation: object) -> bool:
+    for item in get_args(annotation):
+        if get_origin(item) is Annotated and any(isinstance(meta, _MARKER_TYPES) for meta in get_args(item)[1:]):
+            return True
+        if _has_nested_marker(item):
+            return True
+    return False
+
+
 def _contains_forward_ref(annotation: object) -> bool:
     return isinstance(annotation, ForwardRef) or any(_contains_forward_ref(item) for item in get_args(annotation))
-
-
-def _body_sources(plan: EndpointPlan, *, seen: set[int]) -> set[tuple[int, str, str]]:
-    """
-    Collect body and form parameter sources from an endpoint plan and its dependencies.
-
-    Parameters:
-        plan (EndpointPlan): The endpoint plan to inspect.
-        seen (set[int]): Endpoint identifiers already visited during traversal.
-
-    Returns:
-        set[tuple[int, str, str]]: Body and form sources identified by endpoint, source type, and parameter name.
-    """
-    endpoint_id = id(plan.endpoint)
-    if endpoint_id in seen:
-        return set()
-    seen.add(endpoint_id)
-    sources: set[tuple[int, str, str]] = set()
-    for binding in (*plan.dependencies, *plan.bindings):
-        if binding.source in {"body", "form"}:
-            sources.add((endpoint_id, binding.source, binding.name))
-        elif binding.dependency is not None:
-            sources.update(_body_sources(binding.dependency, seen=seen))
-    return sources
 
 
 def walk_bindings(plan: EndpointPlan) -> tuple[ParameterBinding, ...]:
@@ -338,7 +326,7 @@ def binding_wire_name(binding: ParameterBinding) -> str:
 
 
 def _validate_wire_name(value: str, *, kind: str) -> None:
-    if not value or not _WIRE_NAME_PATTERN.fullmatch(value):
+    if not value or not HTTP_TOKEN_RE.fullmatch(value):
         raise ValueError(f"{kind} aliases must be non-empty HTTP token names without whitespace or separators.")
 
 

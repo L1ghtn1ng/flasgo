@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 import pytest
+
 from benchmarks import metrics
 from flasgo import Flasgo
 
