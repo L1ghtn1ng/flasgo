@@ -230,27 +230,43 @@ def test_dev_server_websocket_implementation_loads_without_deprecation_warnings(
     assert config.ws_protocol_class is not None
 
 
-def test_abandoning_a_started_child_does_not_block_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child that ignores SIGINT must not freeze the event loop for the stop grace period on cancellation."""
+def test_cancelled_reloader_waits_for_the_child_to_stop_without_blocking_the_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The reloader must not return while its child still holds the port, yet the loop must stay responsive."""
     stopping = threading.Event()
     release = threading.Event()
     stopped: list[object] = []
 
-    def slow_stop(process: object) -> None:
+    def slow_stop(process: object, **_: object) -> None:
         stopping.set()
         release.wait(10)
         stopped.append(process)
 
+    async def idle_awatch(*paths: str, ignore_permission_denied: bool) -> AsyncIterator[set[tuple[int, str]]]:
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setitem(server_module.sys.modules, "watchfiles", types.SimpleNamespace(awatch=idle_awatch))
     monkeypatch.setattr(server_module, "_start_reload_child", lambda command: "child")
     monkeypatch.setattr(server_module, "_stop_reload_child", slow_stop)
-    handoff = server_module._ChildHandoff()
-    assert handoff.start("cmd") == "child"
+    monkeypatch.setattr(server_module.sys, "orig_argv", ["/usr/bin/python3", "app.py"], raising=False)
+    monkeypatch.delenv(server_module._RELOAD_ENV, raising=False)
 
-    handoff.abandon()  # returns immediately even though stopping is still in progress
-    assert stopping.wait(10)
-    assert stopped == []
-    release.set()
-    for thread in threading.enumerate():
-        if thread.name == "flasgo-reload-stop":
-            thread.join(10)
-    assert stopped == ["child"]
+    async def run() -> None:
+        task = asyncio.create_task(server_module.arun_with_reload(reload_dirs=[tmp_path]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        assert await asyncio.to_thread(stopping.wait, 10)
+        task.cancel()  # a second SIGTERM must not cut the stop short
+        ticks = 0
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+            ticks += 1
+        assert ticks == 5  # the loop keeps running while the child is being stopped
+        assert not task.done()  # ...but the reloader has not returned yet
+        assert stopped == []
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped == ["child"]
+
+    asyncio.run(run())

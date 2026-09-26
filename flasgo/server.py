@@ -8,7 +8,7 @@ import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
 
@@ -107,25 +107,51 @@ async def arun_with_reload(
         try:
             async for changes in awatch(*watch_paths, ignore_permission_denied=True):
                 log_reload_changes(changes)
-                await asyncio.to_thread(_stop_reload_child, process)
+                await _stop_reload_child_async(process)
                 process = await _start_reload_child_async(command)
         finally:
-            await asyncio.to_thread(_stop_reload_child, process)
+            await _stop_reload_child_async(process)
 
 
 async def _start_reload_child_async(command: str) -> subprocess.Popen[bytes]:
     """Start a child in a worker thread without ever losing it to cancellation.
 
     Cancelling ``await asyncio.to_thread(...)`` does not stop the thread, which would still spawn a child that no
-    caller holds. The cancellation path is synchronous on purpose: any ``await`` there could itself be interrupted
-    by a second cancellation (for example a second SIGTERM) before the child is stopped.
+    caller holds. On cancellation the child is stopped, by this task if it already exists or by the worker as soon
+    as it has spawned, and this waits for that before re-raising so the port is free when the reloader returns.
     """
     handoff = _ChildHandoff()
+    start = asyncio.ensure_future(asyncio.to_thread(handoff.start, command))
     try:
-        return await asyncio.to_thread(handoff.start, command)
+        return await asyncio.shield(start)
     except asyncio.CancelledError:
-        handoff.abandon()
+        process = handoff.abandon()
+        # Still spawning: the worker thread stops the child itself, so waiting for `start` covers the cleanup.
+        cleanup = start if process is None else asyncio.ensure_future(asyncio.to_thread(_stop_reload_child, process))
+        await _finish_despite_cancellation(cleanup)
         raise
+
+
+async def _stop_reload_child_async(process: subprocess.Popen[bytes]) -> None:
+    """Stop a child off the event loop, finishing even if the caller is cancelled again meanwhile."""
+    await _finish_despite_cancellation(asyncio.ensure_future(asyncio.to_thread(_stop_reload_child, process)))
+
+
+async def _finish_despite_cancellation(cleanup: asyncio.Future[Any]) -> None:
+    """Wait for child cleanup without blocking the loop; repeated cancellations (a second SIGTERM) cannot cut it short.
+
+    A caller being cancelled is re-raised by the caller itself once the cleanup is done.
+    """
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+    with suppress(Exception):
+        cleanup.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 class _ChildHandoff:
@@ -145,17 +171,11 @@ class _ChildHandoff:
             _stop_reload_child(process)
         return process
 
-    def abandon(self) -> None:
-        """Called on cancellation: stop the child if it exists, otherwise the worker stops it once spawned.
-
-        Stopping can take the whole SIGINT grace period, so it runs in its own thread instead of blocking the event
-        loop. The thread is non-daemon, so the interpreter still waits for the child to stop before exiting.
-        """
+    def abandon(self) -> subprocess.Popen[bytes] | None:
+        """Mark the child abandoned. Returns it if already spawned (the caller stops it); otherwise the worker will."""
         with self._lock:
             self._abandoned = True
-            process = self._process
-        if process is not None:
-            threading.Thread(target=_stop_reload_child, args=(process,), name="flasgo-reload-stop").start()
+            return self._process
 
 
 def _start_reload_child(command: str) -> subprocess.Popen[bytes]:
