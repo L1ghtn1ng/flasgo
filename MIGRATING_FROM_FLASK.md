@@ -387,7 +387,7 @@ For production, run behind a real ASGI server and keep Flasgo security settings 
 - Keep the request body, request head, read timeout, multipart part, form field, and validation budgets enabled; also
   configure equivalent edge limits for the production server or reverse proxy
 
-## Growing applications on the current development branch
+## Growing applications
 
 Use `Blueprint` for reusable HTTP route groups and `url_for` for named redirects and template links. A Flasgo blueprint
 adds declared permissions/dependencies to its children and registers atomically; it is not a compatibility wrapper

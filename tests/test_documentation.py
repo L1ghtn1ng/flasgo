@@ -115,8 +115,8 @@ def test_release_version_is_consistent_across_framework_and_docs() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     version = project["project"]["version"]
 
-    assert version == "0.9.1"
+    assert version == "0.10.0"
     assert version == Settings.API_VERSION
     assert f"current framework release is `{version}`" in (ROOT / "README.md").read_text(encoding="utf-8")
-    assert f"## [{version}] - 2026-09-06" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "Latest `0.9.x` release" in (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    assert f"## [{version}] - 2026-09-26" in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Latest `0.10.x` release" in (ROOT / "SECURITY.md").read_text(encoding="utf-8")

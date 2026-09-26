@@ -26,10 +26,12 @@ This file documents how releases are cut and published for `flasgo`.
 
 ## Release checklist
 
-1. Move the relevant `CHANGELOG.md` entries from `Unreleased` into a dated `X.Y.Z` section and update any
-   version-specific documentation.
+1. Move the relevant `CHANGELOG.md` entries from `Unreleased` into a dated `X.Y.Z` section, retaining an empty
+   `Unreleased` heading for future changes. Update version-specific documentation and the supported release line in
+   `SECURITY.md`.
 2. Update `project.version` in `pyproject.toml` and `API_VERSION` in `flasgo/settings.py` to the same `X.Y.Z` value.
-3. Refresh `uv.lock` if project metadata or dependencies changed.
+   Update the release version/date expectations in `tests/test_documentation.py` and `tests/test_metrics.py`.
+3. Run `uv lock` to refresh `uv.lock` after changing the project version; keep unrelated dependency versions unchanged.
 4. Run the same locked verification bundle documented in `README.md`, including the dependency audit and package
    build.
 5. Inspect the generated wheel and source distribution to confirm only intended release files are present.

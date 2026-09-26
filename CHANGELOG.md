@@ -2,11 +2,32 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-26
+
+### Upgrading from 0.9.1
+
+Review these behaviour changes before upgrading:
+
+- Check `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`: unsupported entries now fail at startup. Use hostnames, IP
+  addresses, or `.suffix` patterns for allowed hosts, and HTTP(S) origins or supported host patterns for CSRF trust.
+  Bare CSRF host/suffix entries now trust only the request's own scheme. `SESSION_COOKIE_MAX_AGE` must be a positive
+  integer.
+- Put parameter markers on the outer annotation, for example `Annotated[str | None, Header()]`, rather than
+  `Annotated[str, Header()] | None`. Pass route methods as a collection, such as `methods=["POST"]`.
+- Numeric query, header, and form values must use plain ASCII decimal syntax. JWT scopes must be individual scope
+  tokens without whitespace, and JWT `leeway` must be finite.
+- Review `after_request` hooks: they now also run for 404, 405, and authentication/authorization denials. An
+  authentication backend that raises now produces HTTP 500 instead of 401.
+- Keep 1xx, 204, and 304 response bodies empty. These responses no longer emit `Content-Type` or `Content-Length`.
+  Set an SSE `heartbeat` shorter than `idle_timeout`.
+- For async-enabled templates inside a running event loop, use `await app.render_template_async(...)` or
+  `await app.templates.render_async(...)`. Synchronous rendering remains supported outside a running event loop.
+
 ### Added
 
 - `JinjaTemplates.render_async()` and `Flasgo.render_template_async()` for templates configured with
-  `enable_async=True`, which previously failed with a 500 on every render. The synchronous helpers now raise a clear
-  `RuntimeError` for async environments.
+  `enable_async=True`, which previously failed with a 500 when rendered inside a running event loop. The synchronous
+  helpers now raise a clear `RuntimeError` for async environments inside a running event loop.
 
 ### Changed
 

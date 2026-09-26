@@ -74,7 +74,7 @@ class Settings(StrictBoolFields):
     DOCS_PATH: str = "/docs"
     OPENAPI_PATH: str = "/openapi.json"
     API_TITLE: str = "Flasgo API"
-    API_VERSION: str = "0.9.1"
+    API_VERSION: str = "0.10.0"
     API_DESCRIPTION: str = ""
     API_SERVERS: list[str] = field(default_factory=list)
     SSRF_ENABLED: bool = True

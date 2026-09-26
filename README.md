@@ -5,7 +5,7 @@ Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
 - Django security defaults: CSRF protection, host validation, secure headers, signed sessions.
 
-The current framework release is `0.9.1`.
+The current framework release is `0.10.0`. See the [release notes and upgrade guidance](CHANGELOG.md#0100---2026-09-26).
 
 ## Project goals
 
@@ -407,6 +407,7 @@ uv lock --check
 uv sync --frozen --group dev
 uv pip check
 uv run --frozen ruff check .
+uv run --frozen ruff format --check .
 uv run --frozen ty check
 uv run --frozen pytest
 uv audit --frozen
@@ -583,7 +584,7 @@ handing off.
 
 ## Application structure, contracts, and shared storage
 
-The current development branch adds the following opt-in APIs. The website guides cover
+Flasgo provides the following opt-in APIs. The website guides cover
 [blueprints](https://flasgo.dev/guides/blueprints-and-url-generation/),
 [policy checks](https://flasgo.dev/guides/policy-and-deployment-checks/),
 [dependencies](https://flasgo.dev/guides/request-data-and-dependencies/),
@@ -657,8 +658,9 @@ If you only need the rendered string, use the app helper:
 html = app.render_template("home.html", {"title": "Welcome"})
 ```
 
-Templates configured with `enable_async=True` must be rendered from an async handler with
-`await app.render_template_async(...)`; the synchronous helpers raise a clear error instead of blocking the event loop.
+For templates configured with `enable_async=True`, use `await app.render_template_async(...)` or
+`await app.templates.render_async(...)` inside an async handler. Synchronous rendering remains supported outside a
+running event loop; inside one, the synchronous helpers raise a clear error.
 
 ## Forms
 
