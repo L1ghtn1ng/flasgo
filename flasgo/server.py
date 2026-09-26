@@ -145,11 +145,13 @@ async def _finish_despite_cancellation(cleanup: asyncio.Future[Any]) -> None:
     cancelled = False
     while not cleanup.done():
         try:
-            await asyncio.shield(cleanup)
+            # asyncio.wait() neither cancels `cleanup` when we are cancelled nor raises its error here.
+            await asyncio.wait({cleanup})
         except asyncio.CancelledError:
             cancelled = True
-    with suppress(Exception):
-        cleanup.result()
+    if (error := cleanup.exception()) is not None:
+        # Never let a failed stop hide behind the cancellation: the child may still be running and hold its port.
+        raise RuntimeError("Could not stop the development server child process; it may still hold its port.") from error
     if cancelled:
         raise asyncio.CancelledError
 
@@ -187,7 +189,15 @@ def _stop_reload_child(process: subprocess.Popen[bytes], *, grace_seconds: float
     """Ask the child to shut down like Ctrl+C would, then kill it if it does not exit in time."""
     if process.poll() is not None:
         return
-    process.send_signal(signal.SIGINT)
+    try:
+        process.send_signal(signal.SIGINT)
+    except ProcessLookupError:
+        return  # exited between poll() and the signal
+    except OSError:
+        # SIGINT could not be delivered; fall back to SIGKILL rather than leaving the child running.
+        process.kill()
+        process.wait()
+        return
     try:
         process.wait(grace_seconds)
     except subprocess.TimeoutExpired:
