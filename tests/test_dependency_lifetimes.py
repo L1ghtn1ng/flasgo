@@ -234,6 +234,24 @@ def test_cancellation_reaches_request_dependency_and_closes_it() -> None:
     asyncio.run(run())
 
 
+def test_overrides_apply_inside_a_running_sync_test_client() -> None:
+    """The client's loop thread must run each request in the submitting thread's context."""
+
+    def original() -> str:
+        return "original"
+
+    app = Flasgo()
+
+    @app.get("/")
+    def endpoint(value: Annotated[str, Depends(original)]) -> str:
+        return value
+
+    with app.test_client() as client:
+        with app.override_dependencies({original: lambda: "override"}):
+            assert client.get("/").text == "override"
+        assert client.get("/").text == "original"
+
+
 def test_override_cycle_and_invalid_lifetime_fail_closed() -> None:
     def original() -> str:
         """Return the original string value.

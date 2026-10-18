@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from typing import Any, cast, get_type_hints
@@ -23,7 +24,7 @@ from flasgo import (
     session,
 )
 from flasgo.app import _request_head_size
-from flasgo.routing import routes_overlap
+from flasgo.routing import _compile_path, _match_path, routes_overlap
 from flasgo.security import SecurityConfig, build_set_cookie
 
 
@@ -152,6 +153,40 @@ def test_route_language_intersection(left: str, right: str, expected: bool) -> N
     """Cover converter repetition, optional decimals, embedded params, and Unicode literals."""
     assert routes_overlap(left, right) is expected
     assert routes_overlap(right, left) is expected
+
+
+def test_overlapping_converters_match_in_bounded_time() -> None:
+    """Keep adjacent same-segment converters linear; the plain regex took ~1 minute at 600 bytes."""
+    app = Flasgo()
+
+    @app.get("/<a>-<b>-<c>-<d>/end")
+    def parts(a: str, b: str, c: str, d: str) -> str:
+        """Echo each captured part to pin the greedy split."""
+        return f"{a}|{b}|{c}|{d}"
+
+    client = app.test_client()
+    started = time.perf_counter()
+    assert client.get("/" + "-" * 4000 + "/x").status_code == 404
+    assert time.perf_counter() - started < 2
+    # Greedy captures match what the equivalent regex would return.
+    assert client.get("/a-b-c-d-e/end").text == "a-b|c|d|e"
+
+
+@pytest.mark.parametrize(
+    ("route", "path", "expected"),
+    [
+        ("/<int:a><int:b>", "/1234", {"a": 123, "b": 4}),
+        ("/<float:x>.<int:y>", "/1.5.2", {"x": 1.5, "y": 2}),
+        ("/<float:x>.<int:y>", "/1.2", {"x": 1.0, "y": 2}),
+        ("/<path:p>/<name>", "/a/b/c", {"p": "a/b", "name": "c"}),
+        ("/<path:p>-<int:n>", "/x-1/y-22", {"p": "x-1/y", "n": 22}),
+        ("/<a>.<float:f>", "/v.1.2.3", {"a": "v.1.2", "f": 3.0}),
+        ("/<a>-<b>", "/no-dash/", None),
+    ],
+)
+def test_overlapping_converters_keep_regex_captures(route: str, path: str, expected: dict[str, object] | None) -> None:
+    """Match greedy regex semantics, including float fractions and embedded separators."""
+    assert _match_path(path, *_compile_path(route)) == expected
 
 
 def test_cleanup_queue_overflow_is_explicit_and_pending_work_drains(monkeypatch: pytest.MonkeyPatch) -> None:

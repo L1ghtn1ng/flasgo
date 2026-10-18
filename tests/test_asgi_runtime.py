@@ -17,6 +17,8 @@ from flasgo import (
     WebSocket,
     WebSocketDisconnect,
     WebSocketHandshakeError,
+    request,
+    url_for,
 )
 
 
@@ -278,6 +280,47 @@ def test_asgi_request_head_limit_rejects_oversized_scopes() -> None:
     oversized = client.get("/", headers={"x-padding": "x" * 256})
     assert oversized.status_code == 431
     assert oversized.headers["connection"] == "close"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_status"),
+    [("/prefix/hello", 200), ("/hello", 200), ("/prefixed/hello", 404)],
+)
+def test_root_path_is_removed_before_dispatch(path: str, expected_status: int) -> None:
+    """Uvicorn --root-path sends the mounted prefix in ``path``; older servers already strip it."""
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.get("/hello", name="hello")
+    async def hello() -> dict[str, str]:
+        return {"path": request.path, "url": url_for("hello")}
+
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"host", b"localhost")],
+        "client": ("127.0.0.1", 1),
+        "server": ("localhost", 80),
+        "root_path": "/prefix",
+    }
+    asyncio.run(app(scope, receive, send))
+
+    assert sent[0]["status"] == expected_status
+    if expected_status == 200:
+        assert sent[1]["body"] == b'{"path":"/hello","url":"/prefix/hello"}'
 
 
 def test_response_send_failure_never_attempts_a_second_response() -> None:

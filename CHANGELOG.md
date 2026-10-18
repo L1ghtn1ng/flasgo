@@ -25,6 +25,21 @@
 
 - With PyJWT 2.14, a correctly signed token whose `exp`, `nbf`, or `iat` overflows an integer (for example `1e400`)
   produced HTTP 500 instead of a 401 Bearer challenge.
+- Routes with several converters in one segment, such as `/<a>-<b>-<c>-<d>/end`, no longer backtrack polynomially:
+  a 600-byte non-matching path took about a minute and blocked the event loop before authentication or rate limiting.
+  These routes now match in time proportional to the path and route length, with the same captures as before.
+- A dependency provider that returns an instance of the annotated dataclass (including `User`) is injected as-is;
+  it was rejected with HTTP 422 "Expected an object."
+- Inside `with app.test_client()`, `app.override_dependencies(...)` around a request now applies; the client's loop
+  thread previously ran each request without the caller's context.
+- A `Form()` dataclass whose `__post_init__` raises `ValueError` or `TypeError` now produces a 422
+  `FormValidationError` (reaching form-error handlers with the parsed form) instead of HTTP 500, matching `Body()`.
+- Uploaded-file collections now enforce fixed tuple lengths and member types: `tuple[UploadedFile, UploadedFile]`
+  accepted a single file.
+- Applications mounted under an ASGI `root_path` (for example Uvicorn's `--root-path`) now route requests whose `path`
+  includes the prefix; `request.path` is relative to the mount point and `url_for()` still adds the prefix.
+- `configure_static(directory, url_path="/")` registered `//<path:filename>`, so files returned 404 and `url_for()`
+  failed for them.
 
 ## [0.10.0] - 2026-09-26
 

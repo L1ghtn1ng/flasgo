@@ -112,6 +112,22 @@ def test_static_files_serve_assets_with_caching_headers(tmp_path: Path) -> None:
     assert "set-cookie" not in head_response.headers
 
 
+def test_static_files_mounted_at_root(tmp_path: Path) -> None:
+    """url_path="/" is valid configuration and must not register a never-matching "//<path:filename>"."""
+    (tmp_path / "hello.txt").write_text("hi", encoding="utf-8")
+    app = Flasgo()
+    app.configure_static(tmp_path, url_path="/")
+
+    @app.get("/page")
+    def page() -> str:
+        return "page"
+
+    client = app.test_client()
+    assert client.get("/hello.txt").body == b"hi"
+    assert client.get("/page").text == "page"
+    assert app.url_for("static:/", filename="hello.txt") == "/hello.txt"
+
+
 def test_public_cache_response_does_not_persist_framework_cookies() -> None:
     app = Flasgo()
 

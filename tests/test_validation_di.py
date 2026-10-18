@@ -21,6 +21,7 @@ from flasgo import (
     Query,
     Response,
     UploadedFile,
+    User,
 )
 from flasgo.validation import SchemaRegistry
 
@@ -907,4 +908,111 @@ def test_dict_validation_reports_every_invalid_value() -> None:
     assert _issues(dict[str, int], {"a": "x", "b": 1, "c": "y"}) == [
         (("body", "a"), "Expected an integer."),
         (("body", "c"), "Expected an integer."),
+    ]
+
+
+@dataclass
+class ManagedModel:
+    resource: object
+
+
+def test_dependency_returning_dataclass_instance_is_injected_unchanged() -> None:
+    """A provider's constructed model, including Flasgo's own User, must not be rebuilt from a mapping."""
+    app = Flasgo()
+    resource = object()
+
+    def managed() -> ManagedModel:
+        return ManagedModel(resource)
+
+    def current() -> User:
+        return User(id="alice", is_authenticated=True)
+
+    @app.get("/model")
+    def model(value: Annotated[ManagedModel, Depends(managed)]) -> str:
+        return str(value.resource is resource)
+
+    @app.get("/user")
+    def user(value: Annotated[User, Depends(current)]) -> str:
+        return str(value.id)
+
+    client = app.test_client()
+    assert client.get("/model").text == "True"
+    assert client.get("/user").text == "alice"
+
+
+@dataclass(slots=True)
+class NonNegativeForm:
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.count < 0:
+            raise ValueError("count must not be negative")
+
+
+def test_form_model_constructor_errors_are_validation_errors() -> None:
+    """__post_init__ rejections reach form-error handlers with the parsed form, as Body() reports them."""
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+    seen: list[str | None] = []
+
+    @app.errorhandler(FormValidationError)
+    def form_error(_request: object, exc: Exception) -> Response:
+        assert isinstance(exc, FormValidationError)
+        seen.append(exc.form_data.get("count"))
+        return Response.json({"errors": [issue.as_dict() for issue in exc.issues]}, status_code=422)
+
+    @app.post("/form")
+    def submit(payload: Annotated[NonNegativeForm, Form()]) -> str:
+        return str(payload.count)
+
+    response = app.test_client().post("/form", data={"count": "-1"})
+    assert response.status_code == 422
+    assert response.json() == {"errors": [{"location": ["form"], "code": "value_error", "message": "Value is not valid for this model."}]}
+    assert seen == ["-1"]
+
+
+@dataclass(slots=True)
+class FilePairForm:
+    files: tuple[UploadedFile, UploadedFile]
+
+
+@dataclass(slots=True)
+class MixedFileTupleForm:
+    files: tuple[UploadedFile, str]
+
+
+def _two_files() -> dict[str, Any]:
+    """Build a multipart body with two parts under one name, which ``files=`` cannot express."""
+    parts = b"".join(
+        b'--b\r\nContent-Disposition: form-data; name="files"; filename="' + name + b'"\r\n\r\nx\r\n' for name in (b"a.txt", b"b.txt")
+    )
+    return {"body": parts + b"--b--\r\n", "headers": {"content-type": "multipart/form-data; boundary=b"}}
+
+
+def test_uploaded_file_collections_enforce_declared_tuple_shape() -> None:
+    """A fixed-size file tuple rejects the wrong count and members that cannot hold an uploaded file."""
+    app = Flasgo(settings={"CSRF_ENABLED": False})
+
+    @app.post("/pair")
+    def pair(payload: Annotated[FilePairForm, Form()]) -> dict[str, object]:
+        first, second = payload.files
+        return {"names": [first.filename, second.filename]}
+
+    @app.post("/mixed")
+    def mixed(payload: Annotated[MixedFileTupleForm, Form()]) -> str:
+        return "unreachable"
+
+    client = app.test_client()
+    one = client.post("/pair", files={"files": ("a.txt", b"a", "text/plain")})
+    assert one.status_code == 422
+    assert cast(dict[str, Any], one.json())["errors"] == [
+        {"location": ["form", "files"], "code": "tuple_length", "message": "Expected exactly 2 items."}
+    ]
+
+    two = client.post("/pair", **_two_files())
+    assert two.json() == {"names": ["a.txt", "b.txt"]}
+
+    wrong_member = client.post("/mixed", **_two_files())
+    assert wrong_member.status_code == 422
+    assert cast(dict[str, Any], wrong_member.json())["errors"] == [
+        {"location": ["form", "files", 1], "code": "type_error", "message": "Expected an uploaded file."}
     ]
