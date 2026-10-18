@@ -36,7 +36,8 @@ def swagger_ui_response(*, openapi_path: str, title: str) -> Response:
 def _swagger_ui_html(*, openapi_path: str, title: str, nonce: str) -> str:
     safe_title = html.escape(title, quote=True)
     safe_nonce = html.escape(nonce, quote=True)
-    openapi_path_json = json.dumps(openapi_path)
+    # json.dumps leaves "</script>" intact; escape markup characters so the value cannot close the inline script.
+    openapi_path_json = json.dumps(openapi_path).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     return f"""<!doctype html>
 <html>
   <head>

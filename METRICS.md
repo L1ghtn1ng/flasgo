@@ -1,8 +1,25 @@
 # Metrics reference
 
 Flasgo's optional `flasgo[metrics]` extra exposes an authenticated Prometheus/OpenMetrics endpoint. Metrics remain
-disabled by default. Existing metric names, labels, and timing boundaries are preserved. See the README for the
-existing enablement settings. This reference describes the additional measurements and public extension API.
+disabled by default. See the README for the enablement settings. This reference lists the exported metric families,
+their measurement boundaries, and the public extension API.
+
+## Core HTTP, WebSocket, and lifecycle
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `flasgo_http_requests_total` | Counter | `method`, `route`, `status` |
+| `flasgo_http_request_duration_seconds` | Histogram | `method`, `route`, `status_class` |
+| `flasgo_http_response_body_size_bytes` | Histogram | `method`, `route`, `status_class` |
+| `flasgo_http_response_send_failures_total` | Counter | `method`, `route`, `status` |
+| `flasgo_http_requests_active` | Gauge | None |
+| `flasgo_websocket_connections_total` | Counter | `route`, `outcome` |
+| `flasgo_websocket_connection_duration_seconds` | Histogram | `route`, `outcome` |
+| `flasgo_websocket_connections_active` | Gauge | `route` |
+| `flasgo_lifespan_events_total` | Counter | `phase`, `outcome` |
+| `flasgo_info` | Info | `version` |
+
+The endpoint also exports the standard Python platform, garbage-collector, and process collectors.
 
 ## HTTP and streaming
 
@@ -33,9 +50,9 @@ needing time to the first useful event should add their own metric. Empty respon
 first-body sample. Long streams update active/byte measurements before completion and are never buffered for metrics.
 
 HTTP status and stream completion are separate facts: a stream can send `200` headers and later fail. Expected client
-disconnects should be evaluated separately from server faults. The existing HTTP duration includes response sending
-and request-dependency cleanup; the existing active-request gauge also includes background work. The new in-flight
-gauge ends when response sending exits. A streaming send itself includes stream iterator cleanup. Existing completed
+disconnects should be evaluated separately from server faults. `flasgo_http_request_duration_seconds` includes
+response sending and request-dependency cleanup; `flasgo_http_requests_active` also includes background work.
+`flasgo_http_responses_in_flight` ends when response sending exits. A streaming send itself includes stream iterator cleanup. Existing completed
 HTTP counters retain their cancellation behavior; use stream outcomes for explicit stream cancellation accounting.
 
 ## Backend operations
@@ -46,7 +63,9 @@ HTTP counters retain their cancellation behavior; use stream outcomes for explic
 | `flasgo_backend_operation_duration_seconds` | Histogram | `component`, `operation` |
 
 The instrumented logical calls are `session/load`, `session/save`, `authentication/authenticate`, and
-`rate_limit/check_batch`. Session calls include their serialization and storage work. A load returning an empty
+`rate_limit/check_batch`. Session calls are measured only when a server-side session backend
+(`session_backend=ServerSideSessions(...)`) is configured, and include its serialization and storage work; default
+signed-cookie sessions produce no `session/*` observations. A load returning an empty
 session is still a successful call, even when no storage read was needed. Saves are measured only when persistence
 is needed. Authentication includes the configured backend call; permission decisions are reported separately.
 Rate limits count each applicable batch/phase once. HTTP, documentation authentication, and WebSocket upgrade
@@ -182,9 +201,10 @@ requests, 16-chunk streams, and scrapes after observing 1 or 100 routes. It uses
 reports median request microseconds, scrape milliseconds, and scrape body bytes. Compare the same script and Python
 environment against the previous revision; local overhead measurements are not production capacity estimates.
 
-### Local comparison (2026-09-06)
+### Historical comparison: 0.9.0 vs 0.9.1 (2026-09-06)
 
-Compared the pre-change revision `2b7965e` with this implementation on CPython 3.14.7, outside the sandbox, using
+These figures measured the 0.9.1 metrics additions and predate 0.10.0 and 0.11.0; rerun the command above for
+current numbers. Compared the 0.9.0 revision `2b7965e` with the 0.9.1 implementation on CPython 3.14.7, outside the sandbox, using
 500 requests per round and five rounds per case. Each request figure is the median round average; scrape figures
 are medians of five scrapes after all routes have been observed. These synthetic measurements exclude network and
 backend latency and are subject to host scheduling noise.

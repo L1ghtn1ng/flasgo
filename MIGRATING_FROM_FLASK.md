@@ -212,7 +212,8 @@ Notes:
 
 For typed forms, replace manual field extraction with a dataclass and `Annotated[..., Form()]`. A validation failure
 returns a safe `422` JSON response by default; register `@app.errorhandler(FormValidationError)` when an HTML route
-should redisplay the parsed fields and field-local errors.
+should redisplay the parsed fields and field-local errors. `exc.errors` groups messages by field name;
+`exc.issues` holds the raw `ValidationIssue` tuple.
 
 ```python
 from dataclasses import dataclass
@@ -232,7 +233,7 @@ def invalid_signup(request, exc):
     return Response.template(
         "signup.html",
         templates=app.templates,
-        context={"values": exc.form_data, "errors": exc.issues},
+        context={"values": exc.form_data, "errors": exc.errors},
         status_code=422,
     )
 
@@ -248,7 +249,8 @@ sync or async dependency graphs; providers are cached once per request by defaul
 to hyphens unless an alias is supplied; cookie names are exact unless explicitly aliased. Collection-typed headers
 such as `Annotated[list[str], Header(alias="x-version")]` preserve repeated wire fields. Flasgo rejects duplicate
 scalar headers and duplicate cookie names. Use the framework's body/form, authentication, and cookie APIs instead of
-declaring the reserved `Content-Type`, `Authorization`, and `Cookie` names through `Header()`.
+declaring the reserved `Content-Type`, `Authorization`, and `Cookie` names through `Header()`; `Accept` is reserved
+too, so read it from `request.headers` when a handler negotiates content.
 
 ## static files
 
@@ -402,4 +404,5 @@ session, and cookie changes must finish before the handler returns.
 Signed-cookie sessions remain compatible by default. Opting into `ServerSideSessions` changes the cookie format and
 requires existing users to log in again. Review [shared-storage semantics](https://flasgo.dev/guides/shared-storage/)
 before switching an existing deployment, particularly session conflicts, identifier rotation, backend outages, and
-quota identities. Add a policy snapshot and `flasgo check --deploy` to migration review and CI.
+quota identities. Add a policy snapshot (`flasgo routes app.py --json -o policy.json`) and
+`flasgo check app.py --deploy --against policy.json` to migration review and CI.

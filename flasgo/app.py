@@ -1301,9 +1301,7 @@ class Flasgo(RouteDecorators):
         result = build_url(routes[0].raw_path, values)
         active = _request_ctx.get()
         if active is not None and active.scope.get("flasgo.app") is self:
-            root = str(active.scope.get("root_path", "")).rstrip("/")
-            if root:
-                result = build_url(root, {}) + result
+            result = _mount_prefix(active.scope) + result
         return result
 
     @contextmanager
@@ -1601,7 +1599,8 @@ class Flasgo(RouteDecorators):
         if req.path == openapi_path:
             return Response.json(self.openapi_spec())
 
-        return swagger_ui_response(openapi_path=openapi_path, title=self.settings.API_TITLE)
+        # The browser resolves the spec URL against the public path, so it must include the ASGI mount prefix.
+        return swagger_ui_response(openapi_path=_mount_prefix(req.scope) + openapi_path, title=self.settings.API_TITLE)
 
     async def _authorize_docs_request(self, req: Request) -> Response | None:
         """Apply configured documentation authentication, permissions, and failure throttling."""
@@ -2170,6 +2169,12 @@ def _copy_session(current: Session) -> Session:
         _stored=current._stored,
         _rotate=current._rotate,
     )
+
+
+def _mount_prefix(scope: Scope) -> str:
+    """Return the percent-encoded ASGI ``root_path`` to prepend to generated URLs, or ``""`` when unmounted."""
+    root = str(scope.get("root_path", "")).rstrip("/")
+    return build_url(root, {}) if root else ""
 
 
 def _strip_root_path(scope: Scope) -> None:

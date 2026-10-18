@@ -5,7 +5,7 @@ Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
 - Django security defaults: CSRF protection, host validation, secure headers, signed sessions.
 
-The current framework release is `0.10.0`. See the [release notes and upgrade guidance](CHANGELOG.md#0100---2026-09-26).
+The current framework release is `0.11.0`. See the [release notes and upgrade guidance](CHANGELOG.md#0110---2026-10-18).
 
 ## Project goals
 
@@ -97,7 +97,8 @@ Or explicitly:
 app.run(host="127.0.0.1", port=8000, reload=True)
 ```
 
-The CLI accepts Python files, extensionless local file names, package files, and import strings:
+The CLI accepts Python files, extensionless local file names, package files, package directories, and import
+strings:
 
 ```bash
 uv run flasgo run app
@@ -121,10 +122,11 @@ uv run uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
 `app.run(...)` and `flasgo run` use Uvicorn's H11 implementation with proxy-header trust disabled, bounded HTTP
-request heads and WebSocket queues/messages, lifespan enabled, and per-message compression disabled. Flasgo also
-enforces `MAX_REQUEST_BODY_BYTES`, `MAX_REQUEST_HEAD_BYTES`, and `REQUEST_READ_TIMEOUT_SECONDS` inside the app so
-those limits remain active under another ASGI server. `Flasgo.__call__` routes oversized HTTP request heads directly
-to `_handle_http`, so they bypass OpenTelemetry tracing and are rejected before routing or session storage. When
+request heads and WebSocket queues/messages, lifespan enabled, per-message compression disabled, no `Server` header,
+and concurrent connections capped by `SERVER_LIMIT_CONCURRENCY` (default 1000). Flasgo also enforces
+`MAX_REQUEST_BODY_BYTES` (1 MiB), `MAX_REQUEST_HEAD_BYTES` (16 KiB), and `REQUEST_READ_TIMEOUT_SECONDS` (10 seconds)
+inside the app so those limits remain active under another ASGI server. `Flasgo.__call__` answers oversized HTTP
+request heads with `431` directly, so they bypass OpenTelemetry tracing, routing, middleware, and session storage. When
 metrics are enabled, they still increment `http_rejections` and record the HTTP observation. Oversized WebSocket
 upgrades are rejected before OpenTelemetry tracing, routing, or session storage. The built-in runner is intended for
 local development; configure a production ASGI process explicitly for deployment.
@@ -132,8 +134,9 @@ local development; configure a production ASGI process explicitly for deployment
 ## WebSockets, lifespan, and background tasks
 
 WebSocket routes use the same path converters, authorization decorators, and `@app.ratelimit(...)` rules as HTTP
-routes. Flasgo checks the `Host` and exact `Origin` before acceptance, rejects missing origins by default, limits
-messages to 64 KiB and 120 messages per minute per connection, and never writes modified sessions back through a
+routes. Flasgo checks the `Host` and exact `Origin` before acceptance (`WEBSOCKET_ENFORCE_ORIGIN`), rejects missing
+origins by default, limits messages to 64 KiB (`WEBSOCKET_MAX_MESSAGE_BYTES`) and 120 messages per minute per
+connection (`WEBSOCKET_MAX_MESSAGES_PER_MINUTE`), and never writes modified sessions back through a
 WebSocket handshake. Host, Origin, and default per-IP route limits are enforced before session storage or an
 authentication backend is accessed.
 
@@ -143,6 +146,9 @@ from collections.abc import AsyncGenerator
 from flasgo import Flasgo, Response, WebSocket
 
 app = Flasgo()
+
+
+async def record_audit_event(name: str) -> None: ...
 
 
 @app.lifespan
@@ -259,8 +265,11 @@ unsupported; enforce public-to-private network boundaries at a trusted proxy or 
 ## Security defaults
 
 - Host header allowlist (`localhost`, `127.0.0.1` by default).
-- HMAC-signed, session-bound CSRF double-submit cookie defense for unsafe methods.
-- CSRF Origin/Referer checks. `CSRF_TRUSTED_ORIGINS` accepts exact origins (`https://partner.example`),
+- HMAC-signed, session-bound CSRF double-submit cookie defense for unsafe methods: send the `flasgo-csrf` cookie
+  value back in an `X-CSRF-Token` header (`CSRF_COOKIE_NAME` / `CSRF_HEADER_NAME`). There is no form-field token, so
+  browser form posts must be sent by script.
+- CSRF Origin/Referer checks (`CSRF_CHECK_ORIGIN`); with `CSRF_REQUIRE_ORIGIN=True` (the default), unsafe requests
+  carrying neither header are rejected. `CSRF_TRUSTED_ORIGINS` accepts exact origins (`https://partner.example`),
   scheme-qualified wildcards (`https://*.example.com`), bare hosts (`partner.example`), and bare suffixes
   (`.example.com`). Bare entries only trust the request's own scheme, so an HTTPS app never trusts a plain-HTTP origin.
 - Signed session cookies (HMAC-SHA256).
@@ -273,14 +282,16 @@ unsupported; enforce public-to-private network boundaries at a trusted proxy or 
 - Sanitized upload filenames: directory components and control characters are removed, then surrounding whitespace
   and dots are stripped until neither can expose another dot prefix or suffix.
 - Bounded validation depth, work, and returned issue counts.
-- Optional per-client throttling for repeated security failures (`429`).
+- Per-client throttling for repeated security failures (`429`), on by default at 50 failures per 60 seconds
+  (`SECURITY_FAILURE_RATE_LIMIT` / `SECURITY_FAILURE_WINDOW_SECONDS`; set the limit to `0` to disable it).
 - Per-route rate limiting with `@app.ratelimit(...)` / `@rate_limit(...)`, using the ASGI client IP by default.
 - Fail-closed rate-limit key capacity that preserves active quota accounting rather than evicting it under churn.
 - Failed metrics-endpoint authentication is throttled like every other security failure.
 - Security event logging for host/CSRF/authz denials.
 - Same-origin WebSocket handshakes, pre-accept auth, bounded messages, and connection-level message throttling.
 - Locally generated request IDs by default; incoming IDs are ignored unless strict opt-in validation is enabled.
-- Hardened headers (`CSP`, `HSTS`, `X-Frame-Options`, `Referrer-Policy`, etc.).
+- Hardened headers (`CSP`, `HSTS`, `X-Frame-Options`, `Referrer-Policy`, `X-Content-Type-Options`,
+  `Permissions-Policy`, and `X-XSS-Protection: 0`), configurable through `SECURITY_HEADERS`.
 - Disabled-by-default, route-aware CORS with exact-origin validation and fail-closed preflight handling.
 
 These defaults are intended to help teams avoid common OWASP Top 10 2025 failure modes around broken access control, cryptographic failures, security misconfiguration, software and data integrity issues, and SSRF.
@@ -377,8 +388,11 @@ and duplicate cookie names are rejected instead of silently selecting a value. C
 fields and OpenAPI `simple` comma-separated values. Optional collection unions and integer/boolean-valued enums are
 converted from query, header, cookie, and form text before validation. Invalid values return safe JSON with status
 `422` and field locations. `FormValidationError` also retains the parsed `FormData` for an explicit error handler to
-redisplay safe fields in an HTML form. Dependencies may be sync or async, can depend on other providers, and are cached
-once per request by default; use `Depends(provider, use_cache=False)` only when repeated execution is intentional.
+redisplay safe fields in an HTML form. `Header()` refuses the reserved `Accept`, `Authorization`, `Content-Type`, and
+`Cookie` names. Dependencies may be sync or async, can depend on other providers, and are cached once per request by
+default; use `Depends(provider, use_cache=False)` only when repeated execution is intentional. Generator providers
+run their teardown after the request; `Depends(provider, scope="function")` tears down before the response is sent,
+and a request-scoped provider cannot depend on a function-scoped one.
 Declare providers at module scope when using postponed annotations so Python can resolve their names.
 
 Validation uses shared per-request budgets controlled by `MAX_VALIDATION_DEPTH`, `MAX_VALIDATION_WORK`, and
@@ -417,7 +431,8 @@ git diff --check
 
 ## Operations and CLI
 
-Set `LOG_FORMAT="json"` for bounded structured Flasgo logs. Every HTTP request and WebSocket connection gets a
+Set `LOG_FORMAT="json"` for bounded structured Flasgo logs, and `LOG_LEVEL` (default `"INFO"`) to any standard
+logging level. Every HTTP request and WebSocket connection gets a
 locally generated request ID; opt into a trusted upstream ID only with `TRUST_INCOMING_REQUEST_ID=True`.
 
 Prometheus metrics are an optional extra and are disabled by default:
@@ -439,11 +454,12 @@ app = Flasgo(
 )
 ```
 
-The `/metrics` endpoint requires that bearer token, does not instrument itself, and labels HTTP metrics with route
+The metrics endpoint (`METRICS_PATH`, default `/metrics`) requires that bearer token, answers only `GET` and `HEAD`
+(other methods get `405`), does not instrument itself, and labels HTTP metrics with route
 templates rather than user-controlled paths. The configured secret must use the standard bearer-token ASCII
 character set; malformed or non-ASCII request credentials receive `401 Unauthorized`, and repeated failures are
-throttled with `429` like other security failures. Metrics responses are explicitly `no-store` and do not create
-session or CSRF cookies.
+throttled with `429` like other security failures. Metrics responses are `no-store` while `ENFORCE_NO_STORE_CACHE`
+is enabled (the default) and do not create session or CSRF cookies.
 
 Flasgo exposes request count, active requests, status-class-aware request duration, successfully sent response-body size,
 and response-send failures. WebSocket metrics cover active and completed connections with route and outcome labels,
@@ -494,11 +510,13 @@ name; unknown methods use the stable `HTTP` placeholder so trace-name cardinalit
 contain the real request path so stable OpenTelemetry semantic conventions remain accurate, while every non-empty
 query value is replaced with `REDACTED` before instrumentation. WebSocket URL attributes remain template-only. `OTEL_EXCLUDED_PATHS` accepts
 either exact paths or route templates such as `/reset/<token>`; template exclusions also apply to `405 Method Not
-Allowed` requests, and `/metrics` is always excluded. Export runs in the SDK
-batch processor, and Flasgo shuts down only tracer providers it creates. A Flasgo-built provider is also registered
+Allowed` requests, and the configured `METRICS_PATH` (default `/metrics`) is always excluded. Export runs in the
+SDK batch processor. At lifespan end Flasgo flushes, but does not shut down, tracer providers it creates, so later
+lifespan cycles keep exporting; the SDK closes them at interpreter exit. A Flasgo-built provider is also registered
 as the process-global tracer provider so other OpenTelemetry instrumentations share its sampler and exporter; set
 `OTEL_SET_GLOBAL_PROVIDER` to `False` to keep it private. Pass
-`tracer_provider=` to `Flasgo(...)` for tests or an application-owned provider; its lifecycle remains caller-owned.
+`tracer_provider=` to `Flasgo(...)` for tests or an application-owned provider; this enables tracing regardless of
+`OTEL_ENABLED`, and the provider's lifecycle remains caller-owned.
 Active trace and span IDs are added to Flasgo event logs automatically.
 Rejected or ambiguous `Host` values are removed from the scope passed to instrumentation before a denial response is
 traced, preventing invalid authority data from entering span URL attributes.
@@ -518,31 +536,47 @@ uv add 'flasgo[db]'
 uv run flasgo db init
 uv run flasgo db migrate -m "create users"
 uv run flasgo db upgrade
+uv run flasgo db downgrade
 ```
+
+`upgrade` defaults to `head` and `downgrade` to `-1`; pass a revision to target another one, or `--sql` to print the
+SQL without changing the database. `flasgo db --config` selects the Alembic configuration file (default
+`alembic.ini`), and `flasgo db init --directory` sets the migration directory (default `migrations`).
 
 ## Codebase guide
 
 Flasgo keeps each framework concern in a small module so new contributors can change one area without needing to understand the whole project at once:
 
+- `flasgo/cli.py` and `flasgo/server.py`: the `flasgo` command and the Uvicorn development server.
 - `flasgo/app.py`: ASGI entrypoint, request dispatch, middleware, routing integration, sessions, auth checks, rate-limit enforcement, and error handling.
 - `flasgo/routing.py`: Flask-style path parsing and route matching.
+- `flasgo/blueprints.py`: blueprints and their atomic registration.
+- `flasgo/exceptions.py`: `HTTPException` and `abort`.
+- `flasgo/globals.py`: the Flask-style `request`, `session`, and `current_user` proxies.
 - `flasgo/_request.py`: request headers, cookies, query strings, body parsing, JSON, and forms.
 - `flasgo/response.py`: response objects, response coercion, redirects, JSON, templates, and header validation.
+- `flasgo/streaming.py`: `StreamingResponse`, server-sent events, and NDJSON streaming.
+- `flasgo/contracts.py`: `response_model=` validation and public-field filtering.
 - `flasgo/websockets.py`: WebSocket state, messages, close handling, and protocol limits.
 - `flasgo/background.py`: post-response best-effort task execution.
 - `flasgo/params.py`, `flasgo/validation.py`, and `flasgo/di.py`: endpoint plans, stdlib validation, and dependency resolution.
 - `flasgo/openapi.py`: OpenAPI operations, request/response schemas, validation contracts, and auth requirements.
+- `flasgo/docs.py`: the Swagger UI page for the optional docs endpoint.
+- `flasgo/policy.py`: policy snapshots and `flasgo check --deploy` findings.
 - `flasgo/jwt.py`: optional strict HS256 token encoding and authentication backend.
 - `flasgo/logging.py`, `flasgo/metrics.py`, and `flasgo/telemetry.py`: request correlation and optional observability.
 - `flasgo/security.py`: security configuration, CSRF, allowed hosts, secure cookies, and default security headers.
 - `flasgo/cors.py`: validated route CORS policies, preflight handling, and response-header generation.
 - `flasgo/ratelimit.py`: route decorator metadata and the in-process sliding-window limiter.
+- `flasgo/stores.py`, `flasgo/redis_ratelimit.py`, and `flasgo/server_sessions.py`: shared storage, Redis-backed rate
+  limiting, and server-side sessions.
 - `flasgo/auth.py`: users, auth backends, permissions, and bearer-token helpers.
 - `flasgo/_session.py`: signed session serialization. `flasgo/request.py` and `flasgo/session.py` only re-export
   their public names so `from flasgo.request import Request` keeps working.
 - `flasgo/staticfiles.py`: static file resolution and safe file serving.
 - `flasgo/templating.py`: Jinja environment setup and template loading protections.
-- `flasgo/testing.py`: synchronous and async ASGI test client.
+- `flasgo/testing.py` and `flasgo/testing_stream.py`: synchronous and async ASGI test client and stream helpers.
+- `flasgo/debug.py`: the development error page.
 
 When adding a feature, prefer the existing pattern: keep public decorators on `Flasgo`, keep standalone helpers
 importable from `flasgo`, add focused tests beside related behavior, and run the verification bundle above before
@@ -554,10 +588,10 @@ handing off.
 - Core types: `Flasgo`, `Settings`, `Request`, `Response`, `Session`, `BackgroundTasks`, `CORSConfig`
 - Routing and lifecycle: `Flasgo.route`, `Flasgo.get`, `Flasgo.post`, `Flasgo.put`, `Flasgo.patch`,
   `Flasgo.delete`, `Flasgo.websocket`, `Flasgo.lifespan`, `Flasgo.state`, `Flasgo.before_request`,
-  `Flasgo.after_request`, `Flasgo.errorhandler`
+  `Flasgo.after_request`, `Flasgo.errorhandler`, `Flasgo.add_route`, `Flasgo.add_websocket_route`, `Flasgo.run`
 - App integrations: `Flasgo.register_auth_backend`, `Flasgo.authorize`, `Flasgo.ratelimit`,
   `Flasgo.configure_templates`, `Flasgo.render_template`, `Flasgo.render_template_async`, `Flasgo.configure_static`, `Flasgo.test_client`,
-  `Flasgo.resolve_outbound_url`, `Flasgo.aresolve_outbound_url`, `Flasgo.openapi_spec`
+  `Flasgo.resolve_outbound_url`, `Flasgo.aresolve_outbound_url`, `Flasgo.openapi_spec`, `Flasgo.metrics_registry`
 - Parameter and validation helpers: `Body`, `Query`, `Header`, `Cookie`, `Form`, `Depends`, `ValidationIssue`,
   `RequestValidationError`, `FormValidationError`
 - Request data: `FormData`, `UploadedFile`
@@ -574,11 +608,14 @@ handing off.
   `create_template_environment`, `render_template`, `Response.template`
 - Logging: `FlasgoJSONFormatter`, `configure_logging`
 - SSRF controls: `SSRFConfig`, `SSRFGuard`, `SSRFResolvedURL`, `SSRFViolation`
-- Flask-style path params: `<name>`, `<int:name>`, `<float:name>`, `<path:name>`
+- Blueprints, contracts, streaming, and shared storage: see the next section
+- Flask-style path params: `<name>` or `<str:name>`, `<int:name>`, `<float:name>`, `<path:name>` (at most one
+  `path` converter per route)
 - Optional OpenAPI spec + Swagger UI docs (disabled by default)
 - Response coercion:
   - `str` / `bytes`
-  - `dict` / `list` (JSON)
+  - `None` (empty `204 No Content`)
+  - mapping / `list` (JSON)
   - `(body, status)` / `(body, status, headers)`
   - `Response`
   - dataclass instances (recursive JSON; underscore-prefixed fields are omitted at every dataclass level)
@@ -634,6 +671,7 @@ Flasgo includes a Jinja2 wrapper with secure defaults for HTML rendering:
 - Strict undefined variables
 - Autoescaping enabled by default
 - Loader protections against path traversal and symlink escapes outside configured template roots
+- Templates larger than `max_template_bytes` (256 KiB by default, set through `configure_templates`) are refused
 
 Create the environment once during app startup and reuse it:
 
@@ -686,11 +724,13 @@ async def signup(request: Request) -> dict[str, object]:
 
 `await request.form()` returns a `FormData` object with `get`, `getlist`, `file`, and `filelist`. Upload filenames
 are sanitized at parse time: path components and control characters are removed, and surrounding whitespace and dots
-are normalized until no dot prefix or suffix remains. `UploadedFile.filename` is therefore path-component-free, but
+are normalized until no dot prefix or suffix remains; a name that sanitizes to nothing becomes `upload`.
+`UploadedFile.filename` is therefore path-component-free, but
 it remains client-supplied metadata; generate an application-owned name when uniqueness or platform portability
 matters. Multipart requests are limited to
 `MAX_MULTIPART_PARTS` parts and `MAX_FORM_FIELDS` text fields (1000 each by default); oversubscribed requests are
-rejected with `413`. The multipart pre-scan counts only boundary delimiter lines, so boundary text embedded within a
+rejected with `413`. `MAX_FORM_FIELDS` also limits `application/x-www-form-urlencoded` bodies and query-string
+parameters. The multipart pre-scan counts only boundary delimiter lines, so boundary text embedded within a
 payload line remains valid file data.
 
 When request parsing fails, Flasgo returns actionable `400` responses. For example, invalid JSON from `await request.json()` tells the caller to send valid JSON with `Content-Type: application/json`, and malformed multipart requests explain that the boundary/header is missing.
@@ -706,8 +746,9 @@ app = Flasgo(static_folder="static")
 app.configure_static("assets", url_path="/assets", cache_max_age=86400)
 ```
 
-Static responses use safe path normalization, block dotfiles and directory escapes, and include `ETag` and
-`Last-Modified` headers for cache validation. `GET` bodies stream in bounded 64 KiB chunks through worker threads;
+Both default to `url_path="/static"` and a one-hour `cache_max_age`; `url_path="/"` serves the directory at the site
+root. Static responses use safe path normalization, block dotfiles and directory escapes, and include `ETag` and
+`Last-Modified` headers; a matching `If-None-Match` returns `304` (`If-Modified-Since` is not evaluated). `GET` bodies stream in bounded 64 KiB chunks through worker threads;
 `HEAD` returns the same metadata without opening or reading the file. Publicly cacheable responses do not emit
 framework-managed CSRF or session cookies.
 
@@ -720,6 +761,13 @@ from flasgo import Flasgo
 
 # Testing example only. For browser-facing production apps keep CSRF enabled.
 app = Flasgo(settings={"CSRF_ENABLED": False})
+
+
+@app.post("/api/login")
+async def login() -> dict[str, bool]:
+    return {"ok": True}
+
+
 client = app.test_client()
 
 response = client.post("/api/login", json={"username": "alice"})
@@ -867,8 +915,10 @@ async resolver bounded by `SSRF_RESOLUTION_TIMEOUT_SECONDS` (5s default, fails c
 hostile DNS server cannot stall other connections. The synchronous variant blocks the calling thread during
 resolution.
 
-By default, Flasgo blocks unsafe schemes, embedded credentials, localhost/private network targets, and unresolved
-hosts. `SSRF_ALLOW_PRIVATE_NETWORKS=True` permits only RFC 1918 IPv4 and unique-local IPv6 destinations; loopback,
+By default (`SSRF_ENABLED=True`), Flasgo blocks unsafe schemes, embedded credentials (unless
+`SSRF_ALLOW_USERINFO=True`), localhost/private network targets, and unresolved hosts. Setting
+`SSRF_RESOLUTION_TIMEOUT_SECONDS=None` removes the async DNS deadline. `SSRF_ALLOW_PRIVATE_NETWORKS=True` permits only
+RFC 1918 IPv4, unique-local IPv6 (`fc00::/7`), and deprecated site-local IPv6 (`fec0::/10`) destinations; loopback,
 link-local, multicast, reserved, and unspecified addresses remain blocked. Connect to `target.url` and send
 `target.host_header` as the HTTP `Host` header when your HTTP client supports it. `target.original_url` is for
 logging only; fetching it re-resolves DNS and reopens a DNS-rebinding window between validation and connection.
@@ -888,7 +938,9 @@ use `is_safe_redirect_target()` to accept only relative, same-origin targets. It
 and for forward-slash or backslash authority forms that browsers can normalize to `//host`:
 
 ```python
-from flasgo import is_safe_redirect_target, redirect
+from flasgo import Flasgo, Response, is_safe_redirect_target, redirect
+
+app = Flasgo()
 
 
 @app.get("/login")
@@ -937,7 +989,8 @@ app.register_auth_backend("docs", bearer_token_backend(validate_docs_token))
 ```
 
 Generated OpenAPI 3.2 operations document the framework error responses that apply to them: `413`/`415` on body and form
-endpoints, `403` on unsafe methods while CSRF protection is enabled, `429` on rate-limited routes, and `401`/`403`
+endpoints, `422` with the validation-error schema on operations with validated query, header, cookie, body, or form
+parameters, `403` on unsafe methods while CSRF protection is enabled, `429` on rate-limited routes, and `401`/`403`
 on authorized routes. The generated document declares the JSON Schema 2020-12 dialect and is validated in the test
 suite. Standard operations, including `QUERY`, use Path Item fields; other valid HTTP methods use OpenAPI 3.2
 `additionalOperations`. Swagger UI is pinned to an exact distribution with subresource-integrity hashes; its inline

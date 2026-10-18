@@ -1,3 +1,4 @@
+import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,6 +116,48 @@ def test_docs_endpoint_escapes_settings_in_html_and_javascript() -> None:
     assert "&lt;/title&gt;&lt;img src=x onerror=alert(1)&gt; Docs" in response.text
     assert 'url: "/openapi.json\\";alert(1);//"' in response.text
     assert 'url: "/openapi.json";alert(1);//"' not in response.text
+
+
+@pytest.mark.parametrize("path", ["/prefix/docs", "/docs"])
+def test_docs_page_fetches_the_spec_under_the_asgi_root_path(path: str) -> None:
+    """Uvicorn --root-path keeps the prefix in ``path``; the browser must request the spec through the mount too."""
+    app = Flasgo(settings={"ENABLE_DOCS": True})
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"host", b"localhost")],
+        "client": ("127.0.0.1", 1),
+        "server": ("localhost", 80),
+        "root_path": "/prefix",
+    }
+    asyncio.run(app(scope, receive, send))
+
+    assert sent[0]["status"] == 200
+    assert 'url: "/prefix/openapi.json"' in sent[1]["body"].decode()
+
+
+def test_docs_page_escapes_markup_in_the_spec_url() -> None:
+    app = Flasgo(settings={"ENABLE_DOCS": True, "OPENAPI_PATH": "/spec</script><script>alert(1)</script>"})
+
+    response = TestClient(app).get("/docs")
+
+    assert response.status_code == 200
+    assert "</script><script>alert(1)" not in response.text
+    assert 'url: "/spec\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e"' in response.text
 
 
 def test_openapi_spec_updates_after_new_route_registration() -> None:

@@ -2,12 +2,26 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-18
+
+### Upgrading from 0.10.0
+
+Review these behaviour changes before upgrading:
+
+- Projects using `flasgo db` must be on SQLAlchemy 2.0 or newer, because the `flasgo[db]` extra now requires Alembic
+  1.20.
+- Code that imported underscore-prefixed helpers from `flasgo.request` or `flasgo.session`, monkeypatched names on
+  those modules, or checked `Request.__module__` must switch to the private `flasgo._request` and `flasgo._session`
+  modules.
+- `jwt_backend()` and `encode_jwt()` now reject PEM, SSH, DER, or JWK-shaped HMAC secrets with `ValueError` at
+  configuration time. Code that caught `jwt.InvalidKeyError` from `encode_jwt()` must catch `ValueError` instead.
+
 ### Changed
 
 - The `flasgo[jwt]` extra now pins PyJWT 2.15.1 (previously 2.13.0).
 - `jwt_backend()` and `encode_jwt()` now raise `ValueError` at configuration time for secrets that PyJWT refuses as
-  HMAC keys (PEM, SSH, DER, or JWK-shaped values). Previously the backend was created anyway and then rejected every
-  token.
+  HMAC keys (PEM, SSH, DER, or JWK-shaped values). Previously `jwt_backend()` was created anyway and then rejected
+  every token, and `encode_jwt()` raised `jwt.InvalidKeyError`.
 - The `flasgo[db]` extra now pins Alembic 1.20.0 (previously 1.19.2). Alembic 1.20 requires SQLAlchemy 2.0 or newer,
   so projects still on SQLAlchemy 1.4 must upgrade it before using `flasgo db`.
 - The `flasgo[otel]` extra now pins the OpenTelemetry API, SDK, and OTLP HTTP exporter at 1.45.1 and the ASGI
@@ -23,11 +37,12 @@
 
 ### Fixed
 
-- With PyJWT 2.14, a correctly signed token whose `exp`, `nbf`, or `iat` overflows an integer (for example `1e400`)
-  produced HTTP 500 instead of a 401 Bearer challenge.
+- A correctly signed token whose `exp`, `nbf`, or `iat` overflows an integer (for example `1e400`) produced HTTP 500
+  instead of a 401 Bearer challenge with the previously pinned PyJWT 2.13.0 (and 2.14).
 - Routes with several converters in one segment, such as `/<a>-<b>-<c>-<d>/end`, no longer backtrack polynomially:
   a 600-byte non-matching path took about a minute and blocked the event loop before authentication or rate limiting.
-  These routes now match in time proportional to the path and route length, with the same captures as before.
+  These routes now match in time proportional to the path length times the route length, with the same captures as
+  before.
 - A dependency provider that returns an instance of the annotated dataclass (including `User`) is injected as-is;
   it was rejected with HTTP 422 "Expected an object."
 - Inside `with app.test_client()`, `app.override_dependencies(...)` around a request now applies; the client's loop
@@ -37,7 +52,12 @@
 - Uploaded-file collections now enforce fixed tuple lengths and member types: `tuple[UploadedFile, UploadedFile]`
   accepted a single file.
 - Applications mounted under an ASGI `root_path` (for example Uvicorn's `--root-path`) now route requests whose `path`
-  includes the prefix; `request.path` is relative to the mount point and `url_for()` still adds the prefix.
+  includes the prefix; `request.path` is relative to the mount point and `url_for()` still adds the prefix. Exact-path
+  settings (`DOCS_PATH`, `OPENAPI_PATH`, `METRICS_PATH`, `OTEL_EXCLUDED_PATHS`) are matched against this
+  mount-relative path, so do not include the root path in them.
+- Under an ASGI `root_path`, the Swagger UI page now requests the OpenAPI document through the mount prefix (for
+  example `/api/openapi.json`) instead of the unprefixed `OPENAPI_PATH`. The embedded spec URL also escapes `<`, `>`,
+  and `&`, so an `OPENAPI_PATH` containing `</script>` can no longer close the page's inline script.
 - `configure_static(directory, url_path="/")` registered `//<path:filename>`, so files returned 404 and `url_for()`
   failed for them.
 

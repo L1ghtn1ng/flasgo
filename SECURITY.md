@@ -3,7 +3,7 @@
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| Latest `0.10.x` release | ✅ |
+| Latest `0.11.x` release | ✅ |
 | Older `0.x` releases | ❌ |
 
 Security fixes are made against `main` first and may be backported to the latest release line when practical. If you are running an older release, upgrade to the newest available version before requesting support.
@@ -45,6 +45,8 @@ Flasgo is an async-first Python web framework with secure defaults. Reports are 
 - Signed session cookies.
 - No-store cache headers for sensitive responses.
 - Request size or timeout enforcement and malformed request handling.
+- Route matching, parsing, or validation cost that grows faster than linearly with request size (pre-authentication
+  denial of service).
 - Security event logging and failure throttling.
 - SSRF validation helpers for outbound URLs.
 - API docs exposure, especially cases where docs become reachable when `ENABLE_DOCS=False`.
@@ -108,7 +110,8 @@ Flasgo ships with security features enabled by default, but deployment still mat
   than silently dropping finalization. Keep owning event loops alive while accepted cleanup drains, and monitor
   cleanup-capacity failures; cancellation-resistant application code must eventually release its resources.
 - Trust incoming request IDs only when a trusted proxy replaces client-supplied values.
-- For `flasgo[jwt]`, use a dedicated random secret of at least 32 bytes, rotate it through a controlled deployment,
+- For `flasgo[jwt]`, use a dedicated random secret of at least 32 bytes (not PEM, SSH, DER, or JWK text, which
+  `jwt_backend()` and `encode_jwt()` reject with `ValueError`), rotate it through a controlled deployment,
   validate a service-specific issuer and audience, keep tokens short-lived, and transmit them only in the
   `Authorization` header. The built-in helper intentionally supports HS256 only; use an audited application-owned
   backend when asymmetric signing or key discovery is required.
@@ -127,13 +130,15 @@ Flasgo ships with security features enabled by default, but deployment still mat
   can modify the migration directory.
 - Validate outbound user-controlled URLs with Flasgo's SSRF helpers before fetching them. Prefer pinned targets from
   `resolve_outbound_url()` (or `aresolve_outbound_url()` in async handlers) when your HTTP client supports
-  connecting by IP with the original `Host` header. Keep a finite `SSRF_RESOLUTION_TIMEOUT_SECONDS`; async timeouts
-  always fail closed, including when `SSRF_ALLOW_UNRESOLVABLE_HOSTS=True`. That compatibility opt-in returns an
+  connecting by IP with the original `Host` header. Keep a finite `SSRF_RESOLUTION_TIMEOUT_SECONDS`; it bounds only
+  `aresolve_outbound_url()`, while the synchronous `resolve_outbound_url()` waits for the system resolver's own
+  timeout, and async timeouts always fail closed, including when `SSRF_ALLOW_UNRESOLVABLE_HOSTS=True`. That compatibility opt-in returns an
   unpinned original URL for ordinary resolution failures, so use it only behind a separate trusted network control.
   Never fetch `SSRFResolvedURL.original_url`; re-resolving DNS
   reopens the rebinding window between validation and connection. Disable automatic redirect following, or
   re-validate every redirect `Location`; one validated hop says nothing about the next. The private-network opt-in
-  permits RFC 1918 and unique-local addresses only; it never permits loopback or link-local destinations.
+  permits RFC 1918, IPv6 unique-local (`fc00::/7`), and deprecated IPv6 site-local (`fec0::/10`) addresses only; it
+  never permits loopback or link-local destinations, nor multicast, reserved, or unspecified ones.
 - Vet request-controlled login or post-authentication redirect targets with `is_safe_redirect_target()`. It rejects
   malformed URLs, absolute and scheme-relative URLs, and browser-normalized backslash authority forms. Continue to
   treat the accepted value as an HTTP redirect target, not as a filesystem path.
