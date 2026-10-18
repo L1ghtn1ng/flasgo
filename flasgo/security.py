@@ -11,9 +11,9 @@ from functools import cache
 from typing import get_type_hints
 from urllib.parse import urlsplit
 
-from .request import Request
+from ._request import Request
+from ._session import hmac_digest
 from .response import Response
-from .session import hmac_digest
 
 _CSRF_TOKEN_VERSION = "v1"  # noqa: S105 - a token format version, not a secret
 _CSRF_SIGNING_SALT = "flasgo.csrf"

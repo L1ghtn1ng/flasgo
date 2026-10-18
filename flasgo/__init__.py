@@ -1,5 +1,7 @@
 """Flasgo public API."""
 
+from ._request import FormData, Request, UploadedFile
+from ._session import Session
 from .app import Flasgo
 from .auth import (
     AllowAny,
@@ -15,15 +17,14 @@ from .blueprints import Blueprint
 from .contracts import ResponseValidationError
 from .cors import CORSConfig
 from .exceptions import HTTPException, abort
+from .globals import current_user, jsonify, redirect, request, session, url_for
 from .jwt import encode_jwt, jwt_backend
 from .logging import FlasgoJSONFormatter, configure_logging
 from .params import Body, Cookie, Depends, Form, Header, Query
 from .ratelimit import RateLimitRule, rate_limit
 from .redis_ratelimit import RedisRateLimiter
-from .request import FormData, Request, UploadedFile
 from .response import Response, is_safe_redirect_target
 from .server_sessions import ServerSideSessions
-from .session import Session
 from .settings import Settings
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL, SSRFViolation
 from .stores import MemoryStore, RedisStore, StoreUnavailable
@@ -47,11 +48,6 @@ from .testing import (
 from .testing_stream import AsyncTestStream
 from .validation import FormValidationError, RequestValidationError, ValidationIssue
 from .websockets import WebSocket, WebSocketDisconnect, WebSocketException
-
-# isort: split
-# Last on purpose: the context proxies share names with the `.request` and `.session` submodules. Type checkers treat
-# the submodule imports above as rebinding those names, and at runtime the first load of a submodule does the same.
-from .globals import current_user, jsonify, redirect, request, session, url_for
 
 __all__ = [
     "AllowAny",

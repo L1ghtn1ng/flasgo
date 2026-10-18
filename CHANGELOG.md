@@ -14,6 +14,12 @@
   instrumentation at 0.66b1 (previously 1.44.0 and 0.65b0). The exporter's HTTP code now ships in two new transitive
   packages, `opentelemetry-exporter-http-transport` and `opentelemetry-exporter-otlp-common`, which dependency
   scanners may flag for network access.
+- The request and session implementations moved to the private `flasgo._request` and `flasgo._session` modules, so
+  the `flasgo.request` and `flasgo.session` proxies no longer depend on import order. `from flasgo.request import
+  Request` and `from flasgo.session import Session` still work, and `flasgo.request` and `flasgo.session` still re-export
+  their other public names. Code that imported underscore-prefixed helpers from those modules, monkeypatched names on
+  them, or relied on `Request.__module__ == "flasgo.request"` must switch to the private modules. Signed session
+  cookies are unaffected.
 
 ### Fixed
 

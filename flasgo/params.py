@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, is_dataclass, replace
 from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
 
-from .request import Request
+from ._request import Request
 from .response import HTTP_TOKEN_RE
 from .routing import Endpoint, _route_parameter_names
 

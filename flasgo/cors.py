@@ -4,7 +4,7 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-from .request import Request
+from ._request import Request
 from .response import HTTP_TOKEN_RE, Response
 
 _DNS_HOST_RE = re.compile(

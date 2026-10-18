@@ -2,9 +2,9 @@ import json
 import re
 import secrets
 
+from ._session import Session
 from .contracts import project_response
 from .exceptions import HTTPException
-from .session import Session
 from .stores import SessionStore, StoreUnavailable
 from .validation import ValidationBudget
 

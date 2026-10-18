@@ -526,7 +526,7 @@ Flasgo keeps each framework concern in a small module so new contributors can ch
 
 - `flasgo/app.py`: ASGI entrypoint, request dispatch, middleware, routing integration, sessions, auth checks, rate-limit enforcement, and error handling.
 - `flasgo/routing.py`: Flask-style path parsing and route matching.
-- `flasgo/request.py`: request headers, cookies, query strings, body parsing, JSON, and forms.
+- `flasgo/_request.py`: request headers, cookies, query strings, body parsing, JSON, and forms.
 - `flasgo/response.py`: response objects, response coercion, redirects, JSON, templates, and header validation.
 - `flasgo/websockets.py`: WebSocket state, messages, close handling, and protocol limits.
 - `flasgo/background.py`: post-response best-effort task execution.
@@ -538,7 +538,8 @@ Flasgo keeps each framework concern in a small module so new contributors can ch
 - `flasgo/cors.py`: validated route CORS policies, preflight handling, and response-header generation.
 - `flasgo/ratelimit.py`: route decorator metadata and the in-process sliding-window limiter.
 - `flasgo/auth.py`: users, auth backends, permissions, and bearer-token helpers.
-- `flasgo/session.py`: signed session serialization.
+- `flasgo/_session.py`: signed session serialization. `flasgo/request.py` and `flasgo/session.py` only re-export
+  their public names so `from flasgo.request import Request` keeps working.
 - `flasgo/staticfiles.py`: static file resolution and safe file serving.
 - `flasgo/templating.py`: Jinja environment setup and template loading protections.
 - `flasgo/testing.py`: synchronous and async ASGI test client.

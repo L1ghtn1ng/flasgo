@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 from uuid import UUID
 
-from .request import FormData, UploadedFile
+from ._request import FormData, UploadedFile
 
 type LocationPart = str | int
 

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .request import Request
+from ._request import Request
 from .response import Response
 
 type RateLimitKeyFunc = Callable[[Request], str | None]

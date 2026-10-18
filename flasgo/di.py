@@ -4,6 +4,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from types import TracebackType
 from typing import Any, cast, override
 
+from ._request import Request
 from .params import (
     Depends,
     EndpointPlan,
@@ -13,7 +14,6 @@ from .params import (
     binding_wire_name,
     compile_endpoint_plan,
 )
-from .request import Request
 from .validation import (
     FormValidationError,
     RequestValidationError,
@@ -287,7 +287,7 @@ async def _resolve_form(
     if not await request.body():
         if not binding.required:
             return binding.default
-        from .request import FormData
+        from ._request import FormData
 
         raise FormValidationError(
             (ValidationIssue(("form",), "missing", "Form data is required."),),

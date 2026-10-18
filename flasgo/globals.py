@@ -1,15 +1,20 @@
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
+# The proxies below share names with the public `flasgo.request` and `flasgo.session` modules. Python binds a submodule
+# onto its package the first time it loads, so load them here, before `flasgo/__init__.py` can bind the proxies; a later
+# `import flasgo.request` then finds the module already loaded and leaves `flasgo.request` pointing at the proxy.
+from . import request as _request_module  # noqa: F401
+from . import session as _session_module  # noqa: F401
 from .app import request as _get_request
 from .app import session as _get_session
 from .app import user as _get_user
 from .response import Response
 
 if TYPE_CHECKING:
+    from ._request import Request
+    from ._session import Session
     from .auth import User
-    from .request import Request
-    from .session import Session
 
 
 class _ContextProxy[T]:

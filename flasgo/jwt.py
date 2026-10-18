@@ -4,8 +4,8 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from ._request import Request
 from .auth import AuthBackend, AuthResult, User, extract_bearer_token, set_auth_backend_openapi_scheme
-from .request import Request
 
 _RESERVED_CLAIMS = frozenset({"aud", "exp", "iat", "iss", "nbf", "sub"})
 # RFC 6749 section 3.3 scope-token: printable ASCII except space, double quote, and backslash.

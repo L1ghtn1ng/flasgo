@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, Self, runtime_checkable
 from urllib.parse import urlsplit
 
-from .request import Request
+from ._request import Request
 
 
 @dataclass(slots=True)
