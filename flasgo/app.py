@@ -1856,12 +1856,15 @@ class Flasgo(RouteDecorators):
 
     def _match_route(self, path: str, method: str) -> tuple[MatchResult | None, set[str]]:
         allowed_methods: set[str] = set()
+        upper_method = method.upper()
         for route in self._routes:
-            result = route.match(path, method)
-            if result is not None:
-                # Allowed methods only matter for the 405 response when nothing matched.
-                return result, set()
-            if route.path_matches(path):
+            if upper_method in route.methods:
+                result = route.match(path, method)
+                if result is not None:
+                    # Allowed methods only matter for the 405 response when nothing matched.
+                    return result, set()
+            # A method-matching route that failed above cannot match the path, so skip re-matching it.
+            elif route.path_matches(path):
                 allowed_methods.update(route.methods)
         return None, allowed_methods
 

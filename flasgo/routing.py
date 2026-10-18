@@ -2,6 +2,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
@@ -376,8 +377,24 @@ def _compile_program(raw_path: str) -> _GroupMatcher:
     program.append((_MATCH, None, None))
     instructions = tuple(program)
     slot_count = 2 * len(names)
+    # Cheap necessary conditions reject most paths before the Python matcher runs: only a path
+    # converter can contain "/", and every converter consumes at least one character.
+    literals = _PARAM_PATTERN.sub("", raw_path)
+    matches = list(_PARAM_PATTERN.finditer(raw_path))
+    prefix = raw_path[: matches[0].start()]
+    suffix = raw_path[matches[-1].end() :]
+    slashes = literals.count("/")
+    exact_slashes = all((match.group("converter") or "str") != "path" for match in matches)
+    min_length = len(literals) + len(matches)
 
+    # Dispatch, CORS, and telemetry may look up the same path several times per request.
+    @lru_cache(maxsize=8)
     def match_program(path: str) -> dict[str, str] | None:
+        if len(path) < min_length or not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        path_slashes = path.count("/")
+        if path_slashes < slashes or (exact_slashes and path_slashes != slashes):
+            return None
         slots = _run_program(instructions, slot_count, path)
         if slots is None:
             return None
@@ -394,12 +411,12 @@ def _run_program(program: tuple[_Instruction, ...], slot_count: int, text: str) 
     """
     end = len(text)
     width = end + 1
-    visited: set[int] = set()
+    visited = bytearray(len(program) * width)
     stack: list[tuple[int, int, tuple[int, ...]]] = [(0, 0, (-1,) * slot_count)]
     while stack:
         pc, pos, slots = stack.pop()
-        while (key := pc * width + pos) not in visited:
-            visited.add(key)
+        while not visited[key := pc * width + pos]:
+            visited[key] = 1
             kind, first, second = program[pc]
             if kind == _CHAR:
                 if pos == end or not first(text[pos]):

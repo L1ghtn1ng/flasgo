@@ -7,6 +7,7 @@ from typing import Any, cast, get_type_hints
 import pytest
 
 import flasgo.app as app_module
+import flasgo.routing as routing_module
 import flasgo.streaming as streaming_module
 from flasgo import (
     Blueprint,
@@ -166,10 +167,35 @@ def test_overlapping_converters_match_in_bounded_time() -> None:
 
     client = app.test_client()
     started = time.perf_counter()
+    # The first path fails the literal-suffix prefilter; the others reach the bounded matcher.
     assert client.get("/" + "-" * 4000 + "/x").status_code == 404
+    assert client.get("/" + "-" * 12000 + "/end").status_code == 200
+    assert client.get("/a-b-c-" + "x" * 12000 + "/end").status_code == 200
+    assert client.get("/" + "x" * 12000 + "/end").status_code == 404
     assert time.perf_counter() - started < 2
     # Greedy captures match what the equivalent regex would return.
     assert client.get("/a-b-c-d-e/end").text == "a-b|c|d|e"
+
+
+def test_route_lookup_runs_each_overlapping_matcher_once_per_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """405 detection skips re-matching, prefilters reject short paths, and repeat lookups hit the cache."""
+    calls: list[str] = []
+    original = routing_module._run_program
+
+    def counting(program: Any, slot_count: int, text: str) -> Any:
+        calls.append(text)
+        return original(program, slot_count, text)
+
+    monkeypatch.setattr(routing_module, "_run_program", counting)
+    app = Flasgo()
+    app.post("/<a>-<b>/end")(lambda a, b: a + b)
+    app.get("/<a>-<b>-<c>/end")(lambda a, b, c: a + b + c)
+
+    client = app.test_client()
+    assert client.get("/x-y/end").status_code == 405
+    assert client.get("/x-y/end").status_code == 405
+    # Only the POST route reaches the matcher (the GET route's prefilter rejects the path), and only once.
+    assert calls == ["/x-y/end"]
 
 
 @pytest.mark.parametrize(
