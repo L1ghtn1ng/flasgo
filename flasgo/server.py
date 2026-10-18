@@ -5,7 +5,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -206,7 +206,7 @@ def _stop_reload_child(process: subprocess.Popen[bytes], *, grace_seconds: float
 
 
 @contextmanager
-def _cancel_on_sigterm() -> Iterator[None]:
+def _cancel_on_sigterm() -> Generator[None]:
     """Turn SIGTERM (docker stop, IDE stop buttons) into cancellation so reload cleanup runs."""
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
@@ -224,7 +224,7 @@ def _cancel_on_sigterm() -> Iterator[None]:
 
 
 @contextmanager
-def _reload_environment(reload_dirs: Sequence[str | Path] | None) -> Iterator[tuple[tuple[str, ...], str]]:
+def _reload_environment(reload_dirs: Sequence[str | Path] | None) -> Generator[tuple[tuple[str, ...], str]]:
     watch_paths = tuple(str(resolve_reload_dir(path)) for path in (reload_dirs or (Path.cwd(),)))
     command = build_reload_command()
     previous = os.environ.get(_RELOAD_ENV)

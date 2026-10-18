@@ -7,7 +7,7 @@ import secrets
 import sys
 import time
 from annotationlib import Format
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -17,6 +17,8 @@ from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints, override
 from uuid import uuid4
 
+from ._request import Request, scope_header_values
+from ._session import Session, SessionSigner
 from .auth import (
     AuthBackend,
     AuthIdentity,
@@ -55,7 +57,6 @@ from .ratelimit import (
     rate_limit_success_headers,
 )
 from .registration import RouteDecorators, route_methods
-from .request import Request, scope_header_values
 from .response import HTTP_TOKEN_RE, Response, ResponseValue, to_response
 from .routing import (
     Endpoint,
@@ -78,7 +79,6 @@ from .security import (
 )
 from .server import run_dev_server
 from .server_sessions import ServerSideSessions
-from .session import Session, SessionSigner
 from .settings import SettingsInput, load_settings, validate_app_config
 from .ssrf import SSRFConfig, SSRFGuard, SSRFResolvedURL
 from .staticfiles import StaticDirectory, build_static_response, resolve_static_directory
@@ -1306,7 +1306,7 @@ class Flasgo(RouteDecorators):
         return result
 
     @contextmanager
-    def override_dependencies(self, overrides: Mapping[Provider, Provider]) -> Iterator[None]:
+    def override_dependencies(self, overrides: Mapping[Provider, Provider]) -> Generator[None]:
         """
         Temporarily override dependency providers within the current execution context.
 

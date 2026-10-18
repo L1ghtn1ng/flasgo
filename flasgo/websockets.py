@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
-from .request import _reject_json_constant, parse_query_params
+from ._request import _reject_json_constant, parse_query_params
 from .response import _validate_set_cookie
 from .types import Message, Receive, Scope, Send
 
@@ -14,8 +14,8 @@ _SUBPROTOCOL_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _SENDABLE_CLOSE_CODES = frozenset({1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014})
 
 if TYPE_CHECKING:
+    from ._session import Session
     from .auth import User
-    from .session import Session
 
 
 class WebSocketDisconnect(Exception):

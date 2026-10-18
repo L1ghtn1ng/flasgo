@@ -2,8 +2,8 @@ import json
 import math
 from uuid import uuid4
 
+from ._request import Request
 from .ratelimit import RateLimitDecision, RateLimitRule, rate_limit_key
-from .request import Request
 from .stores import RedisStore, StoreUnavailable
 
 _LIMIT_SCRIPT = """

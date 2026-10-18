@@ -6,7 +6,7 @@ from pathlib import Path
 
 from jinja2 import Environment, Template, TemplateError
 
-from .request import Request
+from ._request import Request
 from .response import Response
 
 _DEBUG_ENVIRONMENT_KEYS = frozenset(

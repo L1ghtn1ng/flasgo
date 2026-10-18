@@ -3,7 +3,7 @@ import inspect
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -54,7 +54,7 @@ class _BackgroundObservation:
                 self.pending = 0
 
     @contextmanager
-    def activate(self) -> Iterator[None]:
+    def activate(self) -> Generator[None]:
         """Bind this response observation to task execution without sharing it across requests."""
         token = _observation.set(self)
         try:

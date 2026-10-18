@@ -8,8 +8,8 @@ from stat import S_ISREG
 from typing import BinaryIO, cast, override
 
 from ._paths import require_directory, safe_relative_path
+from ._request import Request
 from .exceptions import HTTPException
-from .request import Request
 from .response import Response
 from .types import Send
 

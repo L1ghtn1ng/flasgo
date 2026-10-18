@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import subprocess
+import sys
 from collections import deque
 
 import pytest
@@ -668,6 +670,25 @@ def test_flask_style_request_proxy_and_jsonify() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"method": "GET", "path": "/inspect"}
+
+
+def test_importing_request_and_session_modules_keeps_the_proxies() -> None:
+    """``import flasgo.request`` after ``import flasgo`` must not replace the ``flasgo.request`` proxy with the module."""
+    script = """
+import flasgo
+import flasgo.request
+import flasgo.session
+from flasgo.globals import request, session
+from flasgo.request import FormData, Request, UploadedFile
+from flasgo.session import Session, SessionSigner
+
+assert flasgo.request is request, flasgo.request
+assert flasgo.session is session, flasgo.session
+assert (Request, FormData, UploadedFile, Session) == (flasgo.Request, flasgo.FormData, flasgo.UploadedFile, flasgo.Session)
+assert SessionSigner.__module__ == "flasgo._session"
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_settings_mapping_applies_security_config() -> None:

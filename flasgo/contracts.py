@@ -6,8 +6,8 @@ from enum import Enum
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 from uuid import UUID
 
+from ._request import Request
 from .params import _contains_forward_ref
-from .request import Request
 from .response import Response, ResponseValue, to_response
 from .validation import (
     RequestValidationError,

@@ -590,6 +590,7 @@ def test_background_tasks_added_during_execution_are_tracked(synchronous: bool) 
 def test_authentication_execution_is_separate_from_rejection(outcome: str) -> None:
     """Separate backend execution success from credential and permission denials."""
     from flasgo import IsAuthenticated, User
+    from flasgo.auth import PermissionLike
 
     app = _app(LOG_SECURITY_EVENTS=False)
 
@@ -602,7 +603,7 @@ def test_authentication_execution_is_separate_from_rejection(outcome: str) -> No
         return User(id="private-user-id", is_authenticated=True) if outcome in {"authenticated", "forbidden"} else None
 
     app.register_auth_backend("private-backend-name", backend)
-    permissions = [IsAuthenticated()]
+    permissions: list[PermissionLike] = [IsAuthenticated()]
     if outcome == "forbidden":
         permissions.append(lambda req, user: False)
 
