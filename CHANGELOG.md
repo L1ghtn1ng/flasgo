@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `flasgo[jwt]` extra now pins PyJWT 2.15.1 (previously 2.13.0).
+- `jwt_backend()` and `encode_jwt()` now raise `ValueError` at configuration time for secrets that PyJWT refuses as
+  HMAC keys (PEM, SSH, DER, or JWK-shaped values). Previously the backend was created anyway and then rejected every
+  token.
+
+### Fixed
+
+- With PyJWT 2.14, a correctly signed token whose `exp`, `nbf`, or `iat` overflows an integer (for example `1e400`)
+  produced HTTP 500 instead of a 401 Bearer challenge.
+
 ## [0.10.0] - 2026-09-26
 
 ### Upgrading from 0.9.1

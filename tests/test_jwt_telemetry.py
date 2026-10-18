@@ -77,6 +77,40 @@ def test_jwt_backend_rejects_weak_secrets_and_reserved_claim_overrides() -> None
         encode_jwt("alice", _JWT_SECRET, issuer="issuer", audience="audience", additional_claims={"sub": "mallory"})
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "-----BEGIN PUBLIC KEY-----\n" + "A" * 40 + "\n-----END PUBLIC KEY-----\n",
+        "ssh-rsa " + "A" * 40,
+        '{"kty": "oct", "k": "' + "A" * 40 + '"}',
+    ],
+)
+def test_jwt_helpers_reject_secrets_pyjwt_refuses_as_hmac_keys(secret: str) -> None:
+    """PyJWT would reject these on every decode, so a misconfigured backend must fail at startup instead."""
+    with pytest.raises(ValueError, match="not usable as an HMAC key"):
+        jwt_backend(secret, issuer="issuer", audience="audience")
+    with pytest.raises(ValueError, match="not usable as an HMAC key"):
+        encode_jwt("alice", secret, issuer="issuer", audience="audience")
+
+
+@pytest.mark.parametrize("claim", ["exp", "nbf", "iat"])
+def test_jwt_backend_rejects_overflowing_time_claims(claim: str) -> None:
+    """PyJWT 2.14 raises a bare OverflowError for these; it must still be a 401, not a 500."""
+    app = Flasgo()
+    app.register_auth_backend("jwtAuth", jwt_backend(_JWT_SECRET, issuer="issuer", audience="audience"))
+
+    @app.get("/me")
+    @app.authorize(IsAuthenticated(), backend="jwtAuth")
+    def me() -> str:
+        return "ok"
+
+    claims = {"sub": "alice", "iss": "issuer", "aud": "audience", "iat": 1, "exp": 4_102_444_800, claim: float("inf")}
+    # json.dumps writes inf as Infinity, which Python's json.loads parses back to float('inf').
+    token = jwt.encode(claims, _JWT_SECRET, algorithm="HS256")
+    response = app.test_client().get("/me", headers={"authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
 @pytest.mark.parametrize("scope", ["read admin", "read\tadmin", 'say"hi"', "back\\slash", "caf\u00e9"])
 def test_encode_jwt_rejects_scopes_that_would_split_or_break_the_scope_claim(scope: str) -> None:
     """The scope claim is space-delimited, so "read admin" would otherwise decode as the two scopes read and admin."""
