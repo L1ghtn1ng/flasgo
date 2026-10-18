@@ -15,7 +15,6 @@ from .blueprints import Blueprint
 from .contracts import ResponseValidationError
 from .cors import CORSConfig
 from .exceptions import HTTPException, abort
-from .globals import current_user, jsonify, redirect, request, session, url_for
 from .jwt import encode_jwt, jwt_backend
 from .logging import FlasgoJSONFormatter, configure_logging
 from .params import Body, Cookie, Depends, Form, Header, Query
@@ -48,6 +47,11 @@ from .testing import (
 from .testing_stream import AsyncTestStream
 from .validation import FormValidationError, RequestValidationError, ValidationIssue
 from .websockets import WebSocket, WebSocketDisconnect, WebSocketException
+
+# isort: split
+# Last on purpose: importing from the `.request` and `.session` submodules binds those names on the package, so the
+# context proxies must be bound after them.
+from .globals import current_user, jsonify, redirect, request, session, url_for
 
 __all__ = [
     "AllowAny",

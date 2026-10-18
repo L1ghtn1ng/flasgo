@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
@@ -272,7 +272,7 @@ class Metrics:
         self.event_loop_running.set(0)
 
     @contextmanager
-    def backend_operation(self, component: str, operation: str) -> Iterator[None]:
+    def backend_operation(self, component: str, operation: str) -> Generator[None]:
         """Observe one framework call, preserving its result and exception."""
         started = time.perf_counter()
         outcome = "success"

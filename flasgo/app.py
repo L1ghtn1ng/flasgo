@@ -7,7 +7,7 @@ import secrets
 import sys
 import time
 from annotationlib import Format
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1306,7 +1306,7 @@ class Flasgo(RouteDecorators):
         return result
 
     @contextmanager
-    def override_dependencies(self, overrides: Mapping[Provider, Provider]) -> Iterator[None]:
+    def override_dependencies(self, overrides: Mapping[Provider, Provider]) -> Generator[None]:
         """
         Temporarily override dependency providers within the current execution context.
 
