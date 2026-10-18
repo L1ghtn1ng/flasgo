@@ -49,8 +49,8 @@ from .validation import FormValidationError, RequestValidationError, ValidationI
 from .websockets import WebSocket, WebSocketDisconnect, WebSocketException
 
 # isort: split
-# Last on purpose: importing from the `.request` and `.session` submodules binds those names on the package, so the
-# context proxies must be bound after them.
+# Last on purpose: the context proxies share names with the `.request` and `.session` submodules. Type checkers treat
+# the submodule imports above as rebinding those names, and at runtime the first load of a submodule does the same.
 from .globals import current_user, jsonify, redirect, request, session, url_for
 
 __all__ = [
