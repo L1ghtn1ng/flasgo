@@ -67,8 +67,8 @@ dev = [
   "prometheus-client==0.26.0",
   "pytest==9.1.1",
   "redis==8.1.0",
-  "ruff==0.16.6",
-  "ty==0.0.79",
+  "ruff==0.17.0",
+  "ty==0.0.86",
 ]
 
 [tool.hatch.build.targets.sdist]
