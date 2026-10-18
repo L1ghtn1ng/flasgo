@@ -4,8 +4,7 @@
 
 ### Changed
 
-- The `flasgo[jwt]` extra now accepts any PyJWT release from 2.14.0 up to, but not including, 3.0 (previously pinned
-  to 2.13.0). CI also runs the JWT tests against PyJWT 2.14.0.
+- The `flasgo[jwt]` extra now pins PyJWT 2.15.1 (previously 2.13.0).
 - `jwt_backend()` and `encode_jwt()` now raise `ValueError` at configuration time for secrets that PyJWT refuses as
   HMAC keys (PEM, SSH, DER, or JWK-shaped values). Previously the backend was created anyway and then rejected every
   token.
