@@ -2,6 +2,8 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
 
 type Endpoint = Callable[..., ResponseValue | Awaitable[ResponseValue]]
 type WebSocketEndpoint = Callable[..., Awaitable[None] | None]
+type _GroupMatcher = Callable[[str], dict[str, str] | None]
 
 _CONVERTERS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "str": (r"[^/]+", str),
@@ -85,12 +88,12 @@ class Route(_PathPattern):
     public: bool = False
     response_model: object = None
     route_id: str = field(init=False, repr=False)
-    _regex: re.Pattern[str] = field(init=False, repr=False)
+    _matcher: _GroupMatcher = field(init=False, repr=False)
     _casts: dict[str, Callable[[str], Any]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         _validate_route(self.raw_path, self.name)
-        self._regex, self._casts = _compile_path(self.raw_path)
+        self._matcher, self._casts = _compile_path(self.raw_path)
         # Stable identity for shared rate-limit buckets, computed once rather than per request.
         self.route_id = json.dumps([self.raw_path, sorted(self.methods)])
 
@@ -107,7 +110,7 @@ class Route(_PathPattern):
         """
         if method.upper() not in self.methods:
             return None
-        params = _match_path(path, self._regex, self._casts)
+        params = _match_path(path, self._matcher, self._casts)
         if params is None:
             return None
         return MatchResult(
@@ -133,7 +136,7 @@ class Route(_PathPattern):
         Returns:
                 bool: `True` if the path matches and all parameters can be converted, `False` otherwise.
         """
-        return _match_path(path, self._regex, self._casts) is not None
+        return _match_path(path, self._matcher, self._casts) is not None
 
 
 @dataclass(slots=True)
@@ -143,15 +146,15 @@ class WebSocketRoute(_PathPattern):
     name: str | None = None
     public: bool = False
     websocket_parameter: str | None = None
-    _regex: re.Pattern[str] = field(init=False, repr=False)
+    _matcher: _GroupMatcher = field(init=False, repr=False)
     _casts: dict[str, Callable[[str], Any]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         _validate_route(self.raw_path, self.name)
-        self._regex, self._casts = _compile_path(self.raw_path)
+        self._matcher, self._casts = _compile_path(self.raw_path)
 
     def match(self, path: str) -> WebSocketMatchResult | None:
-        params = _match_path(path, self._regex, self._casts)
+        params = _match_path(path, self._matcher, self._casts)
         if params is None:
             return None
         return WebSocketMatchResult(
@@ -274,9 +277,21 @@ def _route_automaton(path: str, alphabet: frozenset[str]) -> list[list[tuple[fro
     return edges
 
 
-def _compile_path(
-    raw_path: str,
-) -> tuple[re.Pattern[str], dict[str, Callable[[str], Any]]]:
+_DIGITS = frozenset("0123456789")
+# Character predicates mirroring each converter's regex class.
+_CONVERTER_ADMITS: dict[str, Callable[[str], bool]] = {
+    "str": "/".__ne__,
+    "int": _DIGITS.__contains__,
+    "float": (_DIGITS | {"."}).__contains__,
+    "path": "\n".__ne__,
+}
+
+# Opcodes for the linear-time matcher used by routes whose converters can overlap.
+_CHAR, _SPLIT, _SAVE, _MATCH = range(4)
+type _Instruction = tuple[int, Any, Any]
+
+
+def _compile_path(raw_path: str) -> tuple[_GroupMatcher, dict[str, Callable[[str], Any]]]:
     regex_chunks: list[str] = ["^"]
     casts: dict[str, Callable[[str], Any]] = {}
     cursor = 0
@@ -296,20 +311,142 @@ def _compile_path(
 
     regex_chunks.append(re.escape(raw_path[cursor:]))
     regex_chunks.append("$")
-    return re.compile("".join(regex_chunks)), casts
+    if not _converters_can_overlap(raw_path):
+        regex = re.compile("".join(regex_chunks))
+
+        def match_regex(path: str) -> dict[str, str] | None:
+            regex_match = regex.fullmatch(path)
+            return None if regex_match is None else regex_match.groupdict()
+
+        return match_regex, casts
+    return _compile_program(raw_path), casts
+
+
+def _converters_can_overlap(raw_path: str) -> bool:
+    """Report whether adjacent converters can trade characters, making backtracking polynomial.
+
+    A converter followed by a separator containing a character it rejects (``/`` after
+    ``str``, ``-`` after ``int``) has only one viable end, so the regex stays linear.
+    """
+    matches = list(_PARAM_PATTERN.finditer(raw_path))
+    for left, right in pairwise(matches):
+        admits = _CONVERTER_ADMITS[left.group("converter") or "str"]
+        if all(admits(char) for char in raw_path[left.end() : right.start()]):
+            return True
+    return False
+
+
+def _compile_program(raw_path: str) -> _GroupMatcher:
+    """Compile a route into a matcher with the regex's greedy captures and O(path x route) cost."""
+    program: list[_Instruction] = []
+    names: list[str] = []
+
+    def char(predicate: Callable[[str], bool]) -> None:
+        program.append((_CHAR, predicate, None))
+
+    def repeat(predicate: Callable[[str], bool]) -> int:
+        """Append ``predicate+`` (greedy) and return the index of its loop split."""
+        start = len(program)
+        char(predicate)
+        program.append((_SPLIT, start, start + 2))
+        return start + 1
+
+    cursor = 0
+    for match in _PARAM_PATTERN.finditer(raw_path):
+        for literal_char in raw_path[cursor : match.start()]:
+            char(literal_char.__eq__)
+        cursor = match.end()
+        converter = match.group("converter") or "str"
+        program.append((_SAVE, 2 * len(names), None))
+        names.append(match.group("name"))
+        if converter == "float":
+            # [0-9]+(?:\.[0-9]+)? -- prefer more digits, then the fraction, then stopping.
+            repeat(_DIGITS.__contains__)
+            fraction_split = len(program)
+            program.append((_SPLIT, fraction_split + 1, None))
+            char(".".__eq__)
+            loop = repeat(_DIGITS.__contains__)
+            end = len(program)
+            program[fraction_split] = (_SPLIT, fraction_split + 1, end)
+            program[loop] = (_SPLIT, loop - 1, end)
+        else:
+            repeat(_CONVERTER_ADMITS[converter])
+        program.append((_SAVE, 2 * len(names) - 1, None))
+    for literal_char in raw_path[cursor:]:
+        char(literal_char.__eq__)
+    program.append((_MATCH, None, None))
+    instructions = tuple(program)
+    slot_count = 2 * len(names)
+    # Cheap necessary conditions reject most paths before the Python matcher runs: only a path
+    # converter can contain "/", and every converter consumes at least one character.
+    literals = _PARAM_PATTERN.sub("", raw_path)
+    matches = list(_PARAM_PATTERN.finditer(raw_path))
+    prefix = raw_path[: matches[0].start()]
+    suffix = raw_path[matches[-1].end() :]
+    slashes = literals.count("/")
+    exact_slashes = all((match.group("converter") or "str") != "path" for match in matches)
+    min_length = len(literals) + len(matches)
+
+    # Dispatch, CORS, and telemetry may look up the same path several times per request.
+    @lru_cache(maxsize=8)
+    def match_program(path: str) -> dict[str, str] | None:
+        if len(path) < min_length or not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        path_slashes = path.count("/")
+        if path_slashes < slashes or (exact_slashes and path_slashes != slashes):
+            return None
+        slots = _run_program(instructions, slot_count, path)
+        if slots is None:
+            return None
+        return {name: path[slots[2 * index] : slots[2 * index + 1]] for index, name in enumerate(names)}
+
+    return match_program
+
+
+def _run_program(program: tuple[_Instruction, ...], slot_count: int, text: str) -> tuple[int, ...] | None:
+    """Backtrack in priority order, skipping (instruction, position) states already proven to fail.
+
+    Every loop consumes a character, so a state seen again was fully explored by the
+    LIFO stack and failed; each state therefore runs at most once.
+    """
+    end = len(text)
+    width = end + 1
+    visited = bytearray(len(program) * width)
+    stack: list[tuple[int, int, tuple[int, ...]]] = [(0, 0, (-1,) * slot_count)]
+    while stack:
+        pc, pos, slots = stack.pop()
+        while not visited[key := pc * width + pos]:
+            visited[key] = 1
+            kind, first, second = program[pc]
+            if kind == _CHAR:
+                if pos == end or not first(text[pos]):
+                    break
+                pc += 1
+                pos += 1
+            elif kind == _SPLIT:
+                stack.append((second, pos, slots))
+                pc = first
+            elif kind == _SAVE:
+                slots = (*slots[:first], pos, *slots[first + 1 :])
+                pc += 1
+            else:
+                if pos == end:
+                    return slots
+                break
+    return None
 
 
 def _match_path(
     path: str,
-    regex: re.Pattern[str],
+    matcher: _GroupMatcher,
     casts: dict[str, Callable[[str], Any]],
 ) -> dict[str, Any] | None:
-    regex_match = regex.fullmatch(path)
-    if regex_match is None:
+    groups = matcher(path)
+    if groups is None:
         return None
 
     params: dict[str, Any] = {}
-    for key, raw in regex_match.groupdict().items():
+    for key, raw in groups.items():
         try:
             params[key] = casts[key](raw)
         except ValueError, TypeError:

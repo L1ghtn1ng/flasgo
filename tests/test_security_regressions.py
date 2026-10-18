@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from typing import Any, cast, get_type_hints
@@ -6,6 +7,7 @@ from typing import Any, cast, get_type_hints
 import pytest
 
 import flasgo.app as app_module
+import flasgo.routing as routing_module
 import flasgo.streaming as streaming_module
 from flasgo import (
     Blueprint,
@@ -23,7 +25,7 @@ from flasgo import (
     session,
 )
 from flasgo.app import _request_head_size
-from flasgo.routing import routes_overlap
+from flasgo.routing import _compile_path, _match_path, routes_overlap
 from flasgo.security import SecurityConfig, build_set_cookie
 
 
@@ -152,6 +154,65 @@ def test_route_language_intersection(left: str, right: str, expected: bool) -> N
     """Cover converter repetition, optional decimals, embedded params, and Unicode literals."""
     assert routes_overlap(left, right) is expected
     assert routes_overlap(right, left) is expected
+
+
+def test_overlapping_converters_match_in_bounded_time() -> None:
+    """Keep adjacent same-segment converters linear; the plain regex took ~1 minute at 600 bytes."""
+    app = Flasgo()
+
+    @app.get("/<a>-<b>-<c>-<d>/end")
+    def parts(a: str, b: str, c: str, d: str) -> str:
+        """Echo each captured part to pin the greedy split."""
+        return f"{a}|{b}|{c}|{d}"
+
+    client = app.test_client()
+    started = time.perf_counter()
+    # The first path fails the literal-suffix prefilter; the others reach the bounded matcher.
+    assert client.get("/" + "-" * 4000 + "/x").status_code == 404
+    assert client.get("/" + "-" * 12000 + "/end").status_code == 200
+    assert client.get("/a-b-c-" + "x" * 12000 + "/end").status_code == 200
+    assert client.get("/" + "x" * 12000 + "/end").status_code == 404
+    assert time.perf_counter() - started < 2
+    # Greedy captures match what the equivalent regex would return.
+    assert client.get("/a-b-c-d-e/end").text == "a-b|c|d|e"
+
+
+def test_route_lookup_runs_each_overlapping_matcher_once_per_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """405 detection skips re-matching, prefilters reject short paths, and repeat lookups hit the cache."""
+    calls: list[str] = []
+    original = routing_module._run_program
+
+    def counting(program: Any, slot_count: int, text: str) -> Any:
+        calls.append(text)
+        return original(program, slot_count, text)
+
+    monkeypatch.setattr(routing_module, "_run_program", counting)
+    app = Flasgo()
+    app.post("/<a>-<b>/end")(lambda a, b: a + b)
+    app.get("/<a>-<b>-<c>/end")(lambda a, b, c: a + b + c)
+
+    client = app.test_client()
+    assert client.get("/x-y/end").status_code == 405
+    assert client.get("/x-y/end").status_code == 405
+    # Only the POST route reaches the matcher (the GET route's prefilter rejects the path), and only once.
+    assert calls == ["/x-y/end"]
+
+
+@pytest.mark.parametrize(
+    ("route", "path", "expected"),
+    [
+        ("/<int:a><int:b>", "/1234", {"a": 123, "b": 4}),
+        ("/<float:x>.<int:y>", "/1.5.2", {"x": 1.5, "y": 2}),
+        ("/<float:x>.<int:y>", "/1.2", {"x": 1.0, "y": 2}),
+        ("/<path:p>/<name>", "/a/b/c", {"p": "a/b", "name": "c"}),
+        ("/<path:p>-<int:n>", "/x-1/y-22", {"p": "x-1/y", "n": 22}),
+        ("/<a>.<float:f>", "/v.1.2.3", {"a": "v.1.2", "f": 3.0}),
+        ("/<a>-<b>", "/no-dash/", None),
+    ],
+)
+def test_overlapping_converters_keep_regex_captures(route: str, path: str, expected: dict[str, object] | None) -> None:
+    """Match greedy regex semantics, including float fractions and embedded separators."""
+    assert _match_path(path, *_compile_path(route)) == expected
 
 
 def test_cleanup_queue_overflow_is_explicit_and_pending_work_drains(monkeypatch: pytest.MonkeyPatch) -> None:

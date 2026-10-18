@@ -382,6 +382,7 @@ class Flasgo(RouteDecorators):
         if scope.get("type") in {"http", "websocket"}:
             oversized_head = _request_head_size(scope) > self.security.max_request_head_bytes
             scope[_OVERSIZED_HEAD] = oversized_head
+            _strip_root_path(scope)
             scope["request_id"] = uuid4().hex if oversized_head else self._request_id_for_scope(scope)
             if oversized_head:
                 if scope.get("type") == "http":
@@ -1432,8 +1433,9 @@ class Flasgo(RouteDecorators):
             url_path=url_path,
             cache_max_age=cache_max_age,
         )
+        # A root mount ("/") would otherwise register "//<path:filename>", which never matches.
         self.add_route(
-            f"{static_directory.url_path}/<path:filename>",
+            f"{static_directory.url_path.rstrip('/')}/<path:filename>",
             self._build_static_endpoint(static_directory),
             methods=("GET",),
             name=f"static:{static_directory.url_path}",
@@ -1854,12 +1856,15 @@ class Flasgo(RouteDecorators):
 
     def _match_route(self, path: str, method: str) -> tuple[MatchResult | None, set[str]]:
         allowed_methods: set[str] = set()
+        upper_method = method.upper()
         for route in self._routes:
-            result = route.match(path, method)
-            if result is not None:
-                # Allowed methods only matter for the 405 response when nothing matched.
-                return result, set()
-            if route.path_matches(path):
+            if upper_method in route.methods:
+                result = route.match(path, method)
+                if result is not None:
+                    # Allowed methods only matter for the 405 response when nothing matched.
+                    return result, set()
+            # A method-matching route that failed above cannot match the path, so skip re-matching it.
+            elif route.path_matches(path):
                 allowed_methods.update(route.methods)
         return None, allowed_methods
 
@@ -2165,6 +2170,18 @@ def _copy_session(current: Session) -> Session:
         _stored=current._stored,
         _rotate=current._rotate,
     )
+
+
+def _strip_root_path(scope: Scope) -> None:
+    """Make ``path`` relative to the mount point; ASGI servers include ``root_path`` in it.
+
+    URL generation adds ``root_path`` back, and a path outside the mount (older servers
+    that already strip it) is left unchanged.
+    """
+    root_path = str(scope.get("root_path", "")).rstrip("/")
+    path = str(scope.get("path", "/"))
+    if root_path and (path == root_path or path.startswith(f"{root_path}/")):
+        scope["path"] = path[len(root_path) :] or "/"
 
 
 def _request_head_size(scope: Scope) -> int:

@@ -179,7 +179,7 @@ class TestClient:
         self._mode: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
-        self._work_queue: queue.Queue[tuple[Coroutine[Any, Any, Any], Future[Any]] | None] | None = None
+        self._work_queue: queue.Queue[tuple[Coroutine[Any, Any, Any], contextvars.Context, Future[Any]] | None] | None = None
         self._lifespan_receive: asyncio.Queue[Message] | None = None
         self._lifespan_send: asyncio.Queue[Message] | None = None
         self._lifespan_task: asyncio.Task[None] | None = None
@@ -231,10 +231,11 @@ class TestClient:
         # Runner cancels leftover tasks and shuts down async generators and the default executor on exit.
         with asyncio.Runner() as runner:
             while (item := work_queue.get()) is not None:
-                coro, future = item
+                coro, context, future = item
                 try:
-                    # A fresh context per call keeps the isolation run_until_complete() gave each submission.
-                    future.set_result(runner.run(coro, context=contextvars.copy_context()))
+                    # Each call runs in a copy of the submitter's context: overrides set around a request
+                    # apply, and changes made by the request stay isolated as with run_until_complete().
+                    future.set_result(runner.run(coro, context=context))
                 except BaseException as exc:
                     future.set_exception(exc)
 
@@ -253,7 +254,8 @@ class TestClient:
             coro.close()
             raise RuntimeError("TestClient is not running.")
         future: Future[T] = Future()
-        self._work_queue.put((coro, future))
+        # Coroutine objects do not capture ContextVars, so take the caller's context here, not in the loop thread.
+        self._work_queue.put((coro, contextvars.copy_context(), future))
         return future.result(timeout=10)
 
     async def _start_lifespan(self) -> None:

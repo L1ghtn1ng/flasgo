@@ -181,7 +181,9 @@ def validate_form_model(
                 if raw_values:
                     raise _problem(("form", model_field.name), "type_error", "Expected an uploaded file.")
                 if file_origin in {list, set, tuple}:
-                    values[model_field.name] = _collection_value(file_origin, raw_files)
+                    values[model_field.name] = _file_collection_value(
+                        file_annotation, file_origin, raw_files, location=("form", model_field.name)
+                    )
                 elif len(raw_files) == 1 and file_annotation is UploadedFile:
                     values[model_field.name] = raw_files[0]
                 else:
@@ -204,7 +206,11 @@ def validate_form_model(
             )
     if issues:
         raise FormValidationError(issues, form)
-    return annotation(**values)
+    try:
+        return annotation(**values)
+    except (TypeError, ValueError) as exc:
+        # A model's __post_init__ may reject a combination of individually valid fields.
+        raise FormValidationError([ValidationIssue(("form",), "value_error", "Value is not valid for this model.")], form) from exc
 
 
 def to_jsonable(value: object) -> object:
@@ -391,6 +397,9 @@ def _validate_value(
             return None
         raise _problem(location, "type_error", "Expected null.")
     if is_dataclass(annotation) and isinstance(annotation, type):
+        if isinstance(value, annotation):
+            # Dependency providers hand back constructed models; rebuilding would copy managed resources.
+            return value
         if not isinstance(value, Mapping):
             raise _problem(location, "type_error", "Expected an object.")
         mapped_value = cast(Mapping[str, object], value)
@@ -727,6 +736,32 @@ def _uploaded_file_annotation(annotation: object) -> object | None:
     if origin in {list, set, tuple} and any(contains_uploaded_file(item) for item in args):
         return annotation
     return None
+
+
+def _file_collection_value(
+    annotation: object,
+    origin: object,
+    files: Sequence[UploadedFile],
+    *,
+    location: tuple[LocationPart, ...],
+) -> object:
+    """Apply a file collection's declared tuple length and member types before building it."""
+    args = get_args(annotation)
+    fixed_tuple = origin is tuple and bool(args) and not (len(args) == 2 and args[1] is Ellipsis)
+    if fixed_tuple and len(files) != len(args):
+        raise _problem(location, "tuple_length", f"Expected exactly {len(args)} items.")
+    item_type = args[0] if args else Any
+    for index in range(len(files)):
+        if not _accepts_uploaded_file(args[index] if fixed_tuple else item_type):
+            raise _problem((*location, index), "type_error", "Expected an uploaded file.")
+    return _collection_value(origin, files)
+
+
+def _accepts_uploaded_file(annotation: object) -> bool:
+    annotation = _unwrap_annotated(annotation)
+    if annotation in {UploadedFile, Any, object}:
+        return True
+    return get_origin(annotation) is Union and any(_accepts_uploaded_file(item) for item in get_args(annotation))
 
 
 def _collection_value(origin: object, values: Sequence[object]) -> object:
