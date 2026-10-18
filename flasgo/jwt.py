@@ -25,7 +25,7 @@ def jwt_backend(
 
     _validate_scope_claim(scope_claim)
     jwt = _load_pyjwt()
-    key = _validate_configuration(secret, issuer=issuer, audience=audience, leeway=leeway)
+    key = _validate_configuration(jwt, secret, issuer=issuer, audience=audience, leeway=leeway)
 
     async def backend(request: Request) -> AuthResult:
         token = extract_bearer_token(request.headers.get("authorization"))
@@ -47,7 +47,8 @@ def jwt_backend(
             scopes = _normalize_scopes(claims.get(scope_claim, ()))
             if scopes is None:
                 return AuthResult(user=None, challenge="Bearer")
-        except jwt.PyJWTError, TypeError, ValueError:
+        # PyJWT 2.14 leaks OverflowError (e.g. "exp": 1e400) and RecursionError (deeply nested payloads); 2.15 wraps both.
+        except jwt.PyJWTError, TypeError, ValueError, OverflowError, RecursionError:
             return AuthResult(user=None, challenge="Bearer")
         return AuthResult(
             user=User(id=subject, is_authenticated=True, scopes=scopes, data=dict(claims)),
@@ -76,7 +77,7 @@ def encode_jwt(
 
     _validate_scope_claim(scope_claim)
     jwt = _load_pyjwt()
-    key = _validate_configuration(secret, issuer=issuer, audience=audience, leeway=0)
+    key = _validate_configuration(jwt, secret, issuer=issuer, audience=audience, leeway=0)
     if not subject:
         raise ValueError("JWT subject must not be empty.")
     if expires_in <= 0:
@@ -107,6 +108,7 @@ def encode_jwt(
 
 
 def _validate_configuration(
+    jwt: Any,
     secret: str | bytes,
     *,
     issuer: str,
@@ -116,6 +118,11 @@ def _validate_configuration(
     key = secret.encode("utf-8") if isinstance(secret, str) else secret
     if len(key) < 32:
         raise ValueError("JWT HS256 secrets must contain at least 32 bytes.")
+    try:
+        # PyJWT rejects PEM, SSH, DER, and JWK-shaped HMAC secrets; fail at configuration time instead of on every request.
+        jwt.get_algorithm_by_name("HS256").prepare_key(key)
+    except jwt.InvalidKeyError as exc:
+        raise ValueError(f"JWT HS256 secret is not usable as an HMAC key: {exc}") from exc
     if not issuer:
         raise ValueError("JWT issuer must not be empty.")
     if not audience:

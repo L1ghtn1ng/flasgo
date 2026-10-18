@@ -146,6 +146,10 @@ jobs:
       - name: Run tests
         run: uv run --frozen pytest
 
+      - name: Run JWT tests against the oldest supported PyJWT
+        # Keep in sync with the lower bound of the `jwt` extra in pyproject.toml.
+        run: uv run --frozen --with PyJWT==2.14.0 pytest tests/test_jwt_telemetry.py
+
   test-next-python:
     # Early warning for the next CPython release; failures here do not block merges.
     name: Tests (Python 3.15-dev, non-blocking)
