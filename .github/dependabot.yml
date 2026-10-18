@@ -25,5 +25,5 @@ updates:
   patterns: ["*"]
   multi-ecosystem-group: all-dependencies
   allow:
-  - dependency-type: direct
-  - dependency-type: indirect
+  # Includes project dependencies, optional extras, dependency groups, and transitive dependencies.
+  - dependency-type: all
