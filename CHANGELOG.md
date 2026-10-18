@@ -5,6 +5,10 @@
 ### Changed
 
 - The `flasgo[jwt]` extra now pins PyJWT 2.15.1 (previously 2.13.0).
+- The `flasgo[db]` extra now pins Alembic 1.20.0 (previously 1.19.2). Alembic 1.20 requires SQLAlchemy 2.0 or newer,
+  so projects still on SQLAlchemy 1.4 must upgrade it before using `flasgo db`.
+- The `flasgo[otel]` extra now pins the OpenTelemetry API, SDK, and OTLP HTTP exporter at 1.45.1 and the ASGI
+  instrumentation at 0.66b1 (previously 1.44.0 and 0.65b0).
 - `jwt_backend()` and `encode_jwt()` now raise `ValueError` at configuration time for secrets that PyJWT refuses as
   HMAC keys (PEM, SSH, DER, or JWK-shaped values). Previously the backend was created anyway and then rejected every
   token.
