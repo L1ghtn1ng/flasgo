@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-08
+
+### Changed
+
+- Updated Uvicorn from 0.52.4 to 0.54.0 and watchfiles from 1.2.0 to 1.3.0.
+- Refreshed the lockfile's transitive certifi dependency from 2026.7.22 to 2026.10.18.
+- Updated pinned GitHub Actions: `astral-sh/setup-uv` from 10.1.0 to 10.3.0,
+  `step-security/harden-runner` from 2.21.1 to 2.22.2, `github/codeql-action` from 4.38.0 to 4.39.0,
+  `ossf/scorecard-action` from 2.4.4 to 2.5.0, and `actions/upload-artifact` from 7.0.1 to 7.0.2.
+
 ## [0.11.0] - 2026-10-18
 
 ### Upgrading from 0.10.0

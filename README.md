@@ -5,7 +5,8 @@ Flasgo is an async-first Python web framework designed as a hybrid of:
 - Flask ergonomics: decorator-based routing, minimal ceremony, quick iteration.
 - Django security defaults: CSRF protection, host validation, secure headers, signed sessions.
 
-The current framework release is `0.11.0`. See the [release notes and upgrade guidance](CHANGELOG.md#0110---2026-10-18).
+The current framework release is `0.11.1`. See the [release notes](CHANGELOG.md#0111---2026-11-08) and
+[upgrade guidance for 0.11](CHANGELOG.md#0110---2026-10-18).
 
 ## Project goals
 
