@@ -814,6 +814,36 @@ def test_db_runs_real_alembic_with_only_pyproject_configuration(
         cli_module.main(["db", "init", "--template", "pyproject"])
 
 
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.usefixtures("restore_logging_config")
+def test_db_shows_alembic_messages_without_alembic_ini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], configured: bool
+) -> None:
+    pytest.importorskip("alembic")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+    assert cli_module.main(["db", "init", "--template", "pyproject"]) == 0
+    # Without alembic.ini, env.py never calls fileConfig, so nothing would configure Alembic's logger.
+    (tmp_path / "alembic.ini").unlink()
+    env = tmp_path / "migrations" / "env.py"
+    env.write_text(env.read_text(encoding="utf-8").replace('config.get_main_option("sqlalchemy.url")', '"sqlite://"'), encoding="utf-8")
+    assert cli_module.main(["db", "revision", "-m", "first"]) == 0
+    root = logging.getLogger()
+    # pytest installs its own capture handlers on the root logger; a real CLI process starts with none.
+    existing = [logging.NullHandler()] if configured else []
+    monkeypatch.setattr(root, "handlers", existing)
+    capsys.readouterr()
+
+    assert cli_module.main(["db", "stamp", "head", "--sql"]) == 0
+    err = capsys.readouterr().err
+    if configured:
+        # Logging set up by the caller is left alone.
+        assert root.handlers == existing
+        assert "Running stamp_revision" not in err
+    else:
+        assert "INFO  [alembic.runtime.migration] Running stamp_revision  -> " in err
+
+
 def _write_project(tmp_path: Path, tool_flasgo: str) -> None:
     (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "demo"\n\n{tool_flasgo}', encoding="utf-8")
     (tmp_path / "service_app.py").write_text(

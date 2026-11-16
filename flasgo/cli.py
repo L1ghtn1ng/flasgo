@@ -2,6 +2,7 @@ import argparse
 import importlib
 import importlib.metadata
 import json
+import logging
 import os
 import re
 import secrets
@@ -569,7 +570,10 @@ def _db_command(args: argparse.Namespace) -> int:
             raise SystemExit(f"Alembic: {exc}") from None
         print(_db_init_next_steps(files.ini, directory, args))
         return 0
-    config = config_type(**_alembic_config_kwargs(files))
+    config_kwargs = _alembic_config_kwargs(files)
+    if config_kwargs["file_"] is None:
+        _configure_default_alembic_logging()
+    config = config_type(**config_kwargs)
     try:
         _DB_ACTIONS[args.db_command](command, config, args)
     except _alembic_command_error() as exc:
@@ -582,6 +586,24 @@ def _db_command(args: argparse.Namespace) -> int:
             raise
         raise SystemExit(message) from None
     return 0
+
+
+def _configure_default_alembic_logging() -> None:
+    """
+    Show Alembic's progress messages when no alembic.ini supplies a logging configuration.
+
+    Alembic keeps logging settings in alembic.ini even for pyproject templates, and env.py only calls fileConfig when
+    that file is in use, so a pyproject-only setup would run stamp and upgrade silently. This mirrors the ini's
+    defaults: alembic at INFO, everything else at WARNING, on stderr. Logging configured elsewhere is left alone.
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)-5.5s [%(name)s] %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+    logging.getLogger("alembic").setLevel(logging.INFO)
 
 
 # The sqlalchemy.url that `alembic init` writes into alembic.ini for every template.
