@@ -33,6 +33,9 @@
   and used on other machines.
 - `flasgo db` reports Alembic errors, such as running `init` in a directory that is not empty, as a one-line message
   with exit status 1 instead of a traceback.
+- The `flasgo[otel]` extra now pins the OpenTelemetry API, SDK, and OTLP HTTP exporter at 1.45.2 and the ASGI
+  instrumentation at 0.66b2 (previously 1.45.1 and 0.66b1), fixing GHSA-mf5v-w3w3-f6cg, a denial of service through
+  quadratic-time `traceparent` parsing in `opentelemetry-api`.
 
 ## [0.11.1] - 2026-11-08
 
