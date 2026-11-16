@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/L1ghtn1ng/flasgo/blob/main/flasgo/tool-flasgo.schema.json",
+  "title": "[tool.flasgo]",
+  "description": "Defaults for the flasgo command, read from pyproject.toml in the current directory. Command-line options override them. See https://flasgo.dev",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "target": {
+      "description": "App used by flasgo run, routes, openapi, and check when no target is passed: a Python file, package directory, or import string such as package.module:app.",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "app": {
+      "description": "Application variable name when loading from a Python file, like --app. An explicit :attribute in target takes precedence.",
+      "type": "string",
+      "pattern": "\\S",
+      "default": "app"
+    },
+    "run": {
+      "description": "Defaults for flasgo run.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "description": "Host interface to bind, like --host.",
+          "type": "string",
+          "pattern": "\\S",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "description": "Port to bind, like --port.",
+          "type": "integer",
+          "default": 8000
+        },
+        "reload": {
+          "description": "Enable or disable automatic reload, like --reload / --no-reload. When unset, the app's DEBUG setting decides.",
+          "type": "boolean"
+        },
+        "reload_dirs": {
+          "description": "Directories to watch for reload in addition to the target's own directory. --reload-dir replaces this list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "db": {
+      "description": "Defaults for flasgo db.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "description": "Alembic .ini file, like --config; used only when it exists. A path named pyproject.toml is treated like pyproject.",
+          "type": "string",
+          "pattern": "\\S",
+          "default": "alembic.ini"
+        },
+        "pyproject": {
+          "description": "pyproject.toml whose [tool.alembic] table configures Alembic, like --pyproject; used only when it has that table.",
+          "type": "string",
+          "pattern": "\\S",
+          "default": "pyproject.toml"
+        },
+        "directory": {
+          "description": "Migration script directory for flasgo db init, like --directory.",
+          "type": "string",
+          "pattern": "\\S",
+          "default": "migrations"
+        },
+        "template": {
+          "description": "Alembic environment template for flasgo db init, like --template.",
+          "type": "string",
+          "enum": ["generic", "async", "multidb", "pyproject", "pyproject_async"],
+          "default": "generic"
+        }
+      }
+    }
+  }
+}

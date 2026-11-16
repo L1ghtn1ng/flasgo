@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+### Added
+
+- `flasgo db` now reads Alembic settings from a `[tool.alembic]` table in `pyproject.toml`, alone or merged with
+  `alembic.ini`, matching the `alembic` command. Previously it required `alembic.ini` and failed for projects that had
+  moved their configuration into `pyproject.toml`.
+- `flasgo db --pyproject` selects the `pyproject.toml` to read, and `flasgo db --config` accepts a `pyproject.toml` path
+  as Alembic does.
+- The CLI reads option defaults from a `[tool.flasgo]` table in `pyproject.toml`: `target` and `app` for `run`,
+  `routes`, `openapi`, and `check`; `host`, `port`, `reload`, and `reload_dirs` under `[tool.flasgo.run]`; and
+  `config`, `pyproject`, `directory`, and `template` under `[tool.flasgo.db]`. Command-line options override them.
+  The `target` argument is now optional when `[tool.flasgo]` sets one. Unknown keys, empty strings, and wrongly typed
+  values are errors.
+- `flasgo db init --template` chooses the Alembic environment template (`generic`, `async`, `multidb`, `pyproject`,
+  or `pyproject_async`; default `generic`).
+- `flasgo db revision`, `current`, `history`, `stamp`, and `check` wrap the matching Alembic commands.
+  `current --check-heads` and `check` exit with status 1 when the database is behind or the models have unmigrated
+  changes.
+- `flasgo config` shows each `[tool.flasgo]` setting's effective value and whether it came from `pyproject.toml` or the
+  built-in default, plus the Alembic files `flasgo db` will read. `--json` emits the same report as JSON.
+- `flasgo --version` prints the installed Flasgo version.
+- A JSON Schema for `[tool.flasgo]` ships at `flasgo/tool-flasgo.schema.json`.
+
+### Changed
+
+- `flasgo db` now merges a `[tool.alembic]` table from `pyproject.toml` in the current directory with `alembic.ini`.
+  Projects that kept an unused `[tool.alembic]` table next to `alembic.ini` should remove it or make the two agree.
+- `flasgo db init` records a relative `--directory` (including the default `migrations`) as
+  `script_location = %(here)s/migrations` instead of an absolute path, so the generated configuration can be committed
+  and used on other machines.
+- `flasgo db` reports Alembic errors, such as running `init` in a directory that is not empty, as a one-line message
+  with exit status 1 instead of a traceback.
+
 ## [0.11.1] - 2026-11-08
 
 ### Changed

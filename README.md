@@ -116,6 +116,39 @@ loads same-named app files from different roots, Flasgo replaces only modules pr
 old root, including imported siblings; unrelated entries in `sys.modules` remain untouched, and a failed replacement
 restores the previous CLI-owned modules.
 
+Commands you run often can keep their options in a `[tool.flasgo]` table in the `pyproject.toml` of the directory you
+run `flasgo` from. Every key is optional, and an option given on the command line always wins:
+
+```toml
+[tool.flasgo]
+target = "src/package/app.py"  # used by run, routes, openapi, and check when no target is passed
+app = "app"                    # same as --app
+
+[tool.flasgo.run]
+host = "127.0.0.1"
+port = 8000
+reload = true
+reload_dirs = ["templates"]    # replaced, not extended, by --reload-dir
+
+[tool.flasgo.db]
+config = "db/alembic.ini"      # like flasgo db --config; pyproject = "..." is like --pyproject
+directory = "migrations"       # same as flasgo db init --directory
+template = "pyproject"         # same as flasgo db init --template
+```
+
+With a `target` configured, `uv run flasgo run` and `uv run flasgo check` need no arguments. Relative paths resolve
+from the current directory. `db.config` and `db.pyproject` replace the default file locations and, like the defaults,
+are used only when the file holds Alembic settings; a path passed as `--config` or `--pyproject` must exist. Flasgo
+rejects unknown keys, empty strings, and values of the wrong type, so a typo fails every command except `--help` and
+`--version` instead of being silently ignored.
+
+`uv run flasgo config` prints every setting's value and whether it came from `pyproject.toml` or the built-in default,
+plus which Alembic files `flasgo db` will read; add `--json` for scripts. `uv run flasgo --version` prints the installed
+version.
+
+A JSON Schema for the table ships with Flasgo at `flasgo/tool-flasgo.schema.json`, describing every key with its type,
+default, and allowed values, for editors and linters that validate `pyproject.toml`.
+
 You can still use `uvicorn` with reload:
 
 ```bash
@@ -541,8 +574,37 @@ uv run flasgo db downgrade
 ```
 
 `upgrade` defaults to `head` and `downgrade` to `-1`; pass a revision to target another one, or `--sql` to print the
-SQL without changing the database. `flasgo db --config` selects the Alembic configuration file (default
-`alembic.ini`), and `flasgo db init --directory` sets the migration directory (default `migrations`).
+SQL without changing the database. `flasgo db init --directory` sets the migration directory (default `migrations`).
+
+The everyday Alembic commands are available too, so you rarely need to call `alembic` directly:
+
+```bash
+uv run flasgo db revision -m "backfill emails"   # empty migration to write by hand
+uv run flasgo db current --check-heads           # fails unless the database is at the latest revision
+uv run flasgo db history --indicate-current
+uv run flasgo db stamp head                      # record a revision without running migrations
+uv run flasgo db check                           # fails if models changed without a migration
+```
+
+`current --check-heads` and `check` exit with status 1 on failure, which makes them useful CI gates. Alembic errors,
+such as running `init` in a directory that is not empty, print a one-line message instead of a traceback.
+
+Alembic settings can live in `alembic.ini`, in a `[tool.alembic]` table in `pyproject.toml`, or both, as with the
+`alembic` command; when both hold settings, Alembic merges them. `flasgo db` reads whichever of `alembic.ini` and `pyproject.toml` in the current directory holds
+Alembic settings, so a project that moved everything into `pyproject.toml` and deleted `alembic.ini` keeps working:
+
+```toml
+[tool.alembic]
+script_location = "%(here)s/migrations"
+prepend_sys_path = ["."]
+```
+
+`flasgo db init --template pyproject` (or `pyproject_async`) creates that table for a new project, recording a relative
+`--directory` as `%(here)s/...` so the file works on every machine. Alembic still writes
+an `alembic.ini` for the database URL and logging; you can delete it once `env.py` gets the URL another way. Use
+`flasgo db --config` and `flasgo db --pyproject` to point at files elsewhere (defaults `alembic.ini` and
+`pyproject.toml`); like Alembic, `--config` also accepts a path to a `pyproject.toml`. Unlike the `alembic` command,
+`flasgo db` does not read the `ALEMBIC_CONFIG` environment variable.
 
 ## Codebase guide
 
