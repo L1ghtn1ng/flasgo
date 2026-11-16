@@ -1,12 +1,19 @@
 import argparse
+import configparser
 import importlib
+import importlib.metadata
 import json
+import logging
 import os
 import re
 import secrets
+import shlex
 import stat
+import subprocess
 import sys
+import tomllib
 import traceback
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,18 +36,56 @@ class _ResolvedTarget:
 _CLI_NAMESPACE_ROOTS: dict[str, Path] = {}
 _CLI_ROOT_MODULES: dict[Path, dict[str, ModuleType]] = {}
 _MISSING = object()
+_DEFAULT_ALEMBIC_INI = "alembic.ini"
+_DEFAULT_PYPROJECT = "pyproject.toml"
+_MIN_PORT = 0
+_MAX_PORT = 65535
+_ALEMBIC_TEMPLATES = ("generic", "async", "multidb", "pyproject", "pyproject_async")
+# The [tool.flasgo] keys each command accepts: a type for a value, or a nested dict for a sub-table.
+_PROJECT_SCHEMA: dict[str, Any] = {
+    "target": str,
+    "app": str,
+    "run": {"host": str, "port": int, "reload": bool, "reload_dirs": list},
+    "db": {"config": str, "pyproject": str, "directory": str, "template": str},
+}
+_TOML_TYPE_NAMES: dict[type, str] = {str: "a string", int: "an integer", bool: "a boolean"}
+# Built-in value of every [tool.flasgo] key, shared by the parser, `flasgo config`, and the schema tests.
+# None means the command decides at run time, as described in _RUNTIME_DEFAULT_LABELS.
+_CLI_DEFAULTS: dict[str, Any] = {
+    "target": None,
+    "app": "app",
+    "run": {"host": "127.0.0.1", "port": 8000, "reload": None, "reload_dirs": None},
+    "db": {"config": _DEFAULT_ALEMBIC_INI, "pyproject": _DEFAULT_PYPROJECT, "directory": "migrations", "template": "generic"},
+}
+_RUNTIME_DEFAULT_LABELS = {
+    "target": "(none: pass a target)",
+    "run.reload": "(app DEBUG setting)",
+    "run.reload_dirs": "(target directory only)",
+}
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the Flasgo CLI argument parser."""
+def build_parser(project_settings: Mapping[str, Any] | None = None) -> argparse.ArgumentParser:
+    """
+    Create the Flasgo CLI argument parser.
+
+    Parameters:
+        project_settings (Mapping[str, Any] | None): A validated ``[tool.flasgo]`` table, as returned by
+            ``load_project_settings``. Its values become option defaults, and command-line flags still override them.
+    """
+
+    settings = project_settings or {}
+    target_defaults = {key: settings[key] for key in ("target", "app") if key in settings}
+    run_settings = dict(settings.get("run", {}))
+    db_settings = dict(settings.get("db", {}))
 
     parser = argparse.ArgumentParser(prog="flasgo", suggest_on_error=True)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_flasgo_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run a Flasgo application")
-    _add_target_arguments(run_parser)
-    run_parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind")
-    run_parser.add_argument("--port", type=int, default=8000, help="Port to bind")
+    _add_target_arguments(run_parser, target_defaults)
+    run_parser.add_argument("--host", default=_CLI_DEFAULTS["run"]["host"], help="Host interface to bind")
+    run_parser.add_argument("--port", type=_port_argument, default=_CLI_DEFAULTS["run"]["port"], help="Port to bind")
     run_parser.add_argument(
         "--reload",
         action=argparse.BooleanOptionalAction,
@@ -51,47 +96,97 @@ def build_parser() -> argparse.ArgumentParser:
         "--reload-dir",
         dest="reload_dirs",
         action="append",
+        type=_non_empty_argument,
         default=None,
-        help="Additional directory to watch for reload. Can be specified multiple times.",
+        help="Additional directory to watch for reload. Can be specified multiple times; replaces run.reload_dirs from pyproject.toml.",
     )
-    run_parser.set_defaults(handler=_run_command)
+    # Configured reload directories live apart from --reload-dir, so passing the flag replaces them instead of appending.
+    configured_reload_dirs = run_settings.pop("reload_dirs", None)
+    run_parser.set_defaults(handler=_run_command, configured_reload_dirs=configured_reload_dirs, **run_settings)
 
     routes_parser = subparsers.add_parser("routes", help="List registered HTTP and WebSocket routes")
-    _add_target_arguments(routes_parser)
+    _add_target_arguments(routes_parser, target_defaults)
     routes_parser.add_argument("--policy", action="store_true", help="Explain effective route security policies")
     routes_parser.add_argument("--json", action="store_true", help="Emit a versioned policy snapshot as JSON")
     routes_parser.add_argument("-o", "--output", help="Write the JSON policy snapshot atomically to this file")
     routes_parser.set_defaults(handler=_routes_command)
 
     openapi_parser = subparsers.add_parser("openapi", help="Render the application's OpenAPI document")
-    _add_target_arguments(openapi_parser)
+    _add_target_arguments(openapi_parser, target_defaults)
     openapi_parser.add_argument("-o", "--output", help="Write atomically to this file instead of stdout")
     openapi_parser.set_defaults(handler=_openapi_command)
 
     check_parser = subparsers.add_parser("check", help="Validate routes and application configuration")
-    _add_target_arguments(check_parser)
+    _add_target_arguments(check_parser, target_defaults)
     check_parser.add_argument("--deploy", action="store_true", help="Check production security settings and declared access")
     check_parser.add_argument("--json", action="store_true", help="Emit structured issues and policy changes")
     check_parser.add_argument("--against", help="Compare with a routes --json policy snapshot; fail on any change")
     check_parser.set_defaults(handler=_check_command)
 
+    config_parser = subparsers.add_parser(
+        "config", help=f"Show the CLI settings in effect and whether each comes from {_DEFAULT_PYPROJECT}"
+    )
+    config_parser.add_argument("--json", action="store_true", help="Emit the settings and Alembic files as JSON")
+    config_parser.set_defaults(handler=_config_command)
+
     db_parser = subparsers.add_parser("db", help="Manage optional Alembic database migrations")
-    db_parser.add_argument("--config", default="alembic.ini", help="Alembic configuration file")
+    db_parser.add_argument(
+        "--config",
+        default=None,
+        help=f"Alembic .ini file (default {_DEFAULT_ALEMBIC_INI}); a path named pyproject.toml is treated like --pyproject",
+    )
+    db_parser.add_argument(
+        "--pyproject",
+        default=None,
+        help=f"pyproject.toml file whose [tool.alembic] table configures Alembic (default {_DEFAULT_PYPROJECT})",
+    )
+    # Configured paths stay apart from --config/--pyproject: typed flags must override them, and only a typed path must exist.
+    db_parser.set_defaults(configured_db_config=db_settings.get("config"), configured_db_pyproject=db_settings.get("pyproject"))
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
 
     db_init = db_subparsers.add_parser("init", help="Create an Alembic migration environment")
-    db_init.add_argument("--directory", default="migrations", help="Migration script directory")
-    db_init.set_defaults(handler=_db_command)
+    db_init.add_argument("--directory", default=_CLI_DEFAULTS["db"]["directory"], help="Migration script directory")
+    db_init.add_argument(
+        "--template",
+        choices=_ALEMBIC_TEMPLATES,
+        default=_CLI_DEFAULTS["db"]["template"],
+        help="Alembic environment template; pyproject and pyproject_async keep settings in [tool.alembic]",
+    )
+    db_init.set_defaults(handler=_db_command, **{key: db_settings[key] for key in ("directory", "template") if key in db_settings})
 
     db_migrate = db_subparsers.add_parser("migrate", help="Autogenerate a migration revision")
     db_migrate.add_argument("-m", "--message", required=True, help="Migration description")
     db_migrate.set_defaults(handler=_db_command)
 
+    db_revision = db_subparsers.add_parser("revision", help="Create an empty migration revision to write by hand")
+    db_revision.add_argument("-m", "--message", required=True, help="Migration description")
+    db_revision.set_defaults(handler=_db_command)
+
     for command_name, default_revision in (("upgrade", "head"), ("downgrade", "-1")):
-        db_revision = db_subparsers.add_parser(command_name, help=f"{command_name.title()} the database")
-        db_revision.add_argument("revision", nargs="?", default=default_revision, help="Alembic revision target")
-        db_revision.add_argument("--sql", action="store_true", help="Print SQL without changing the database")
-        db_revision.set_defaults(handler=_db_command)
+        db_move = db_subparsers.add_parser(command_name, help=f"{command_name.title()} the database")
+        db_move.add_argument("revision", nargs="?", default=default_revision, help="Alembic revision target")
+        db_move.add_argument("--sql", action="store_true", help="Print SQL without changing the database")
+        db_move.set_defaults(handler=_db_command)
+
+    db_current = db_subparsers.add_parser("current", help="Show the revision the database is at")
+    db_current.add_argument("-v", "--verbose", action="store_true", help="Show full revision details")
+    db_current.add_argument("--check-heads", action="store_true", help="Fail unless every head revision is applied")
+    db_current.set_defaults(handler=_db_command)
+
+    db_history = db_subparsers.add_parser("history", help="List migration revisions")
+    db_history.add_argument("-r", "--rev-range", help="Revision range such as base:head or -3:")
+    db_history.add_argument("-v", "--verbose", action="store_true", help="Show full revision details")
+    db_history.add_argument("-i", "--indicate-current", action="store_true", help="Mark the database's current revision")
+    db_history.set_defaults(handler=_db_command)
+
+    db_stamp = db_subparsers.add_parser("stamp", help="Record a revision in the database without running migrations")
+    db_stamp.add_argument("revision", help="Revision to record, such as head")
+    db_stamp.add_argument("--sql", action="store_true", help="Print SQL without changing the database")
+    db_stamp.add_argument("--purge", action="store_true", help="Clear the version table before stamping")
+    db_stamp.set_defaults(handler=_db_command)
+
+    db_check = db_subparsers.add_parser("check", help="Fail if the models have changes that no migration covers")
+    db_check.set_defaults(handler=_db_command)
 
     return parser
 
@@ -99,17 +194,168 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the Flasgo CLI entrypoint."""
 
-    parser = build_parser()
+    try:
+        settings = load_project_settings(Path(_DEFAULT_PYPROJECT))
+    except SystemExit:
+        # A broken pyproject.toml must not hide --help or --version; every other command still reports it.
+        if not _wants_help_or_version(sys.argv[1:] if argv is None else argv):
+            raise
+        settings = {}
+    parser = build_parser(settings)
     args = parser.parse_args(argv)
+    if getattr(args, "target", _MISSING) is None:
+        parser.error(f"{args.command} requires a target argument, or a target key in [tool.flasgo] in {_DEFAULT_PYPROJECT}")
     if args.command == "routes" and args.output is not None and not args.json:
         parser.error("routes --output requires --json")
     handler = args.handler
     return int(handler(args))
 
 
+def _wants_help_or_version(argv: list[str]) -> bool:
+    for arg in argv:
+        if arg == "--":
+            return False
+        if arg in {"-h", "--help", "--version"}:
+            return True
+    return False
+
+
+def _flasgo_version() -> str:
+    try:
+        return importlib.metadata.version("flasgo")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _config_command(args: argparse.Namespace) -> int:
+    """
+    Show each [tool.flasgo] setting's effective value and source, plus the Alembic files `flasgo db` would read.
+
+    Returns:
+        int: Zero after printing the report.
+    """
+    path = Path(_DEFAULT_PYPROJECT).resolve()
+    settings = load_project_settings(path)
+    rows = []
+    for key, default in _flatten_settings(_CLI_DEFAULTS).items():
+        configured = _flatten_settings(settings).get(key, _MISSING)
+        source = _DEFAULT_PYPROJECT if configured is not _MISSING else "default"
+        rows.append({"setting": key, "value": default if configured is _MISSING else configured, "source": source})
+    db_settings = settings.get("db", {})
+    files = _alembic_files(
+        argparse.Namespace(
+            config=None,
+            pyproject=None,
+            configured_db_config=db_settings.get("config"),
+            configured_db_pyproject=db_settings.get("pyproject"),
+        )
+    )
+    alembic = {
+        "ini": {"path": str(files.ini), "used": _has_alembic_ini(files.ini, required=False)},
+        "pyproject": {"path": str(files.toml), "used": _has_tool_alembic(files.toml, required=False)},
+    }
+    status = ("[tool.flasgo] found" if settings else "no [tool.flasgo] table") if path.is_file() else "not found"
+    if args.json:
+        report = {"pyproject": {"path": str(path), "status": status}, "settings": rows, "alembic": alembic}
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    print(f"{_DEFAULT_PYPROJECT}: {path} ({status})\n")
+    print(f"{'SETTING':<17} {'VALUE':<32} SOURCE")
+    for row in rows:
+        value = _RUNTIME_DEFAULT_LABELS.get(row["setting"], "-") if row["value"] is None else json.dumps(row["value"])
+        print(f"{row['setting']:<17} {value:<32} {row['source']}")
+    print("\nAlembic configuration for `flasgo db`:")
+    ini_missing = "no [alembic] section" if files.ini.is_file() else "not found"
+    toml_missing = "no [tool.alembic] table" if files.toml.is_file() else "not found"
+    for label, entry, missing in (("alembic.ini", alembic["ini"], ini_missing), ("[tool.alembic]", alembic["pyproject"], toml_missing)):
+        print(f"  {label:<15} {entry['path']} ({'used' if entry['used'] else missing})")
+    return 0
+
+
+def _flatten_settings(table: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    flat: dict[str, Any] = {}
+    for key, value in table.items():
+        if isinstance(value, dict):
+            flat.update(_flatten_settings(value, f"{prefix}{key}."))
+        else:
+            flat[f"{prefix}{key}"] = value
+    return flat
+
+
+def load_project_settings(path: Path) -> dict[str, Any]:
+    """
+    Read and validate the ``[tool.flasgo]`` table of a pyproject.toml file.
+
+    Parameters:
+        path (Path): The pyproject.toml file; a missing file means no project settings.
+
+    Returns:
+        dict[str, Any]: The validated table, or an empty dict when the file or table is absent.
+    """
+    if not path.is_file():
+        return {}
+    tool = _read_toml(path).get("tool")
+    settings = tool.get("flasgo") if isinstance(tool, dict) else None
+    if settings is None:
+        return {}
+    _validate_project_table(settings, _PROJECT_SCHEMA, "tool.flasgo", path)
+    port = settings.get("run", {}).get("port")
+    if port is not None and not _MIN_PORT <= port <= _MAX_PORT:
+        raise SystemExit(f"tool.flasgo.run.port in {path} must be between {_MIN_PORT} and {_MAX_PORT}.")
+    template = settings.get("db", {}).get("template")
+    if template is not None and template not in _ALEMBIC_TEMPLATES:
+        raise SystemExit(f"tool.flasgo.db.template in {path} must be one of: {', '.join(_ALEMBIC_TEMPLATES)}.")
+    return settings
+
+
+def _validate_project_table(table: object, schema: Mapping[str, Any], name: str, path: Path) -> None:
+    if not isinstance(table, dict):
+        raise SystemExit(f"[{name}] in {path} must be a table.")
+    unknown = sorted(set(table) - set(schema))
+    if unknown:
+        raise SystemExit(f"Unknown key(s) in [{name}] in {path}: {', '.join(unknown)}. Supported keys: {', '.join(schema)}.")
+    for key, value in table.items():
+        expected = schema[key]
+        if isinstance(expected, dict):
+            _validate_project_table(value, expected, f"{name}.{key}", path)
+        elif expected is list:
+            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                raise SystemExit(f"{name}.{key} in {path} must be a list of non-empty strings.")
+        # TOML booleans are Python bools, which are also ints, so a port of `true` must not pass as 1.
+        elif not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
+            raise SystemExit(f"{name}.{key} in {path} must be {_TOML_TYPE_NAMES[expected]}.")
+        elif expected is str and not value.strip():
+            raise SystemExit(f"{name}.{key} in {path} must not be empty.")
+
+
+def _non_empty_argument(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
+def _port_argument(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port: {value!r}") from None
+    if not _MIN_PORT <= port <= _MAX_PORT:
+        raise argparse.ArgumentTypeError(f"port must be between {_MIN_PORT} and {_MAX_PORT}, not {port}")
+    return port
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as source:
+            return tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"Could not read {path.resolve()}: {exc}") from None
+
+
 def _run_command(args: argparse.Namespace) -> int:
     app, resolved = _load_app_target(args.target, app_name=args.app)
-    reload_dirs = _reload_dirs(resolved, args.reload_dirs)
+    extra_dirs = args.reload_dirs if args.reload_dirs is not None else args.configured_reload_dirs
+    reload_dirs = _reload_dirs(resolved, extra_dirs)
     app.run(
         host=args.host,
         port=args.port,
@@ -119,9 +365,15 @@ def _run_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _add_target_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", help="Python file path or import string such as app.py or package.module:app")
-    parser.add_argument("--app", default="app", help="Application variable name when loading from a Python file")
+def _add_target_arguments(parser: argparse.ArgumentParser, defaults: Mapping[str, str]) -> None:
+    parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Python file path or import string such as app.py or package.module:app (default: target in [tool.flasgo])",
+    )
+    parser.add_argument("--app", default=_CLI_DEFAULTS["app"], help="Application variable name when loading from a Python file")
+    parser.set_defaults(**defaults)
 
 
 def _routes_command(args: argparse.Namespace) -> int:
@@ -308,19 +560,283 @@ def _create_temporary(parent: Path, name: str, *, mode: int) -> tuple[Path, int]
 
 def _db_command(args: argparse.Namespace) -> int:
     command, config_type = _load_alembic()
-    config_path = Path(args.config).expanduser().resolve()
-    if args.db_command != "init" and not config_path.is_file():
-        raise SystemExit(f"Alembic configuration not found: {config_path}. Run `flasgo db init` first.")
-    config = config_type(str(config_path))
+    files = _alembic_files(args)
     if args.db_command == "init":
-        command.init(config, str(Path(args.directory).expanduser().resolve()), package=True)
-    elif args.db_command == "migrate":
-        command.revision(config, message=args.message, autogenerate=True)
-    elif args.db_command == "upgrade":
-        command.upgrade(config, args.revision, sql=args.sql)
-    else:
-        command.downgrade(config, args.revision, sql=args.sql)
+        # Alembic writes alembic.ini for every template, and pyproject templates also add [tool.alembic] to pyproject.toml.
+        config = config_type(file_=str(files.ini), toml_file=str(files.toml))
+        # A relative directory stays relative so Alembic records a portable "%(here)s/..." script_location.
+        directory = Path(args.directory).expanduser()
+        try:
+            command.init(config, str(directory), template=args.template, package=True)
+        except _alembic_command_error() as exc:
+            raise SystemExit(f"Alembic: {exc}") from None
+        print(_db_init_next_steps(files.ini, directory, args))
+        return 0
+    config_kwargs = _alembic_config_kwargs(files)
+    if config_kwargs["file_"] is None:
+        _configure_default_alembic_logging()
+    config = config_type(**config_kwargs)
+    try:
+        _DB_ACTIONS[args.db_command](command, config, args)
+    except _alembic_command_error() as exc:
+        # Alembic's expected failures (existing directory, unapplied heads, model drift) read best as one line, as in its own CLI.
+        raise SystemExit(f"Alembic: {exc}") from None
+    except Exception as exc:
+        # env.py turns an unset or placeholder sqlalchemy.url into a deep SQLAlchemy traceback; name the setting instead.
+        message = _database_url_error(exc, config, files.ini)
+        if message is None:
+            raise
+        raise SystemExit(message) from None
     return 0
+
+
+def _configure_default_alembic_logging() -> None:
+    """
+    Show Alembic's progress messages when no alembic.ini supplies a logging configuration.
+
+    Alembic keeps logging settings in alembic.ini even for pyproject templates, and env.py only calls fileConfig when
+    that file is in use, so a pyproject-only setup would run stamp and upgrade silently. This mirrors the ini's
+    defaults: alembic at INFO, everything else at WARNING, on stderr. Logging configured elsewhere is left alone.
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)-5.5s [%(name)s] %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+    logging.getLogger("alembic").setLevel(logging.INFO)
+
+
+# The sqlalchemy.url that `alembic init` writes into alembic.ini for every template.
+_ALEMBIC_PLACEHOLDER_URL = "driver://user:pass@localhost/dbname"
+
+
+def _db_init_next_steps(ini: Path, directory: Path, args: argparse.Namespace) -> str:
+    ini = _display_path(ini)
+    env = directory / "env.py"
+    if args.template == "multidb":
+        url_step = f"Set the URL of each database listed in {ini}."
+        metadata_step = f"Map each engine name in target_metadata in {env} to that database's MetaData"
+    else:
+        url_step = f"Set sqlalchemy.url in {ini} to your database URL, or have {env} supply one."
+        metadata_step = f"Point target_metadata in {env} at your models' MetaData"
+    # Paths typed on the command line must be repeated; [tool.flasgo.db] paths are picked up again automatically.
+    db = _shell_join(
+        ["flasgo", "db"]
+        + [part for flag, value in (("--config", args.config), ("--pyproject", args.pyproject)) if value for part in (flag, value)]
+    )
+    return (
+        "Next steps:\n"
+        f"  1. {url_step}\n"
+        f"  2. {metadata_step} so autogenerate can compare them.\n"
+        f'  3. Run `{db} migrate -m "create tables"`, then `{db} upgrade`.'
+    )
+
+
+def _shell_join(parts: list[str], *, windows: bool = os.name == "nt") -> str:
+    """Quote ``parts`` as one copyable command line: double quotes on Windows, where shells do not group with single quotes."""
+    return subprocess.list2cmdline(parts) if windows else shlex.join(parts)
+
+
+def _display_path(path: Path) -> Path:
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        return path
+
+
+def _database_url_error(exc: Exception, config: Any, ini: Path) -> str | None:
+    """
+    Return a one-line message when ``exc`` comes from a missing or unusable configured ``sqlalchemy.url``, else None.
+
+    Only errors that SQLAlchemy or Alembic raised while reading the URL qualify, and an invalid URL must fail the same
+    way when re-checked, so an env.py that builds its own engine (from ``DATABASE_URL``, say) keeps its traceback.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import NoSuchModuleError
+    except ImportError:
+        return None
+    try:
+        url = config.get_main_option("sqlalchemy.url")
+    except Exception:
+        # An ini without an [alembic] section, or an uninterpolatable value, must not replace the original error.
+        url = None
+    source = _display_path(ini)
+    # Online, engine_from_config pops a missing "url" key; offline (--sql), Alembic's context.configure gets url=None.
+    missing_online = isinstance(exc, KeyError) and exc.args == ("url",) and _raised_in(exc, "sqlalchemy.")
+    missing_offline = (
+        type(exc) is Exception and str(exc) == "Connection, url, or dialect_name is required." and _raised_in(exc, "alembic.runtime.")
+    )
+    if (missing_online or missing_offline) and not url:
+        return f"Alembic: no database URL is configured. Set sqlalchemy.url in {source}, or have env.py supply one."
+    # multidb keeps one sqlalchemy.url per engine section, so look for the placeholder in every section, and only blame
+    # the ini when it really holds one: env.py may have read the same placeholder from somewhere else.
+    if (
+        isinstance(exc, NoSuchModuleError)
+        and str(exc).endswith("sqlalchemy.dialects:driver")
+        and _ALEMBIC_PLACEHOLDER_URL in _ini_database_urls(config)
+    ):
+        return (
+            f"Alembic: sqlalchemy.url in {source} is still Alembic's placeholder, {_ALEMBIC_PLACEHOLDER_URL}. Set it to your database URL."
+        )
+    if not url or not _raised_in(exc, "sqlalchemy."):
+        return None
+    try:
+        make_url(url).get_dialect()
+    except Exception as url_error:
+        # Blame the setting only when it reproduces the failure exactly; otherwise the URL came from somewhere else.
+        if type(url_error) is not type(exc) or str(url_error) != str(exc):
+            return None
+        problem = "names an unknown database dialect" if isinstance(exc, NoSuchModuleError) else "is not a valid database URL"
+        return f"Alembic: sqlalchemy.url in {source} {problem}: {exc}"
+    return None
+
+
+def _ini_database_urls(config: Any) -> set[str]:
+    """
+    Return the raw sqlalchemy.url values Alembic's stock env.py reads from the ini, or an empty set without an ini.
+
+    That is the main section's URL and, for multidb, those of the sections named in its ``databases`` option; a URL in
+    any other section is never used, so it cannot be blamed for a failure.
+    """
+    if config.config_file_name is None:
+        return set()
+    try:
+        parser = config.file_config
+        main = config.config_ini_section
+        databases = parser.get(main, "databases", raw=True, fallback="")
+        sections = [main, *(name.strip() for name in databases.split(",") if name.strip())]
+        return {url for section in sections if (url := parser.get(section, "sqlalchemy.url", raw=True, fallback=None))}
+    except Exception:
+        return set()
+
+
+def _raised_in(exc: BaseException, module_prefix: str) -> bool:
+    """Return whether the innermost frame of ``exc``'s traceback belongs to a module under ``module_prefix``."""
+    tb = exc.__traceback__
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    return str(tb.tb_frame.f_globals.get("__name__", "")).startswith(module_prefix)
+
+
+_DB_ACTIONS: dict[str, Callable[[Any, Any, argparse.Namespace], object]] = {
+    "migrate": lambda command, config, args: command.revision(config, message=args.message, autogenerate=True),
+    "revision": lambda command, config, args: command.revision(config, message=args.message),
+    "upgrade": lambda command, config, args: command.upgrade(config, args.revision, sql=args.sql),
+    "downgrade": lambda command, config, args: command.downgrade(config, args.revision, sql=args.sql),
+    "current": lambda command, config, args: command.current(config, check_heads=args.check_heads, verbose=args.verbose),
+    "history": lambda command, config, args: command.history(
+        config, rev_range=args.rev_range, verbose=args.verbose, indicate_current=args.indicate_current
+    ),
+    "stamp": lambda command, config, args: command.stamp(config, args.revision, sql=args.sql, purge=args.purge),
+    "check": lambda command, config, args: command.check(config),
+}
+
+
+def _alembic_command_error() -> type[Exception]:
+    from alembic.util import CommandError
+
+    return CommandError
+
+
+@dataclass(frozen=True, slots=True)
+class _AlembicFiles:
+    ini: Path
+    toml: Path
+    # Only a path typed on the command line must exist; defaults and [tool.flasgo.db] paths are used when they hold settings.
+    ini_required: bool
+    toml_required: bool
+
+
+def _alembic_files(args: argparse.Namespace) -> _AlembicFiles:
+    """
+    Resolve the Alembic .ini and pyproject.toml paths.
+
+    Command-line flags win over [tool.flasgo.db], which wins over the alembic.ini and pyproject.toml defaults. In either
+    source, a path named pyproject.toml given as ``config`` is treated as the pyproject path, as the alembic command does.
+    """
+    cli_ini, cli_toml = _split_alembic_paths(args.config, args.pyproject, names=("--config", "--pyproject"))
+    configured_ini, configured_toml = _split_alembic_paths(
+        args.configured_db_config, args.configured_db_pyproject, names=("tool.flasgo.db.config", "tool.flasgo.db.pyproject")
+    )
+    return _AlembicFiles(
+        ini=Path(cli_ini or configured_ini or _DEFAULT_ALEMBIC_INI).expanduser().resolve(),
+        toml=Path(cli_toml or configured_toml or _DEFAULT_PYPROJECT).expanduser().resolve(),
+        ini_required=cli_ini is not None,
+        toml_required=cli_toml is not None,
+    )
+
+
+def _split_alembic_paths(config: str | None, pyproject: str | None, *, names: tuple[str, str]) -> tuple[str | None, str | None]:
+    for value, name in ((config, names[0]), (pyproject, names[1])):
+        if value is not None and not value.strip():
+            raise SystemExit(f"{name} must not be empty.")
+    if config is not None and Path(config).name == _DEFAULT_PYPROJECT:
+        if pyproject is not None:
+            raise SystemExit(f"Pass pyproject.toml with either {names[0]} or {names[1]}, not both.")
+        return None, config
+    return config, pyproject
+
+
+def _alembic_config_kwargs(files: _AlembicFiles) -> dict[str, str | None]:
+    """
+    Choose which existing configuration files Alembic should read.
+
+    Alembic merges an .ini file with the [tool.alembic] table of pyproject.toml, and either may be used alone.
+
+    Returns:
+        dict[str, str | None]: ``file_`` and ``toml_file`` keyword arguments for ``alembic.config.Config``.
+    """
+    has_ini = _has_alembic_ini(files.ini, required=files.ini_required)
+    has_toml = _has_tool_alembic(files.toml, required=files.toml_required)
+    if not has_ini and not has_toml:
+        raise SystemExit(
+            f"Alembic configuration not found: no {files.ini} and no [tool.alembic] table in {files.toml}. "
+            "Run `flasgo db init` first, or check config and pyproject in [tool.flasgo.db]."
+        )
+    return {"file_": str(files.ini) if has_ini else None, "toml_file": str(files.toml) if has_toml else None}
+
+
+def _has_alembic_ini(path: Path, *, required: bool) -> bool:
+    """
+    Report whether ``path`` is an ini file with an [alembic] section, failing loudly when it was named explicitly.
+
+    Alembic needs that section in any ini it is given, and the stock env.py also reads its logging sections, so an
+    unrelated ini (an app's settings.ini, say) is skipped rather than handed to Alembic.
+    """
+    if not path.is_file():
+        if required:
+            raise SystemExit(f"Alembic configuration not found: {path}. Run `flasgo db init` first.")
+        return False
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with path.open(encoding="utf-8") as source:
+            parser.read_file(source)
+    except (OSError, UnicodeDecodeError, configparser.Error) as exc:
+        raise SystemExit(f"Could not read {path.resolve()}: {exc}") from None
+    has_section = parser.has_section("alembic")
+    if not has_section and required:
+        raise SystemExit(f"No [alembic] section in {path}. Run `flasgo db init` to create an Alembic configuration.")
+    return has_section
+
+
+def _has_tool_alembic(path: Path, *, required: bool) -> bool:
+    """Report whether ``path`` is a pyproject.toml with a [tool.alembic] table, failing loudly when it was named explicitly."""
+    if not path.is_file():
+        if required:
+            raise SystemExit(f"pyproject.toml not found: {path}.")
+        return False
+    tool = _read_toml(path).get("tool")
+    section = tool.get("alembic") if isinstance(tool, dict) else None
+    if section is not None and not isinstance(section, dict):
+        raise SystemExit(f"[tool.alembic] in {path} must be a table.")
+    if section is None and required:
+        raise SystemExit(f"No [tool.alembic] table in {path}. Run `flasgo db init --template pyproject` to create one.")
+    return section is not None
 
 
 def _load_alembic() -> tuple[Any, type[Any]]:

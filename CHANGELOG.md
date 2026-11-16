@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+### Added
+
+- `flasgo db` now reads Alembic settings from a `[tool.alembic]` table in `pyproject.toml`, alone or merged with
+  `alembic.ini`, matching the `alembic` command. Previously it required `alembic.ini` and failed for projects that had
+  moved their configuration into `pyproject.toml`.
+- `flasgo db --pyproject` selects the `pyproject.toml` to read, and `flasgo db --config` accepts a `pyproject.toml` path
+  as Alembic does.
+- The CLI reads option defaults from a `[tool.flasgo]` table in `pyproject.toml`: `target` and `app` for `run`,
+  `routes`, `openapi`, and `check`; `host`, `port`, `reload`, and `reload_dirs` under `[tool.flasgo.run]`; and
+  `config`, `pyproject`, `directory`, and `template` under `[tool.flasgo.db]`. Command-line options override them.
+  The `target` argument is now optional when `[tool.flasgo]` sets one. Unknown keys, empty strings, and wrongly typed
+  values are errors.
+- `flasgo db init --template` chooses the Alembic environment template (`generic`, `async`, `multidb`, `pyproject`,
+  or `pyproject_async`; default `generic`).
+- `flasgo db revision`, `current`, `history`, `stamp`, and `check` wrap the matching Alembic commands.
+  `current --check-heads` and `check` exit with status 1 when the database is behind or the models have unmigrated
+  changes.
+- `flasgo config` shows each `[tool.flasgo]` setting's effective value and whether it came from `pyproject.toml` or the
+  built-in default, plus the Alembic files `flasgo db` will read. `--json` emits the same report as JSON.
+- `flasgo --version` prints the installed Flasgo version.
+- A JSON Schema for `[tool.flasgo]` ships at `flasgo/tool-flasgo.schema.json`.
+- Python 3.15 is supported. CI runs the full lint, type, audit, build, and test jobs on 3.15 as well as 3.14, and the
+  package metadata lists both versions.
+- `flasgo db init` prints the next steps: set the database URL, point `target_metadata` at the models, then run
+  `migrate` and `upgrade`.
+
+### Changed
+
+- `flasgo db` now merges a `[tool.alembic]` table from `pyproject.toml` in the current directory with `alembic.ini`.
+  Projects that kept an unused `[tool.alembic]` table next to `alembic.ini` should remove it or make the two agree.
+- `flasgo db init` records a relative `--directory` (including the default `migrations`) as
+  `script_location = %(here)s/migrations` instead of an absolute path, so the generated configuration can be committed
+  and used on other machines.
+- `flasgo db` reports Alembic errors, such as running `init` in a directory that is not empty, as a one-line message
+  with exit status 1 instead of a traceback. A missing, unparsable, or still-placeholder `sqlalchemy.url`, which
+  previously surfaced as a SQLAlchemy traceback from `env.py`, is reported the same way and names the file to fix.
+- `flasgo db` reads an ini file only when it has an `[alembic]` section, so `db.config` pointing at an unrelated file,
+  such as an app's `settings.ini`, no longer breaks the stock `env.py`. An ini named with `--config` that lacks the
+  section is an error.
+- With no `alembic.ini`, `flasgo db` now shows Alembic's progress messages, such as `Running stamp_revision`, using
+  the logging defaults from Alembic's own `alembic.ini`. Alembic keeps logging settings in `alembic.ini` even for
+  `pyproject.toml` setups, so these commands previously ran silently. Logging that is already configured is left
+  unchanged.
+- `flasgo run --port` and `[tool.flasgo.run] port` must be between 0 and 65535, and `--reload-dir` values and
+  `reload_dirs` entries must not be empty.
+- The `flasgo[otel]` extra now pins the OpenTelemetry API, SDK, and OTLP HTTP exporter at 1.45.2 and the ASGI
+  instrumentation at 0.66b2 (previously 1.45.1 and 0.66b1), fixing GHSA-mf5v-w3w3-f6cg, a denial of service through
+  quadratic-time `traceparent` parsing in `opentelemetry-api`.
+
 ## [0.11.1] - 2026-11-08
 
 ### Changed
