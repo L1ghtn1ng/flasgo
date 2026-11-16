@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-db = ["alembic==1.20.0"]
+db = ["alembic==1.20.1"]
 jwt = ["PyJWT==2.15.1"]
 metrics = ["prometheus-client==0.26.0"]
 otel = [
@@ -58,7 +58,7 @@ flasgo = "flasgo.cli:main"
 
 [dependency-groups]
 dev = [
-  "alembic==1.20.0",
+  "alembic==1.20.1",
   "PyJWT==2.15.1",
   "opentelemetry-api==1.45.2",
   "opentelemetry-exporter-otlp-proto-http==1.45.2",
@@ -66,10 +66,10 @@ dev = [
   "opentelemetry-sdk==1.45.2",
   "openapi-spec-validator==0.9.0",
   "prometheus-client==0.26.0",
-  "pytest==9.1.1",
+  "pytest==9.2.0",
   "redis==8.1.0",
-  "ruff==0.17.1",
-  "ty==0.0.89",
+  "ruff==0.17.4",
+  "ty==0.0.99",
 ]
 
 [tool.hatch.build.targets.sdist]
