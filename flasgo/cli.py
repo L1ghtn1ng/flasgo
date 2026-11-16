@@ -695,12 +695,20 @@ def _database_url_error(exc: Exception, config: Any, ini: Path) -> str | None:
 
 
 def _ini_database_urls(config: Any) -> set[str]:
-    """Return the raw sqlalchemy.url of every section of the ini file Alembic read, or an empty set without one."""
+    """
+    Return the raw sqlalchemy.url values Alembic's stock env.py reads from the ini, or an empty set without an ini.
+
+    That is the main section's URL and, for multidb, those of the sections named in its ``databases`` option; a URL in
+    any other section is never used, so it cannot be blamed for a failure.
+    """
     if config.config_file_name is None:
         return set()
     try:
         parser = config.file_config
-        return {url for section in parser.sections() if (url := parser.get(section, "sqlalchemy.url", raw=True, fallback=None))}
+        main = config.config_ini_section
+        databases = parser.get(main, "databases", raw=True, fallback="")
+        sections = [main, *(name.strip() for name in databases.split(",") if name.strip())]
+        return {url for section in sections if (url := parser.get(section, "sqlalchemy.url", raw=True, fallback=None))}
     except Exception:
         return set()
 

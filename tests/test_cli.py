@@ -747,19 +747,35 @@ def test_db_keeps_traceback_for_errors_not_caused_by_configured_url(
     assert not isinstance(exc_info.value, SystemExit)
 
 
+@pytest.mark.parametrize("unused_section", [False, True])
 @pytest.mark.usefixtures("restore_logging_config")
-def test_db_placeholder_message_requires_the_placeholder_in_the_ini(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_db_placeholder_message_requires_the_placeholder_in_the_ini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unused_section: bool
+) -> None:
     pytest.importorskip("alembic")
     monkeypatch.chdir(tmp_path)
     assert cli_module.main(["db", "init"]) == 0
     ini = tmp_path / "alembic.ini"
-    ini.write_text(re.sub(r"(?m)^sqlalchemy\.url = .*$", "sqlalchemy.url = sqlite://", ini.read_text(encoding="utf-8")), encoding="utf-8")
+    source = re.sub(r"(?m)^sqlalchemy\.url = .*$", "sqlalchemy.url = sqlite://", ini.read_text(encoding="utf-8"))
+    if unused_section:
+        # A section that is neither [alembic] nor listed in its databases option is never read by env.py.
+        source += f"\n[unused]\nsqlalchemy.url = {cli_module._ALEMBIC_PLACEHOLDER_URL}\n"
+    ini.write_text(source, encoding="utf-8")
     # env.py reads Alembic's placeholder from somewhere else, such as an unset-up DATABASE_URL; the ini is fine.
     env = tmp_path / "migrations" / "env.py"
     env.write_text(f'from sqlalchemy import create_engine\ncreate_engine("{cli_module._ALEMBIC_PLACEHOLDER_URL}")\n', encoding="utf-8")
     with pytest.raises(Exception, match=r"sqlalchemy\.dialects:driver$") as exc_info:
         cli_module.main(["db", "current"])
     assert not isinstance(exc_info.value, SystemExit)
+
+
+@pytest.mark.usefixtures("restore_logging_config")
+def test_db_reports_multidb_placeholder_in_listed_engine_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("alembic")
+    monkeypatch.chdir(tmp_path)
+    assert cli_module.main(["db", "init", "--template", "multidb"]) == 0
+    with pytest.raises(SystemExit, match=r"^Alembic: sqlalchemy\.url in alembic\.ini is still Alembic's placeholder, driver://"):
+        cli_module.main(["db", "current"])
 
 
 def test_db_url_errors_name_the_configured_ini(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
