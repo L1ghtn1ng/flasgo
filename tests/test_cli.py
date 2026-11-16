@@ -767,7 +767,16 @@ def test_db_init_next_steps_repeat_command_line_paths(
     assert cli_module.main(["db", "--config", "my conf.ini", "init"]) == 0
     out = capsys.readouterr().out
     assert "Set sqlalchemy.url in my conf.ini" in out
-    assert "`flasgo db --config 'my conf.ini' migrate -m \"create tables\"`, then `flasgo db --config 'my conf.ini' upgrade`" in out
+    db = cli_module._shell_join(["flasgo", "db", "--config", "my conf.ini"])
+    assert f'`{db} migrate -m "create tables"`, then `{db} upgrade`' in out
+
+
+@pytest.mark.parametrize(
+    ("windows", "expected"),
+    [(False, "flasgo db --config 'my conf.ini'"), (True, 'flasgo db --config "my conf.ini"')],
+)
+def test_next_step_commands_use_the_platform_quoting(windows: bool, expected: str) -> None:
+    assert cli_module._shell_join(["flasgo", "db", "--config", "my conf.ini"], windows=windows) == expected
 
 
 def test_db_runs_real_alembic_with_only_pyproject_configuration(

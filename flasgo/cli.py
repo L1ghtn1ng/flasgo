@@ -7,6 +7,7 @@ import re
 import secrets
 import shlex
 import stat
+import subprocess
 import sys
 import tomllib
 import traceback
@@ -597,7 +598,7 @@ def _db_init_next_steps(ini: Path, directory: Path, args: argparse.Namespace) ->
         url_step = f"Set sqlalchemy.url in {ini} to your database URL, or have {env} supply one."
         metadata_step = f"Point target_metadata in {env} at your models' MetaData"
     # Paths typed on the command line must be repeated; [tool.flasgo.db] paths are picked up again automatically.
-    db = shlex.join(
+    db = _shell_join(
         ["flasgo", "db"]
         + [part for flag, value in (("--config", args.config), ("--pyproject", args.pyproject)) if value for part in (flag, value)]
     )
@@ -607,6 +608,11 @@ def _db_init_next_steps(ini: Path, directory: Path, args: argparse.Namespace) ->
         f"  2. {metadata_step} so autogenerate can compare them.\n"
         f'  3. Run `{db} migrate -m "create tables"`, then `{db} upgrade`.'
     )
+
+
+def _shell_join(parts: list[str], *, windows: bool = os.name == "nt") -> str:
+    """Quote ``parts`` as one copyable command line: double quotes on Windows, where shells do not group with single quotes."""
+    return subprocess.list2cmdline(parts) if windows else shlex.join(parts)
 
 
 def _display_path(path: Path) -> Path:
