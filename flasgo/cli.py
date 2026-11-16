@@ -1,4 +1,5 @@
 import argparse
+import configparser
 import importlib
 import importlib.metadata
 import json
@@ -250,7 +251,7 @@ def _config_command(args: argparse.Namespace) -> int:
         )
     )
     alembic = {
-        "ini": {"path": str(files.ini), "used": files.ini.is_file()},
+        "ini": {"path": str(files.ini), "used": _has_alembic_ini(files.ini, required=False)},
         "pyproject": {"path": str(files.toml), "used": _has_tool_alembic(files.toml, required=False)},
     }
     status = ("[tool.flasgo] found" if settings else "no [tool.flasgo] table") if path.is_file() else "not found"
@@ -264,8 +265,9 @@ def _config_command(args: argparse.Namespace) -> int:
         value = _RUNTIME_DEFAULT_LABELS.get(row["setting"], "-") if row["value"] is None else json.dumps(row["value"])
         print(f"{row['setting']:<17} {value:<32} {row['source']}")
     print("\nAlembic configuration for `flasgo db`:")
+    ini_missing = "no [alembic] section" if files.ini.is_file() else "not found"
     toml_missing = "no [tool.alembic] table" if files.toml.is_file() else "not found"
-    for label, entry, missing in (("alembic.ini", alembic["ini"], "not found"), ("[tool.alembic]", alembic["pyproject"], toml_missing)):
+    for label, entry, missing in (("alembic.ini", alembic["ini"], ini_missing), ("[tool.alembic]", alembic["pyproject"], toml_missing)):
         print(f"  {label:<15} {entry['path']} ({'used' if entry['used'] else missing})")
     return 0
 
@@ -669,8 +671,13 @@ def _database_url_error(exc: Exception, config: Any, ini: Path) -> str | None:
     )
     if (missing_online or missing_offline) and not url:
         return f"Alembic: no database URL is configured. Set sqlalchemy.url in {source}, or have env.py supply one."
-    # multidb keeps one sqlalchemy.url per engine section, so the placeholder's "driver" dialect identifies it there too.
-    if isinstance(exc, NoSuchModuleError) and str(exc).endswith("sqlalchemy.dialects:driver"):
+    # multidb keeps one sqlalchemy.url per engine section, so look for the placeholder in every section, and only blame
+    # the ini when it really holds one: env.py may have read the same placeholder from somewhere else.
+    if (
+        isinstance(exc, NoSuchModuleError)
+        and str(exc).endswith("sqlalchemy.dialects:driver")
+        and _ALEMBIC_PLACEHOLDER_URL in _ini_database_urls(config)
+    ):
         return (
             f"Alembic: sqlalchemy.url in {source} is still Alembic's placeholder, {_ALEMBIC_PLACEHOLDER_URL}. Set it to your database URL."
         )
@@ -685,6 +692,17 @@ def _database_url_error(exc: Exception, config: Any, ini: Path) -> str | None:
         problem = "names an unknown database dialect" if isinstance(exc, NoSuchModuleError) else "is not a valid database URL"
         return f"Alembic: sqlalchemy.url in {source} {problem}: {exc}"
     return None
+
+
+def _ini_database_urls(config: Any) -> set[str]:
+    """Return the raw sqlalchemy.url of every section of the ini file Alembic read, or an empty set without one."""
+    if config.config_file_name is None:
+        return set()
+    try:
+        parser = config.file_config
+        return {url for section in parser.sections() if (url := parser.get(section, "sqlalchemy.url", raw=True, fallback=None))}
+    except Exception:
+        return set()
 
 
 def _raised_in(exc: BaseException, module_prefix: str) -> bool:
@@ -765,9 +783,7 @@ def _alembic_config_kwargs(files: _AlembicFiles) -> dict[str, str | None]:
     Returns:
         dict[str, str | None]: ``file_`` and ``toml_file`` keyword arguments for ``alembic.config.Config``.
     """
-    has_ini = files.ini.is_file()
-    if files.ini_required and not has_ini:
-        raise SystemExit(f"Alembic configuration not found: {files.ini}. Run `flasgo db init` first.")
+    has_ini = _has_alembic_ini(files.ini, required=files.ini_required)
     has_toml = _has_tool_alembic(files.toml, required=files.toml_required)
     if not has_ini and not has_toml:
         raise SystemExit(
@@ -775,6 +791,29 @@ def _alembic_config_kwargs(files: _AlembicFiles) -> dict[str, str | None]:
             "Run `flasgo db init` first, or check config and pyproject in [tool.flasgo.db]."
         )
     return {"file_": str(files.ini) if has_ini else None, "toml_file": str(files.toml) if has_toml else None}
+
+
+def _has_alembic_ini(path: Path, *, required: bool) -> bool:
+    """
+    Report whether ``path`` is an ini file with an [alembic] section, failing loudly when it was named explicitly.
+
+    Alembic needs that section in any ini it is given, and the stock env.py also reads its logging sections, so an
+    unrelated ini (an app's settings.ini, say) is skipped rather than handed to Alembic.
+    """
+    if not path.is_file():
+        if required:
+            raise SystemExit(f"Alembic configuration not found: {path}. Run `flasgo db init` first.")
+        return False
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with path.open(encoding="utf-8") as source:
+            parser.read_file(source)
+    except (OSError, UnicodeDecodeError, configparser.Error) as exc:
+        raise SystemExit(f"Could not read {path.resolve()}: {exc}") from None
+    has_section = parser.has_section("alembic")
+    if not has_section and required:
+        raise SystemExit(f"No [alembic] section in {path}. Run `flasgo db init` to create an Alembic configuration.")
+    return has_section
 
 
 def _has_tool_alembic(path: Path, *, required: bool) -> bool:

@@ -747,6 +747,21 @@ def test_db_keeps_traceback_for_errors_not_caused_by_configured_url(
     assert not isinstance(exc_info.value, SystemExit)
 
 
+@pytest.mark.usefixtures("restore_logging_config")
+def test_db_placeholder_message_requires_the_placeholder_in_the_ini(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("alembic")
+    monkeypatch.chdir(tmp_path)
+    assert cli_module.main(["db", "init"]) == 0
+    ini = tmp_path / "alembic.ini"
+    ini.write_text(re.sub(r"(?m)^sqlalchemy\.url = .*$", "sqlalchemy.url = sqlite://", ini.read_text(encoding="utf-8")), encoding="utf-8")
+    # env.py reads Alembic's placeholder from somewhere else, such as an unset-up DATABASE_URL; the ini is fine.
+    env = tmp_path / "migrations" / "env.py"
+    env.write_text(f'from sqlalchemy import create_engine\ncreate_engine("{cli_module._ALEMBIC_PLACEHOLDER_URL}")\n', encoding="utf-8")
+    with pytest.raises(Exception, match=r"sqlalchemy\.dialects:driver$") as exc_info:
+        cli_module.main(["db", "current"])
+    assert not isinstance(exc_info.value, SystemExit)
+
+
 def test_db_url_errors_name_the_configured_ini(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("alembic")
     monkeypatch.chdir(tmp_path)
@@ -983,6 +998,25 @@ def test_tool_flasgo_db_paths_are_used_only_when_they_hold_settings(
     assert cli_module.main(["db", "upgrade"]) == 0
     ini, toml = (str(tmp_path / name) if name else None for name in expected)
     assert calls == [("upgrade", ini, toml, "head", False)]
+
+
+def test_db_skips_ini_without_alembic_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls = _fake_alembic(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    # An app's own settings file: handing it to Alembic would make the stock env.py's fileConfig fail.
+    (tmp_path / "settings.ini").write_text("[app]\ndebug = true\n", encoding="utf-8")
+    _write_project(tmp_path, '[tool.alembic]\nscript_location = "m"\n\n[tool.flasgo.db]\nconfig = "settings.ini"\n')
+
+    assert cli_module.main(["db", "upgrade"]) == 0
+    assert calls == [("upgrade", None, str(tmp_path / "pyproject.toml"), "head", False)]
+    assert cli_module.main(["config"]) == 0
+    assert "settings.ini (no [alembic] section)" in capsys.readouterr().out
+    # Named on the command line, the same file is an error rather than silently skipped.
+    with pytest.raises(SystemExit, match=r"^No \[alembic\] section in .*settings\.ini\. "):
+        cli_module.main(["db", "--config", "settings.ini", "upgrade"])
+    (tmp_path / "settings.ini").write_text("not an ini\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"^Could not read .*settings\.ini: "):
+        cli_module.main(["db", "upgrade"])
 
 
 def test_tool_flasgo_db_conflicting_pyproject_paths_are_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

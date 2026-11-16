@@ -38,6 +38,9 @@
 - `flasgo db` reports Alembic errors, such as running `init` in a directory that is not empty, as a one-line message
   with exit status 1 instead of a traceback. A missing, unparsable, or still-placeholder `sqlalchemy.url`, which
   previously surfaced as a SQLAlchemy traceback from `env.py`, is reported the same way and names the file to fix.
+- `flasgo db` reads an ini file only when it has an `[alembic]` section, so `db.config` pointing at an unrelated file,
+  such as an app's `settings.ini`, no longer breaks the stock `env.py`. An ini named with `--config` that lacks the
+  section is an error.
 - With no `alembic.ini`, `flasgo db` now shows Alembic's progress messages, such as `Running stamp_revision`, using
   the logging defaults from Alembic's own `alembic.ini`. Alembic keeps logging settings in `alembic.ini` even for
   `pyproject.toml` setups, so these commands previously ran silently. Logging that is already configured is left
