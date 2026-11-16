@@ -18,9 +18,17 @@ env:
 
 jobs:
   checks:
-    name: Lint, types, audit, and build
+    name: Lint, types, audit, and build (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "3.14"
+          - "3.15"
+    env:
+      UV_PYTHON: ${{ matrix.python }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -45,7 +53,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.14"
+          python-version: ${{ matrix.python }}
 
       # setup-uv reads its version manifest from raw.githubusercontent.com, so every job's egress allowlist needs it.
       - name: Set up uv
@@ -68,8 +76,9 @@ jobs:
       - name: Check formatting
         run: uv run --frozen ruff format --check .
 
+      # pyproject.toml pins ty to the minimum supported Python; check each matrix version's stdlib as well.
       - name: Type check
-        run: uv run --frozen ty check
+        run: uv run --frozen ty check --python-version "$UV_PYTHON"
 
       - name: Audit dependencies
         run: uv audit --frozen
@@ -93,12 +102,15 @@ jobs:
         run: git diff --check
 
   test:
-    name: Tests (${{ matrix.store }})
+    name: Tests (Python ${{ matrix.python }}, ${{ matrix.store }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        python:
+          - "3.14"
+          - "3.15"
         store:
           - redis:8.2@sha256:7d1e4ce8b9395088377ab382d1f6cfdbd13b3690795198a0399ab8d683064d6d
           - valkey/valkey:8@sha256:98c6217ccc2fe5e6c4b5dcd5c40eef4de2a68924e7ecef50d5a0a30b57dfaef6
@@ -109,6 +121,7 @@ jobs:
           - 6379:6379
     env:
       FLASGO_TEST_REDIS_URL: redis://127.0.0.1:6379/0
+      UV_PYTHON: ${{ matrix.python }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -133,55 +146,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.14"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Install dependencies
-        run: uv sync --frozen --group dev
-
-      - name: Run tests
-        run: uv run --frozen pytest
-
-  test-next-python:
-    # Early warning for the next CPython release; failures here do not block merges.
-    name: Tests (Python 3.15-dev, non-blocking)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    continue-on-error: true
-    env:
-      UV_PYTHON: "3.15"
-
-    steps:
-      - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
-        with:
-          egress-policy: block
-          # Pre-release Pythons often lack wheels (for example pydantic-core), so Rust crates are built from source.
-          allowed-endpoints: >
-            releases.astral.sh:443
-            api.github.com:443
-            files.pythonhosted.org:443
-            github.com:443
-            index.crates.io:443
-            pypi.org:443
-            raw.githubusercontent.com:443
-            release-assets.githubusercontent.com:443
-            static.crates.io:443
-
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.15-dev"
-          allow-prereleases: true
+          python-version: ${{ matrix.python }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
