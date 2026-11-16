@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/L1ghtn1ng/flasgo/blob/main/flasgo/tool-flasgo.schema.json",
+  "$id": "https://raw.githubusercontent.com/L1ghtn1ng/flasgo/main/flasgo/tool-flasgo.schema.json",
   "title": "[tool.flasgo]",
   "description": "Defaults for the flasgo command, read from pyproject.toml in the current directory. Command-line options override them. See https://flasgo.dev",
   "type": "object",
@@ -31,6 +31,8 @@
         "port": {
           "description": "Port to bind, like --port.",
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 8000
         },
         "reload": {
@@ -41,7 +43,8 @@
           "description": "Directories to watch for reload in addition to the target's own directory. --reload-dir replaces this list.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "pattern": "\\S"
           }
         }
       }

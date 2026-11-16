@@ -1,11 +1,13 @@
 import importlib.metadata
 import json
+import logging
 import os
 import re
 import stat
 import sys
 import textwrap
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -648,13 +650,124 @@ def test_db_reports_unusable_configuration(
     assert calls == []
 
 
-@pytest.mark.parametrize("template", ["generic", "pyproject"])
-def test_db_init_passes_template_and_both_config_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, template: str) -> None:
+@pytest.mark.parametrize("template", ["generic", "pyproject", "multidb"])
+def test_db_init_passes_template_and_both_config_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], template: str
+) -> None:
     calls = _fake_alembic(monkeypatch)
     monkeypatch.chdir(tmp_path)
     argv = ["db", "init"] if template == "generic" else ["db", "init", "--template", template]
     assert cli_module.main(argv) == 0
     assert calls == [("init", str(tmp_path / "alembic.ini"), str(tmp_path / "pyproject.toml"), "migrations", template, True)]
+    out = capsys.readouterr().out
+    env = Path("migrations", "env.py")
+    if template == "multidb":
+        assert "Set the URL of each database listed in alembic.ini." in out
+        assert f"Map each engine name in target_metadata in {env}" in out
+    else:
+        assert "Set sqlalchemy.url in alembic.ini" in out
+        assert f"Point target_metadata in {env}" in out
+    assert '`flasgo db migrate -m "create tables"`, then `flasgo db upgrade`' in out
+
+
+@pytest.fixture
+def restore_logging_config() -> Iterator[None]:
+    """Alembic's stock env.py runs logging.config.fileConfig on alembic.ini, which replaces root handlers and disables loggers."""
+    root = logging.getLogger()
+    root_state = (list(root.handlers), root.level)
+    loggers = {
+        name: (logger.disabled, list(logger.handlers), logger.level, logger.propagate)
+        for name, logger in logging.Logger.manager.loggerDict.items()
+        if isinstance(logger, logging.Logger)
+    }
+    yield
+    root.handlers[:], level = root_state
+    root.setLevel(level)
+    for name, logger in list(logging.Logger.manager.loggerDict.items()):
+        if isinstance(logger, logging.Logger) and name in loggers:
+            logger.disabled, handlers, logger.level, logger.propagate = loggers[name]
+            logger.handlers[:] = handlers
+
+
+@pytest.mark.usefixtures("restore_logging_config")
+def test_db_reports_database_url_problems_in_one_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("alembic")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+    assert cli_module.main(["db", "init", "--template", "pyproject"]) == 0
+    ini = tmp_path / "alembic.ini"
+    template_ini = ini.read_text(encoding="utf-8")
+
+    def set_url(url: str) -> None:
+        ini.write_text(re.sub(r"(?m)^sqlalchemy\.url = .*$", f"sqlalchemy.url = {url}", template_ini), encoding="utf-8")
+
+    # A fresh `db init` leaves Alembic's placeholder URL; online and offline (--sql) runs both name it.
+    for argv in (["db", "current"], ["db", "upgrade", "head", "--sql"]):
+        with pytest.raises(SystemExit, match=r"^Alembic: sqlalchemy\.url in alembic\.ini is still Alembic's placeholder, driver://"):
+            cli_module.main(argv)
+    set_url("nosuch://localhost/app")
+    with pytest.raises(SystemExit, match=r"^Alembic: sqlalchemy\.url in alembic\.ini names an unknown database dialect: .*nosuch$"):
+        cli_module.main(["db", "current"])
+    for url in ("://not a url", "postgresql://user:pass@localhost:abc/app"):
+        set_url(url)
+        for argv in (["db", "current"], ["db", "upgrade", "head", "--sql"]):
+            with pytest.raises(SystemExit, match=r"^Alembic: sqlalchemy\.url in alembic\.ini is not a valid database URL: "):
+                cli_module.main(argv)
+    # With only [tool.alembic], env.py finds no URL at all.
+    ini.unlink()
+    for argv in (["db", "current"], ["db", "upgrade", "head", "--sql"]):
+        with pytest.raises(SystemExit, match=r"^Alembic: no database URL is configured\. Set sqlalchemy\.url in alembic\.ini"):
+            cli_module.main(argv)
+    # An ini without an [alembic] section is the same as no URL, not a new error from the handler.
+    ini.write_text(re.sub(r"(?ms)^\[alembic\]$.*?(?=^\[)", "", template_ini), encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"^Alembic: no database URL is configured\."):
+        cli_module.main(["db", "current"])
+
+
+@pytest.mark.parametrize(
+    ("env_source", "error"),
+    [
+        # env.py builds its own engine; the placeholder left in alembic.ini is not the URL that failed.
+        ('from sqlalchemy import create_engine\ncreate_engine("postgres://u:p@h/db")\n', "sqlalchemy.dialects:postgres"),
+        ('from sqlalchemy import create_engine\ncreate_engine("not a url")\n', "Could not parse SQLAlchemy URL"),
+        ('settings = {}\nsettings["url"]\n', "'url'"),
+        ('raise RuntimeError("models import failed")\n', "models import failed"),
+    ],
+)
+@pytest.mark.usefixtures("restore_logging_config")
+def test_db_keeps_traceback_for_errors_not_caused_by_configured_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_source: str, error: str
+) -> None:
+    pytest.importorskip("alembic")
+    monkeypatch.chdir(tmp_path)
+    assert cli_module.main(["db", "init"]) == 0
+    (tmp_path / "migrations" / "env.py").write_text(env_source, encoding="utf-8")
+    with pytest.raises(Exception, match=re.escape(error)) as exc_info:
+        cli_module.main(["db", "current"])
+    assert not isinstance(exc_info.value, SystemExit)
+
+
+def test_db_url_errors_name_the_configured_ini(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("alembic")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
+    assert cli_module.main(["db", "init", "--template", "pyproject"]) == 0
+    (tmp_path / "alembic.ini").unlink()
+    with (tmp_path / "pyproject.toml").open("a", encoding="utf-8") as project:
+        project.write('\n[tool.flasgo.db]\nconfig = "conf/db.ini"\n')
+    with pytest.raises(SystemExit, match=rf"Set sqlalchemy\.url in {re.escape(str(Path('conf', 'db.ini')))}, or"):
+        cli_module.main(["db", "current"])
+
+
+def test_db_init_next_steps_repeat_command_line_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _fake_alembic(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    assert cli_module.main(["db", "--config", "my conf.ini", "init"]) == 0
+    out = capsys.readouterr().out
+    assert "Set sqlalchemy.url in my conf.ini" in out
+    assert "`flasgo db --config 'my conf.ini' migrate -m \"create tables\"`, then `flasgo db --config 'my conf.ini' upgrade`" in out
 
 
 def test_db_runs_real_alembic_with_only_pyproject_configuration(
@@ -879,7 +992,10 @@ def test_broken_pyproject_still_fails_other_commands(tmp_path: Path, monkeypatch
         ('[tool.flasgo.run]\nport = "8000"\n', "tool.flasgo.run.port .* must be an integer"),
         ("[tool.flasgo.run]\nport = true\n", "tool.flasgo.run.port .* must be an integer"),
         ('[tool.flasgo.run]\nreload = "yes"\n', "tool.flasgo.run.reload .* must be a boolean"),
-        ('[tool.flasgo.run]\nreload_dirs = "templates"\n', "tool.flasgo.run.reload_dirs .* must be a list of strings"),
+        ('[tool.flasgo.run]\nreload_dirs = "templates"\n', "tool.flasgo.run.reload_dirs .* must be a list of non-empty strings"),
+        ('[tool.flasgo.run]\nreload_dirs = ["templates", " "]\n', "tool.flasgo.run.reload_dirs .* must be a list of non-empty strings"),
+        ("[tool.flasgo.run]\nport = 65536\n", "tool.flasgo.run.port .* must be between 0 and 65535"),
+        ("[tool.flasgo.run]\nport = -1\n", "tool.flasgo.run.port .* must be between 0 and 65535"),
         ('[tool.flasgo.db]\ntemplate = "django"\n', "tool.flasgo.db.template .* must be one of: generic"),
         ('[tool.flasgo]\ntarget = " "\n', "tool.flasgo.target .* must not be empty"),
         ('[tool.flasgo.db]\nconfig = ""\n', "tool.flasgo.db.config .* must not be empty"),
@@ -891,6 +1007,21 @@ def test_invalid_tool_flasgo_is_reported(tmp_path: Path, monkeypatch: pytest.Mon
     _capture_run(monkeypatch)
     with pytest.raises(SystemExit, match=message):
         cli_module.main(["run", "service_app.py:api"])
+
+
+@pytest.mark.parametrize(("port", "message"), [("65536", "port must be between 0 and 65535, not 65536"), ("http", "invalid port: 'http'")])
+def test_run_rejects_out_of_range_port_flag(capsys: pytest.CaptureFixture[str], port: str, message: str) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main(["run", "app.py", "--port", port])
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_run_rejects_empty_reload_dir_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.main(["run", "app.py", "--reload-dir", " "])
+    assert exc_info.value.code == 2
+    assert "argument --reload-dir: must not be empty" in capsys.readouterr().err
 
 
 def test_db_maintenance_commands_delegate_to_alembic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1029,6 +1160,11 @@ def test_tool_flasgo_schema_matches_cli_settings() -> None:
         "[tool.flasgo.run]\nport = true\n",
         '[tool.flasgo.run]\nreload_dirs = "templates"\n',
         "[tool.flasgo.run]\nreload_dirs = [1]\n",
+        '[tool.flasgo.run]\nreload_dirs = [""]\n',
+        "[tool.flasgo.run]\nport = 0\n",
+        "[tool.flasgo.run]\nport = 65535\n",
+        "[tool.flasgo.run]\nport = 65536\n",
+        "[tool.flasgo.run]\nport = -1\n",
         '[tool.flasgo.db]\ntemplate = "django"\n',
         '[tool.flasgo.db]\nconfig = ""\n',
     ],

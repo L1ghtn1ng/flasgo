@@ -23,6 +23,8 @@
   built-in default, plus the Alembic files `flasgo db` will read. `--json` emits the same report as JSON.
 - `flasgo --version` prints the installed Flasgo version.
 - A JSON Schema for `[tool.flasgo]` ships at `flasgo/tool-flasgo.schema.json`.
+- `flasgo db init` prints the next steps: set the database URL, point `target_metadata` at the models, then run
+  `migrate` and `upgrade`.
 
 ### Changed
 
@@ -32,7 +34,10 @@
   `script_location = %(here)s/migrations` instead of an absolute path, so the generated configuration can be committed
   and used on other machines.
 - `flasgo db` reports Alembic errors, such as running `init` in a directory that is not empty, as a one-line message
-  with exit status 1 instead of a traceback.
+  with exit status 1 instead of a traceback. A missing, unparsable, or still-placeholder `sqlalchemy.url`, which
+  previously surfaced as a SQLAlchemy traceback from `env.py`, is reported the same way and names the file to fix.
+- `flasgo run --port` and `[tool.flasgo.run] port` must be between 0 and 65535, and `--reload-dir` values and
+  `reload_dirs` entries must not be empty.
 - The `flasgo[otel]` extra now pins the OpenTelemetry API, SDK, and OTLP HTTP exporter at 1.45.2 and the ASGI
   instrumentation at 0.66b2 (previously 1.45.1 and 0.66b1), fixing GHSA-mf5v-w3w3-f6cg, a denial of service through
   quadratic-time `traceparent` parsing in `opentelemetry-api`.

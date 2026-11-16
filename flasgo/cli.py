@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import sys
 import tomllib
@@ -34,6 +35,8 @@ _CLI_ROOT_MODULES: dict[Path, dict[str, ModuleType]] = {}
 _MISSING = object()
 _DEFAULT_ALEMBIC_INI = "alembic.ini"
 _DEFAULT_PYPROJECT = "pyproject.toml"
+_MIN_PORT = 0
+_MAX_PORT = 65535
 _ALEMBIC_TEMPLATES = ("generic", "async", "multidb", "pyproject", "pyproject_async")
 # The [tool.flasgo] keys each command accepts: a type for a value, or a nested dict for a sub-table.
 _PROJECT_SCHEMA: dict[str, Any] = {
@@ -79,7 +82,7 @@ def build_parser(project_settings: Mapping[str, Any] | None = None) -> argparse.
     run_parser = subparsers.add_parser("run", help="Run a Flasgo application")
     _add_target_arguments(run_parser, target_defaults)
     run_parser.add_argument("--host", default=_CLI_DEFAULTS["run"]["host"], help="Host interface to bind")
-    run_parser.add_argument("--port", type=int, default=_CLI_DEFAULTS["run"]["port"], help="Port to bind")
+    run_parser.add_argument("--port", type=_port_argument, default=_CLI_DEFAULTS["run"]["port"], help="Port to bind")
     run_parser.add_argument(
         "--reload",
         action=argparse.BooleanOptionalAction,
@@ -90,6 +93,7 @@ def build_parser(project_settings: Mapping[str, Any] | None = None) -> argparse.
         "--reload-dir",
         dest="reload_dirs",
         action="append",
+        type=_non_empty_argument,
         default=None,
         help="Additional directory to watch for reload. Can be specified multiple times; replaces run.reload_dirs from pyproject.toml.",
     )
@@ -291,6 +295,9 @@ def load_project_settings(path: Path) -> dict[str, Any]:
     if settings is None:
         return {}
     _validate_project_table(settings, _PROJECT_SCHEMA, "tool.flasgo", path)
+    port = settings.get("run", {}).get("port")
+    if port is not None and not _MIN_PORT <= port <= _MAX_PORT:
+        raise SystemExit(f"tool.flasgo.run.port in {path} must be between {_MIN_PORT} and {_MAX_PORT}.")
     template = settings.get("db", {}).get("template")
     if template is not None and template not in _ALEMBIC_TEMPLATES:
         raise SystemExit(f"tool.flasgo.db.template in {path} must be one of: {', '.join(_ALEMBIC_TEMPLATES)}.")
@@ -308,13 +315,29 @@ def _validate_project_table(table: object, schema: Mapping[str, Any], name: str,
         if isinstance(expected, dict):
             _validate_project_table(value, expected, f"{name}.{key}", path)
         elif expected is list:
-            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-                raise SystemExit(f"{name}.{key} in {path} must be a list of strings.")
+            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                raise SystemExit(f"{name}.{key} in {path} must be a list of non-empty strings.")
         # TOML booleans are Python bools, which are also ints, so a port of `true` must not pass as 1.
         elif not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
             raise SystemExit(f"{name}.{key} in {path} must be {_TOML_TYPE_NAMES[expected]}.")
         elif expected is str and not value.strip():
             raise SystemExit(f"{name}.{key} in {path} must not be empty.")
+
+
+def _non_empty_argument(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
+def _port_argument(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port: {value!r}") from None
+    if not _MIN_PORT <= port <= _MAX_PORT:
+        raise argparse.ArgumentTypeError(f"port must be between {_MIN_PORT} and {_MAX_PORT}, not {port}")
+    return port
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -534,18 +557,116 @@ def _create_temporary(parent: Path, name: str, *, mode: int) -> tuple[Path, int]
 def _db_command(args: argparse.Namespace) -> int:
     command, config_type = _load_alembic()
     files = _alembic_files(args)
+    if args.db_command == "init":
+        # Alembic writes alembic.ini for every template, and pyproject templates also add [tool.alembic] to pyproject.toml.
+        config = config_type(file_=str(files.ini), toml_file=str(files.toml))
+        # A relative directory stays relative so Alembic records a portable "%(here)s/..." script_location.
+        directory = Path(args.directory).expanduser()
+        try:
+            command.init(config, str(directory), template=args.template, package=True)
+        except _alembic_command_error() as exc:
+            raise SystemExit(f"Alembic: {exc}") from None
+        print(_db_init_next_steps(files.ini, directory, args))
+        return 0
+    config = config_type(**_alembic_config_kwargs(files))
     try:
-        if args.db_command == "init":
-            # Alembic writes alembic.ini for every template, and pyproject templates also add [tool.alembic] to pyproject.toml.
-            config = config_type(file_=str(files.ini), toml_file=str(files.toml))
-            # A relative directory stays relative so Alembic records a portable "%(here)s/..." script_location.
-            command.init(config, str(Path(args.directory).expanduser()), template=args.template, package=True)
-        else:
-            _DB_ACTIONS[args.db_command](command, config_type(**_alembic_config_kwargs(files)), args)
+        _DB_ACTIONS[args.db_command](command, config, args)
     except _alembic_command_error() as exc:
         # Alembic's expected failures (existing directory, unapplied heads, model drift) read best as one line, as in its own CLI.
         raise SystemExit(f"Alembic: {exc}") from None
+    except Exception as exc:
+        # env.py turns an unset or placeholder sqlalchemy.url into a deep SQLAlchemy traceback; name the setting instead.
+        message = _database_url_error(exc, config, files.ini)
+        if message is None:
+            raise
+        raise SystemExit(message) from None
     return 0
+
+
+# The sqlalchemy.url that `alembic init` writes into alembic.ini for every template.
+_ALEMBIC_PLACEHOLDER_URL = "driver://user:pass@localhost/dbname"
+
+
+def _db_init_next_steps(ini: Path, directory: Path, args: argparse.Namespace) -> str:
+    ini = _display_path(ini)
+    env = directory / "env.py"
+    if args.template == "multidb":
+        url_step = f"Set the URL of each database listed in {ini}."
+        metadata_step = f"Map each engine name in target_metadata in {env} to that database's MetaData"
+    else:
+        url_step = f"Set sqlalchemy.url in {ini} to your database URL, or have {env} supply one."
+        metadata_step = f"Point target_metadata in {env} at your models' MetaData"
+    # Paths typed on the command line must be repeated; [tool.flasgo.db] paths are picked up again automatically.
+    db = shlex.join(
+        ["flasgo", "db"]
+        + [part for flag, value in (("--config", args.config), ("--pyproject", args.pyproject)) if value for part in (flag, value)]
+    )
+    return (
+        "Next steps:\n"
+        f"  1. {url_step}\n"
+        f"  2. {metadata_step} so autogenerate can compare them.\n"
+        f'  3. Run `{db} migrate -m "create tables"`, then `{db} upgrade`.'
+    )
+
+
+def _display_path(path: Path) -> Path:
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        return path
+
+
+def _database_url_error(exc: Exception, config: Any, ini: Path) -> str | None:
+    """
+    Return a one-line message when ``exc`` comes from a missing or unusable configured ``sqlalchemy.url``, else None.
+
+    Only errors that SQLAlchemy or Alembic raised while reading the URL qualify, and an invalid URL must fail the same
+    way when re-checked, so an env.py that builds its own engine (from ``DATABASE_URL``, say) keeps its traceback.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import NoSuchModuleError
+    except ImportError:
+        return None
+    try:
+        url = config.get_main_option("sqlalchemy.url")
+    except Exception:
+        # An ini without an [alembic] section, or an uninterpolatable value, must not replace the original error.
+        url = None
+    source = _display_path(ini)
+    # Online, engine_from_config pops a missing "url" key; offline (--sql), Alembic's context.configure gets url=None.
+    missing_online = isinstance(exc, KeyError) and exc.args == ("url",) and _raised_in(exc, "sqlalchemy.")
+    missing_offline = (
+        type(exc) is Exception and str(exc) == "Connection, url, or dialect_name is required." and _raised_in(exc, "alembic.runtime.")
+    )
+    if (missing_online or missing_offline) and not url:
+        return f"Alembic: no database URL is configured. Set sqlalchemy.url in {source}, or have env.py supply one."
+    # multidb keeps one sqlalchemy.url per engine section, so the placeholder's "driver" dialect identifies it there too.
+    if isinstance(exc, NoSuchModuleError) and str(exc).endswith("sqlalchemy.dialects:driver"):
+        return (
+            f"Alembic: sqlalchemy.url in {source} is still Alembic's placeholder, {_ALEMBIC_PLACEHOLDER_URL}. Set it to your database URL."
+        )
+    if not url or not _raised_in(exc, "sqlalchemy."):
+        return None
+    try:
+        make_url(url).get_dialect()
+    except Exception as url_error:
+        # Blame the setting only when it reproduces the failure exactly; otherwise the URL came from somewhere else.
+        if type(url_error) is not type(exc) or str(url_error) != str(exc):
+            return None
+        problem = "names an unknown database dialect" if isinstance(exc, NoSuchModuleError) else "is not a valid database URL"
+        return f"Alembic: sqlalchemy.url in {source} {problem}: {exc}"
+    return None
+
+
+def _raised_in(exc: BaseException, module_prefix: str) -> bool:
+    """Return whether the innermost frame of ``exc``'s traceback belongs to a module under ``module_prefix``."""
+    tb = exc.__traceback__
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    return str(tb.tb_frame.f_globals.get("__name__", "")).startswith(module_prefix)
 
 
 _DB_ACTIONS: dict[str, Callable[[Any, Any, argparse.Namespace], object]] = {

@@ -147,7 +147,8 @@ plus which Alembic files `flasgo db` will read; add `--json` for scripts. `uv ru
 version.
 
 A JSON Schema for the table ships with Flasgo at `flasgo/tool-flasgo.schema.json`, describing every key with its type,
-default, and allowed values, for editors and linters that validate `pyproject.toml`.
+default, and allowed values, for editors and linters that validate `pyproject.toml`. Its published URL is
+`https://raw.githubusercontent.com/L1ghtn1ng/flasgo/main/flasgo/tool-flasgo.schema.json`.
 
 You can still use `uvicorn` with reload:
 
@@ -575,6 +576,8 @@ uv run flasgo db downgrade
 
 `upgrade` defaults to `head` and `downgrade` to `-1`; pass a revision to target another one, or `--sql` to print the
 SQL without changing the database. `flasgo db init --directory` sets the migration directory (default `migrations`).
+After `init`, Flasgo prints the next steps: set `sqlalchemy.url` in `alembic.ini`, point `target_metadata` in
+`env.py` at your models, then run `migrate` and `upgrade` (repeating any `--config` or `--pyproject` you passed).
 
 The everyday Alembic commands are available too, so you rarely need to call `alembic` directly:
 
@@ -587,7 +590,9 @@ uv run flasgo db check                           # fails if models changed witho
 ```
 
 `current --check-heads` and `check` exit with status 1 on failure, which makes them useful CI gates. Alembic errors,
-such as running `init` in a directory that is not empty, print a one-line message instead of a traceback.
+such as running `init` in a directory that is not empty, print a one-line message instead of a traceback. So does a
+missing, unparsable, or still-placeholder `sqlalchemy.url`, naming the file to fix. Other errors raised by `env.py`,
+including a bad URL it reads from somewhere else such as an environment variable, keep their traceback.
 
 Alembic settings can live in `alembic.ini`, in a `[tool.alembic]` table in `pyproject.toml`, or both, as with the
 `alembic` command; when both hold settings, Alembic merges them. `flasgo db` reads whichever of `alembic.ini` and `pyproject.toml` in the current directory holds
