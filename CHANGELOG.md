@@ -84,7 +84,10 @@
   URL-encoded body, or an RFC 5987 parameter. Python's `punycode` decoder is quadratic, and one 1 MiB form request
   blocked the event loop for about two minutes.
 - A recursive union `response_model` no longer re-projects the same subtree for each union member, which took time
-  exponential in the nesting depth when the response echoed request-shaped data.
+  exponential in the nesting depth when the response echoed request-shaped data. An object the response reuses
+  still counts toward the work and depth limits at every place it appears, so a small value that shares one list many
+  times cannot expand into a huge JSON body.
+- OpenAPI marks a `public=True` route as unauthenticated even when the same function is protected on another route.
 - A form or parameter charset of `undefined`, or one containing NUL, no longer causes HTTP 500.
 
 ### Fixed

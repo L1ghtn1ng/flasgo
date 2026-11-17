@@ -1673,11 +1673,7 @@ class Flasgo(RouteDecorators):
             return self._openapi_cache
         spec = build_openapi_spec(
             routes=self._routes,
-            route_auth={
-                route.endpoint: auth
-                for route in (*self._routes, *self._websocket_routes)
-                if (auth := self._auth_for(route.endpoint, public=route.public))
-            },
+            route_auth=lambda route: self._auth_for(route.endpoint, public=route.public),
             auth_schemes=self._auth_backend_schemes,
             title=self.settings.API_TITLE,
             version=self.settings.API_VERSION,

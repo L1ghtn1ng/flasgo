@@ -1,6 +1,7 @@
 import inspect
 from collections.abc import Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
@@ -13,20 +14,40 @@ from .validation import (
     RequestValidationError,
     ValidationBudget,
     _model_hints,
+    _problem,
     to_jsonable,
     validate_value,
 )
 
 RESPONSE_WORK_MULTIPLIER = 100
 
-# Per-projection memo: (id(model), id(value)) -> (model, value, projected result or _Failure). Holding the model and
-# value keeps their ids from being reused while the projection runs.
-type _Memo = dict[tuple[int, int], tuple[object, object, Any]]
-
 
 @dataclass(slots=True, frozen=True)
 class _Failure:
     error: Exception
+
+
+@dataclass(slots=True, frozen=True)
+class _Projected:
+    """A memoized projection: its result, the nodes it expands to in the output, and its height below its root."""
+
+    result: Any
+    size: int
+    height: int
+
+
+@dataclass(slots=True)
+class _Memo:
+    """State shared by one ``project_response`` call.
+
+    ``entries`` maps (id(model), id(value)) to (model, value, _Projected or _Failure); holding the model and value keeps
+    their ids from being reused while the projection runs. ``size`` counts the nodes of the output built so far,
+    expanding every reuse of a memoized subtree, and ``deepest`` is the deepest nesting level reached in it.
+    """
+
+    entries: dict[tuple[int, int], tuple[object, object, _Projected | _Failure]] = dataclass_field(default_factory=dict)
+    size: int = 0
+    deepest: int = 0
 
 
 class ResponseValidationError(Exception):
@@ -133,7 +154,7 @@ def project_response(model: object, value: object, budget: ValidationBudget) -> 
         ResponseValidationError: If the value does not satisfy the model or validation fails.
     """
     try:
-        return _project(model, value, budget, 0, {})
+        return _project(model, value, budget, 0, _Memo())
     except Exception as exc:
         raise ResponseValidationError from exc
 
@@ -170,27 +191,64 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int,
     """Project ``value`` once per (model, container) pair.
 
     Union members are tried in turn, so without the memo a recursive union model re-projects the same subtree for
-    every member at every level: exponential in the nesting depth.
+    every member at every level: exponential in the nesting depth. A memoized subtree still counts toward the limits
+    wherever it is reused: its expanded size toward the work limit, since ``Response.json`` writes it out at every
+    occurrence, and its height toward the depth limit.
     """
+    size_before = memo.size
     if not isinstance(value, Mapping | list | tuple | set | frozenset) and not (is_dataclass(value) and not isinstance(value, type)):
-        return _project_value(model, value, budget, depth, memo)
+        try:
+            result = _project_value(model, value, budget, depth, memo)
+        except BaseException:
+            memo.size = size_before
+            raise
+        _count_output(memo, budget, size=1, depth=depth, height=0)
+        return result
     key = (id(model), id(value))
-    cached = memo.get(key)
+    cached = memo.entries.get(key)
     if cached is not None:
-        if isinstance(cached[2], _Failure):
-            raise cached[2].error
-        return cached[2]
+        entry = cached[2]
+        if isinstance(entry, _Failure):
+            raise entry.error
+        _count_output(memo, budget, size=entry.size, depth=depth, height=entry.height)
+        return entry.result
+    deepest_before = memo.deepest
+    memo.deepest = depth
     try:
         result = _project_value(model, value, budget, depth, memo)
     except RequestValidationError as exc:
+        _restore(memo, size_before, deepest_before)
         if not any(issue.code == "validation_limit" for issue in exc.issues):
-            memo[key] = (model, value, _Failure(exc))
+            memo.entries[key] = (model, value, _Failure(exc))
         raise
     except ResponseValidationError as exc:
-        memo[key] = (model, value, _Failure(exc))
+        _restore(memo, size_before, deepest_before)
+        memo.entries[key] = (model, value, _Failure(exc))
         raise
-    memo[key] = (model, value, result)
+    except BaseException:
+        _restore(memo, size_before, deepest_before)
+        raise
+    _count_output(memo, budget, size=1, depth=depth, height=0)
+    projected = _Projected(result, memo.size - size_before, memo.deepest - depth)
+    memo.deepest = max(deepest_before, memo.deepest)
+    memo.entries[key] = (model, value, projected)
     return result
+
+
+def _restore(memo: _Memo, size: int, deepest: int) -> None:
+    """Drop the output counted by a projection attempt that failed (a union member that did not match)."""
+    memo.size = size
+    memo.deepest = deepest
+
+
+def _count_output(memo: _Memo, budget: ValidationBudget, *, size: int, depth: int, height: int) -> None:
+    """Count ``size`` output nodes reaching ``height`` levels below ``depth`` against the response budget."""
+    if depth + height > budget.max_depth:
+        raise _problem(("response",), "validation_limit", "Response projection exceeded the configured depth limit.")
+    memo.size += size
+    memo.deepest = max(memo.deepest, depth + height)
+    if memo.size > budget.max_work:
+        raise _problem(("response",), "validation_limit", "Response projection exceeded the configured work limit.")
 
 
 def _project_value(model: object, value: object, budget: ValidationBudget, depth: int, memo: _Memo) -> Any:

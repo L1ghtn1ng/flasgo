@@ -690,3 +690,86 @@ def test_empty_urlencoded_charset_defaults_to_utf8() -> None:
         "/form", body=b"a=%C3%A9", headers={"content-type": "application/x-www-form-urlencoded; charset="}
     )
     assert response.json() == {"fields": {"a": ["é"]}, "files": {}}
+
+
+def _shared_dag(levels: int) -> list[Any]:
+    value: list[Any] = [0]
+    for _ in range(levels):
+        value = [value, value]
+    return value
+
+
+@dataclass
+class _Box:
+    items: list[_Box]
+
+
+def _shared_boxes(levels: int) -> _Box:
+    value = _Box([])
+    for _ in range(levels):
+        value = _Box([value, value])
+    return value
+
+
+def _nested_list_model(levels: int) -> object:
+    model: object = int
+    for _ in range(levels + 1):
+        model = list[model]
+    return model
+
+
+@pytest.mark.parametrize(
+    ("model", "build"),
+    [
+        (Any, _shared_dag),
+        (_nested_list_model(21), _shared_dag),
+        (_Box, _shared_boxes),
+    ],
+    ids=["any", "nested-list", "dataclass"],
+)
+def test_reused_containers_count_toward_the_response_work_limit_at_every_occurrence(model: object, build: Callable[[int], object]) -> None:
+    # 2**21 leaves: millions of output nodes against the default 1M response limit, from a 22-object value.
+    app = Flasgo(settings={"MAX_VALIDATION_DEPTH": 64})
+
+    @app.get("/dag", public=True, response_model=model)
+    def dag() -> Any:
+        return build(21)
+
+    started = time.perf_counter()
+    response = TestClient(app).get("/dag")
+    assert response.status_code == 500
+    assert time.perf_counter() - started < 5
+
+
+def test_reused_containers_count_toward_the_depth_limit_where_they_are_reused() -> None:
+    app = Flasgo(settings={"MAX_VALIDATION_DEPTH": 10})
+    deep = _Box([_Box([_Box([])])])
+
+    @app.get("/shallow", public=True, response_model=_Box)
+    def shallow() -> _Box:
+        return _Box([deep, _Box([deep])])
+
+    @app.get("/deep", public=True, response_model=_Box)
+    def too_deep() -> _Box:
+        return _Box([deep, _Box([_Box([_Box([deep])])])])
+
+    client = TestClient(app)
+    assert client.get("/shallow").status_code == 200
+    assert client.get("/deep").status_code == 500
+
+
+def test_openapi_security_follows_each_routes_public_flag() -> None:
+    app = _auth_app()
+
+    def inner() -> str:
+        return "ok"
+
+    app.add_route("/private", inner)
+    app.add_route("/public", inner, public=True)
+    app.authorize()(_audit(inner))
+
+    client = TestClient(app)
+    assert [client.get(path).status_code for path in ("/private", "/public")] == [401, 200]
+    paths = app.openapi_spec()["paths"]
+    assert "security" in paths["/private"]["get"]
+    assert "security" not in paths["/public"]["get"]
