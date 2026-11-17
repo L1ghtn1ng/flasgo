@@ -312,13 +312,16 @@ unsupported; enforce public-to-private network boundaries at a trusted proxy or 
 - Static file path traversal and symlink escape protections.
 - Request body/head limits and read timeouts at the application boundary, with H11 head limits in the built-in
   development server.
-- Bounded multipart part counts (`MAX_MULTIPART_PARTS`) and form field counts (`MAX_FORM_FIELDS`), enforced before
-  the parser can allocate heavily.
+- Bounded multipart part counts (`MAX_MULTIPART_PARTS`), form field counts (`MAX_FORM_FIELDS`), and 16 KiB of headers
+  per part, enforced while a linear-time parser splits the body. Nested multipart parts are rejected unparsed.
 - Sanitized upload filenames: directory components and control characters are removed, then surrounding whitespace
   and dots are stripped until neither can expose another dot prefix or suffix.
 - Bounded validation depth, work, and returned issue counts.
 - Per-client throttling for repeated security failures (`429`), on by default at 50 failures per 60 seconds
   (`SECURITY_FAILURE_RATE_LIMIT` / `SECURITY_FAILURE_WINDOW_SECONDS`; set the limit to `0` to disable it).
+  Host-header and CSRF failures, which another site can trigger from a visitor's browser, use a separate bucket that
+  throttles only further failing requests, so they cannot lock a client out of authentication. Denied requests to
+  `authorize()` routes, including ones sent without credentials, still count toward the authentication bucket.
 - Per-route rate limiting with `@app.ratelimit(...)` / `@rate_limit(...)`, using the ASGI client IP by default.
 - Fail-closed rate-limit key capacity that preserves active quota accounting rather than evicting it under churn.
 - Failed metrics-endpoint authentication is throttled like every other security failure.

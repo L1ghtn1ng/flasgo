@@ -1,6 +1,7 @@
 import inspect
 from collections.abc import Mapping
-from dataclasses import MISSING, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
@@ -13,9 +14,40 @@ from .validation import (
     RequestValidationError,
     ValidationBudget,
     _model_hints,
+    _problem,
     to_jsonable,
     validate_value,
 )
+
+RESPONSE_WORK_MULTIPLIER = 100
+
+
+@dataclass(slots=True, frozen=True)
+class _Failure:
+    error: Exception
+
+
+@dataclass(slots=True, frozen=True)
+class _Projected:
+    """A memoized projection: its result, the nodes it expands to in the output, and its height below its root."""
+
+    result: Any
+    size: int
+    height: int
+
+
+@dataclass(slots=True)
+class _Memo:
+    """State shared by one ``project_response`` call.
+
+    ``entries`` maps (id(model), id(value)) to (model, value, _Projected or _Failure); holding the model and value keeps
+    their ids from being reused while the projection runs. ``size`` counts the nodes of the output built so far,
+    expanding every reuse of a memoized subtree, and ``deepest`` is the deepest nesting level reached in it.
+    """
+
+    entries: dict[tuple[int, int], tuple[object, object, _Projected | _Failure]] = dataclass_field(default_factory=dict)
+    size: int = 0
+    deepest: int = 0
 
 
 class ResponseValidationError(Exception):
@@ -88,17 +120,21 @@ def validate_response_model(model: object, *, _seen: set[type[Any]] | None = Non
 
 def response_budget(request: Request) -> ValidationBudget:
     """
-    Create a validation budget from the limits configured for a request.
+    Create the validation budget for projecting a handler's response.
+
+    The configured depth and issue limits apply as they are. ``MAX_VALIDATION_WORK`` is sized for request input, so a
+    response gets ``RESPONSE_WORK_MULTIPLIER`` times as much: enough for responses with hundreds of thousands of
+    values, while still bounding the work a response shaped by request data can cause.
 
     Parameters:
-        request (Request): The request providing validation depth, work, and issue limits.
+        request (Request): The request providing validation depth and issue limits.
 
     Returns:
         ValidationBudget: The configured validation budget.
     """
     return ValidationBudget(
         max_depth=request.scope["max_validation_depth"],
-        max_work=request.scope["max_validation_work"],
+        max_work=request.scope["max_validation_work"] * RESPONSE_WORK_MULTIPLIER,
         max_issues=request.scope["max_validation_issues"],
     )
 
@@ -118,7 +154,7 @@ def project_response(model: object, value: object, budget: ValidationBudget) -> 
         ResponseValidationError: If the value does not satisfy the model or validation fails.
     """
     try:
-        return _project(model, value, budget, 0)
+        return _project(model, value, budget, 0, _Memo())
     except Exception as exc:
         raise ResponseValidationError from exc
 
@@ -151,7 +187,71 @@ def contract_response(value: ResponseValue, model: object, request: Request) -> 
     return to_response((response, status, headers))
 
 
-def _project(model: object, value: object, budget: ValidationBudget, depth: int) -> Any:
+def _project(model: object, value: object, budget: ValidationBudget, depth: int, memo: _Memo) -> Any:
+    """Project ``value`` once per (model, container) pair.
+
+    Union members are tried in turn, so without the memo a recursive union model re-projects the same subtree for
+    every member at every level: exponential in the nesting depth. A memoized subtree still counts toward the limits
+    wherever it is reused: its expanded size toward the work limit, since ``Response.json`` writes it out at every
+    occurrence, and its height toward the depth limit.
+    """
+    size_before = memo.size
+    if not isinstance(value, Mapping | list | tuple | set | frozenset) and not (is_dataclass(value) and not isinstance(value, type)):
+        try:
+            result = _project_value(model, value, budget, depth, memo)
+        except BaseException:
+            memo.size = size_before
+            raise
+        _count_output(memo, budget, size=1, depth=depth, height=0)
+        return result
+    key = (id(model), id(value))
+    cached = memo.entries.get(key)
+    if cached is not None:
+        entry = cached[2]
+        if isinstance(entry, _Failure):
+            raise entry.error
+        _count_output(memo, budget, size=entry.size, depth=depth, height=entry.height)
+        return entry.result
+    deepest_before = memo.deepest
+    memo.deepest = depth
+    try:
+        result = _project_value(model, value, budget, depth, memo)
+    except RequestValidationError as exc:
+        _restore(memo, size_before, deepest_before)
+        if not any(issue.code == "validation_limit" for issue in exc.issues):
+            memo.entries[key] = (model, value, _Failure(exc))
+        raise
+    except ResponseValidationError as exc:
+        _restore(memo, size_before, deepest_before)
+        memo.entries[key] = (model, value, _Failure(exc))
+        raise
+    except BaseException:
+        _restore(memo, size_before, deepest_before)
+        raise
+    _count_output(memo, budget, size=1, depth=depth, height=0)
+    projected = _Projected(result, memo.size - size_before, memo.deepest - depth)
+    memo.deepest = max(deepest_before, memo.deepest)
+    memo.entries[key] = (model, value, projected)
+    return result
+
+
+def _restore(memo: _Memo, size: int, deepest: int) -> None:
+    """Drop the output counted by a projection attempt that failed (a union member that did not match)."""
+    memo.size = size
+    memo.deepest = deepest
+
+
+def _count_output(memo: _Memo, budget: ValidationBudget, *, size: int, depth: int, height: int) -> None:
+    """Count ``size`` output nodes reaching ``height`` levels below ``depth`` against the response budget."""
+    if depth + height > budget.max_depth:
+        raise _problem(("response",), "validation_limit", "Response projection exceeded the configured depth limit.")
+    memo.size += size
+    memo.deepest = max(memo.deepest, depth + height)
+    if memo.size > budget.max_work:
+        raise _problem(("response",), "validation_limit", "Response projection exceeded the configured work limit.")
+
+
+def _project_value(model: object, value: object, budget: ValidationBudget, depth: int, memo: _Memo) -> Any:
     """
     Project a response value according to its declared model.
 
@@ -186,14 +286,24 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
                     field_value = field.default_factory()
                 else:
                     raise ResponseValidationError
-            result[field.name] = _project(hints.get(field.name, field.type), field_value, budget, depth + 1)
+            result[field.name] = _project(hints.get(field.name, field.type), field_value, budget, depth + 1, memo)
         return result
     origin = get_origin(model)
     args = get_args(model)
     if origin is Union:
+        # Try the dataclass members the value is an instance of first (its own class before its bases): projecting a
+        # ``Dog`` through a structurally compatible ``Cat`` listed earlier would silently drop the ``Dog``'s fields.
+        if is_dataclass(value) and not isinstance(value, type):
+            mro = type(value).__mro__
+            matching = sorted(
+                (member for member in args if is_dataclass(member) and isinstance(member, type) and isinstance(value, member)),
+                # A virtual subclass (``ABC.register``) matches without being in the MRO; keep those in declared order.
+                key=lambda member: mro.index(member) if member in mro else len(mro),
+            )
+            args = (*matching, *(member for member in args if member not in matching))
         for member in args:
             try:
-                return _project(member, value, budget, depth + 1)
+                return _project(member, value, budget, depth + 1, memo)
             except RequestValidationError as exc:
                 if any(issue.code == "validation_limit" for issue in exc.issues):
                     raise
@@ -206,9 +316,9 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
         if origin is tuple and args and args[-1] is not Ellipsis:
             if len(value) != len(args):
                 raise ResponseValidationError
-            return [_project(item_type, item, budget, depth + 1) for item_type, item in zip(args, value, strict=True)]
+            return [_project(item_type, item, budget, depth + 1, memo) for item_type, item in zip(args, value, strict=True)]
         member = args[0] if args else Any
-        return [_project(member, item, budget, depth + 1) for item in value]
+        return [_project(member, item, budget, depth + 1, memo) for item in value]
     if origin in {dict, Mapping} or model is dict:
         if not isinstance(value, Mapping):
             raise ResponseValidationError
@@ -218,17 +328,17 @@ def _project(model: object, value: object, budget: ValidationBudget, depth: int)
             if not isinstance(key, str):
                 raise ResponseValidationError
             validate_value(key_type, key, location=("response",), budget=budget)
-            result[key] = _project(item_type, item, budget, depth + 1)
+            result[key] = _project(item_type, item, budget, depth + 1, memo)
         return result
     if model in {Any, object, inspect.Signature.empty}:
         if is_dataclass(value) and not isinstance(value, type):
-            return _project(type(value), value, budget, depth + 1)
+            return _project(type(value), value, budget, depth + 1, memo)
         if isinstance(value, Mapping):
-            return _project(dict[str, Any], value, budget, depth + 1)
+            return _project(dict[str, Any], value, budget, depth + 1, memo)
         if isinstance(value, list | tuple | set | frozenset):
-            return _project(list[Any], value, budget, depth + 1)
+            return _project(list[Any], value, budget, depth + 1, memo)
         if isinstance(value, Enum):
-            return _project(Any, value.value, budget, depth + 1)
+            return _project(Any, value.value, budget, depth + 1, memo)
         if value is None or isinstance(value, str | bool | int | float):
             model = type(value)
         else:

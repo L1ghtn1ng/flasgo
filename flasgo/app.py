@@ -57,7 +57,7 @@ from .ratelimit import (
     rate_limit_success_headers,
 )
 from .registration import RouteDecorators, route_methods
-from .response import HTTP_TOKEN_RE, Response, ResponseValue, to_response
+from .response import HTTP_TOKEN_RE, Response, ResponseValue, status_allows_body, to_response
 from .routing import (
     Endpoint,
     MatchResult,
@@ -297,11 +297,17 @@ class Flasgo(RouteDecorators):
         self._auth_backends: dict[str, AuthBackend] = {"default": _default_auth_backend}
         self._auth_backend_schemes: dict[str, dict[str, Any]] = {}
         self._route_auth: dict[object, RouteAuth] = {}
+        # Blueprint endpoint copies: their authorization is fixed when the blueprint is registered.
+        self._auth_snapshots: set[object] = set()
+        self._authorized_wrappers: dict[object, list[object]] = {}
         self._rate_limiter: RateLimitBackend = rate_limiter if rate_limiter is not None else RateLimiter()
         self._session_backend = session_backend
         self._openapi_cache: dict[str, Any] | None = None
         self._openapi_dirty = True
         self._security_throttle = SecurityFailureThrottle(self.security)
+        # Host and CSRF failures can be induced from another site through the victim's own browser, so they are
+        # counted separately: they throttle further failing requests but never lock out a client's credentials.
+        self._request_check_throttle = SecurityFailureThrottle(self.security)
         self._logger = logging.getLogger("flasgo.security")
         self._access_logger = logging.getLogger("flasgo.access")
         self._websocket_logger = logging.getLogger("flasgo.websocket")
@@ -516,13 +522,14 @@ class Flasgo(RouteDecorators):
                 headers = {"x-request-id": req.request_id}
                 if isinstance(exc, StoreUnavailable):
                     status, detail = 503, "Service Unavailable"
-                elif isinstance(exc, HTTPException):
-                    # Keep headers such as Retry-After and never send an empty body.
-                    status, detail = exc.status_code, exc.detail or _status_text(exc.status_code)
+                elif isinstance(exc, HTTPException) and _is_final_status(exc.status_code):
+                    # Keep headers such as Retry-After and never send an empty body where one is allowed.
+                    status, detail = exc.status_code, exc.detail
                     headers = {**exc.headers, **headers}
                 else:
                     status, detail = 500, "Internal Server Error"
-                response = Response.text(detail, status_code=status, headers=headers)
+                response = _http_exception_response(status, detail)
+                response.headers.update({key.lower(): value for key, value in headers.items()})
                 apply_security_headers(response, self.security)
                 cors = req.scope.get("flasgo.cors")
                 if isinstance(cors, CORSConfig):
@@ -785,7 +792,7 @@ class Flasgo(RouteDecorators):
             upgrade_req.scope["session"] = loaded_session
             scope["session"] = loaded_session
 
-            denial = await self._authorize_websocket(upgrade_req, match.endpoint)
+            denial = await self._authorize_websocket(upgrade_req, match.endpoint, public=match.public)
             scope["user"] = upgrade_req.scope["user"]
             if denial is not None:
                 status, headers = denial
@@ -921,8 +928,10 @@ class Flasgo(RouteDecorators):
         self,
         req: Request,
         endpoint: WebSocketEndpoint,
+        *,
+        public: bool = False,
     ) -> tuple[int, dict[str, str]] | None:
-        denial = await self._authorize(req, endpoint, set_user_ctx=False)
+        denial = await self._authorize(req, endpoint, set_user_ctx=False, public=public)
         if denial is None:
             return None
         if denial.reason == "rate-limited":
@@ -1116,7 +1125,54 @@ class Flasgo(RouteDecorators):
 
     def _route_precedence(self, route: Route | WebSocketRoute) -> tuple[tuple[int, int, int], bool]:
         """Order both protocols by specificity, then by endpoint authorization."""
-        return route.specificity, route.endpoint in self._route_auth
+        return route.specificity, self._auth_for(route.endpoint, public=route.public) is not None
+
+    def _auth_for(self, endpoint: object, *, public: bool) -> RouteAuth | None:
+        """Return the authorization a route endpoint carries, looking through ``functools.wraps`` wrappers.
+
+        Authorization is recorded against the function ``authorize()`` decorated, so a wrapping decorator stacked
+        between the route decorator and ``authorize()`` would otherwise make the route silently public. Two shapes
+        are covered: the routed function wraps an authorized one (``route / wrapper / authorize``), and the routed
+        function is wrapped by an authorized one (``authorize / wrapper / route``). The second shape is inherited by
+        every route on the inner function except one declared ``public=True``, which is how a view is reused both
+        publicly and behind an authorized wrapper.
+        """
+        auth = self._route_auth.get(endpoint)
+        if auth is not None:
+            return auth
+        try:
+            if endpoint in self._auth_snapshots:
+                return None
+        except TypeError:
+            pass
+        candidate = getattr(endpoint, "__wrapped__", None)
+        seen: set[int] = {id(endpoint)}
+        while candidate is not None and id(candidate) not in seen and len(seen) < 64:
+            try:
+                auth = self._route_auth.get(candidate)
+            except TypeError:  # unhashable objects in a ``__wrapped__`` chain were never authorized
+                break
+            if auth is not None:
+                return auth
+            seen.add(id(candidate))
+            candidate = getattr(candidate, "__wrapped__", None)
+        if not public:
+            try:
+                wrappers = self._authorized_wrappers.get(endpoint, ())
+            except TypeError:
+                wrappers = ()
+            for wrapper in wrappers:
+                auth = self._route_auth.get(wrapper)
+                if auth is not None:
+                    return auth
+        return None
+
+    def _set_route_auth(self, endpoint: object, permissions: tuple[PermissionLike, ...], backend: str) -> None:
+        """Record ``endpoint``'s authorization and refresh route precedence."""
+        self._route_auth[endpoint] = RouteAuth(backend=backend, permissions=permissions or (IsAuthenticated(),))
+        self._routes.sort(key=self._route_precedence, reverse=True)
+        self._websocket_routes.sort(key=self._route_precedence, reverse=True)
+        self._openapi_dirty = True
 
     def authorize[T: Callable[..., Any]](
         self,
@@ -1130,14 +1186,20 @@ class Flasgo(RouteDecorators):
 
         def decorator(endpoint: T) -> T:
             """Record endpoint authorization and refresh precedence for already registered routes."""
-            route_permissions = permissions or (IsAuthenticated(),)
-            self._route_auth[endpoint] = RouteAuth(
-                backend=backend_name,
-                permissions=route_permissions,
-            )
-            self._routes.sort(key=self._route_precedence, reverse=True)
-            self._websocket_routes.sort(key=self._route_precedence, reverse=True)
-            self._openapi_dirty = True
+            # Remember which functions this one wraps, so a route registered on an inner function before an outer
+            # wrapper was authorized (``authorize / wrapper / route``) still finds its authorization.
+            inner = getattr(endpoint, "__wrapped__", None)
+            seen: set[int] = {id(endpoint)}
+            while inner is not None and id(inner) not in seen and len(seen) < 64:
+                try:
+                    wrappers = self._authorized_wrappers.setdefault(inner, [])
+                except TypeError:  # an unhashable wrapped object cannot be a route endpoint
+                    break
+                if not any(wrapper is endpoint for wrapper in wrappers):
+                    wrappers.append(endpoint)
+                seen.add(id(inner))
+                inner = getattr(inner, "__wrapped__", None)
+            self._set_route_auth(endpoint, permissions, backend_name)
             return endpoint
 
         return decorator
@@ -1262,6 +1324,7 @@ class Flasgo(RouteDecorators):
             raise TypeError("Expected a Blueprint.")
         routes = list(self._routes)
         auth = dict(self._route_auth)
+        snapshots = set(self._auth_snapshots)
         had_cors = self._has_cors_routes
         try:
             # add_route rejects duplicate names and conflicting routes, so a failure part-way through is rolled back.
@@ -1269,6 +1332,7 @@ class Flasgo(RouteDecorators):
         except Exception:
             self._routes = routes
             self._route_auth = auth
+            self._auth_snapshots = snapshots
             self._has_cors_routes = had_cors
             raise
 
@@ -1618,7 +1682,7 @@ class Flasgo(RouteDecorators):
             return self._openapi_cache
         spec = build_openapi_spec(
             routes=self._routes,
-            route_auth=self._route_auth,
+            route_auth=lambda route: self._auth_for(route.endpoint, public=route.public),
             auth_schemes=self._auth_backend_schemes,
             title=self.settings.API_TITLE,
             version=self.settings.API_VERSION,
@@ -1643,7 +1707,7 @@ class Flasgo(RouteDecorators):
         """
         if not self._host_header_allowed(req.scope):
             self._log_security_event(logging.WARNING, "host-check-failed", req=req)
-            if self._register_security_failure(req):
+            if self._register_request_check_failure(req):
                 return _security_rate_limit_response()
             return Response.text(
                 "Invalid Host header. Send a Host value in ALLOWED_HOSTS or update settings.ALLOWED_HOSTS.",
@@ -1698,7 +1762,7 @@ class Flasgo(RouteDecorators):
 
         if self.security.csrf_enabled and not csrf_is_valid(req, self.security):
             self._log_security_event(logging.WARNING, "csrf-check-failed", req=req)
-            if self._register_security_failure(req):
+            if self._register_request_check_failure(req):
                 return _security_rate_limit_response()
             return Response.text(
                 "CSRF validation failed. Send matching CSRF cookie and header values plus a trusted Origin/Referer.",
@@ -1738,13 +1802,13 @@ class Flasgo(RouteDecorators):
             req.scope["flasgo.cors"] = match.cors
         else:
             req.scope.pop("flasgo.cors", None)
-        route_auth = self._route_auth.get(match.endpoint)
+        route_auth = self._auth_for(match.endpoint, public=match.public)
         rate_phase = "pre_auth" if route_auth is not None else "all"
         rate_limit_result = await self._check_rate_limits(req, match.endpoint, phase=rate_phase)
         if isinstance(rate_limit_result, Response):
             return await self._run_after_middleware(req, rate_limit_result)
 
-        auth_response = await self._authorize_request(req, match.endpoint)
+        auth_response = await self._authorize_request(req, match.endpoint, public=match.public)
         if auth_response is not None:
             return await self._run_after_middleware(req, auth_response)
 
@@ -1925,10 +1989,10 @@ class Flasgo(RouteDecorators):
                 status_code=422,
             )
         if isinstance(exc, HTTPException):
-            response = Response.text(
-                exc.detail or _status_text(exc.status_code),
-                status_code=exc.status_code,
-            )
+            if not _is_final_status(exc.status_code):
+                self._log_security_event(logging.ERROR, "invalid-http-exception-status", req=req)
+                return Response.text("Internal Server Error. Check the application logs for the original failure.", status_code=500)
+            response = _http_exception_response(exc.status_code, exc.detail)
             response.headers.update({key.lower(): value for key, value in exc.headers.items()})
             return response
 
@@ -2016,10 +2080,11 @@ class Flasgo(RouteDecorators):
         endpoint: Endpoint | WebSocketEndpoint,
         *,
         set_user_ctx: bool,
+        public: bool = False,
     ) -> _AuthDenial | None:
         """Shared authorization core; returns None on success or a transport-agnostic denial."""
 
-        auth = self._route_auth.get(endpoint)
+        auth = self._auth_for(endpoint, public=public)
         if auth is None:
             return None
         return await self._authorize_with(req, auth, set_user_ctx=set_user_ctx, events=_ROUTE_AUTH_EVENTS)
@@ -2044,7 +2109,7 @@ class Flasgo(RouteDecorators):
 
         try:
             with self._backend_operation(req, "authentication", "authenticate"):
-                authenticated = await _maybe_await(backend(req))
+                authenticated: AuthIdentity = await _maybe_await(backend(req))
         except Exception:
             self._log_security_event(logging.ERROR, events.backend_error, req=req)
             if self._register_security_failure(req):
@@ -2066,13 +2131,20 @@ class Flasgo(RouteDecorators):
                 return _AuthDenial("permission-denied", resolved_user, challenge=auth_result.challenge)
         return None
 
-    async def _authorize_request(self, req: Request, endpoint: Endpoint) -> Response | None:
-        denial = await self._authorize(req, endpoint, set_user_ctx=True)
+    async def _authorize_request(self, req: Request, endpoint: Endpoint, *, public: bool = False) -> Response | None:
+        denial = await self._authorize(req, endpoint, set_user_ctx=True, public=public)
         return None if denial is None else _auth_denial_response(denial)
 
     def _register_security_failure(self, req: Request) -> bool:
         """Register a security failure and observe any resulting throttle decision."""
         if self._security_throttle.register(req.client_ip):
+            self._observe_rejection(req, "security_rate_limit")
+            return True
+        return False
+
+    def _register_request_check_failure(self, req: Request) -> bool:
+        """Register a Host/CSRF failure in its own bucket, which never gates authentication."""
+        if self._request_check_throttle.register(req.client_ip):
             self._observe_rejection(req, "security_rate_limit")
             return True
         return False
@@ -2205,6 +2277,18 @@ def _request_head_size(scope: Scope) -> int:
             continue
         size += len(name) + len(b": ") + len(value) + len(b"\r\n")
     return size + len(b"\r\n")
+
+
+def _is_final_status(status_code: object) -> bool:
+    """Return whether ``status_code`` can be the status of a final HTTP response."""
+    return isinstance(status_code, int) and not isinstance(status_code, bool) and 200 <= status_code <= 599
+
+
+def _http_exception_response(status_code: int, detail: str) -> Response:
+    """Build the plain-text response for an HTTP error status, leaving 204 and 304 responses bodiless."""
+    if not status_allows_body(status_code):
+        return Response(b"", status_code=status_code)
+    return Response.text(detail or _status_text(status_code), status_code=status_code)
 
 
 def _status_text(status_code: int) -> str:

@@ -50,6 +50,73 @@
 - The `flasgo[otel]` extra now pins the OpenTelemetry API, SDK, and OTLP HTTP exporter at 1.45.2 and the ASGI
   instrumentation at 0.66b2 (previously 1.45.1 and 0.66b1), fixing GHSA-mf5v-w3w3-f6cg, a denial of service through
   quadratic-time `traceparent` parsing in `opentelemetry-api`.
+- Dependency provider results are injected exactly as returned instead of being validated like request input. A
+  `dict` or `list` provider result is no longer copied (so handlers share the provider's object), `Callable`,
+  `Protocol`, `Sequence`, and `frozenset` annotations work, and duck-typed `override_dependencies` fakes are accepted.
+  A provider that returns the wrong type is no longer reported to the client as a 422.
+- Host-header and CSRF failures are throttled in their own per-client bucket. They still turn repeated failing
+  requests into `429`, but no longer lock that client out of authentication, docs, WebSocket, or metrics checks.
+- `response_model` projection allows 100 times `MAX_VALIDATION_WORK` (1,000,000 by default); responses with more than
+  a few thousand values returned HTTP 500. The depth and issue limits are unchanged.
+- Each multipart part's header block is limited to 16 KiB (`413`), and a part header line that is not `Name: value`
+  is rejected with `400`.
+- Form and RFC 5987 parameter charsets are limited to UTF-8/16/32, ASCII, the ISO-8859 and Windows code pages,
+  KOI8, Mac Roman, and the common Japanese, Chinese, and Korean encodings. Other charsets get `400` for form bodies and
+  fields, and an RFC 5987 parameter in one is ignored.
+- An `authorize()` applied to a wrapper of an already-routed function (`authorize / wrapper / route`) protects every
+  route on that function except those declared `public=True`.
+
+### Security
+
+- Multipart form bodies and `Content-Type` headers are parsed by Flasgo's own linear-time parser instead of the
+  standard library's `email` package, which takes quadratic time on header values with long runs of `;`. A 24 KB
+  multipart request could block the event loop for about 9 seconds, and a 15 KB `Content-Type` sent to a `Body()` or
+  `Form()` route for about 5 seconds.
+- `MAX_MULTIPART_PARTS` can no longer be bypassed with a nested `multipart/mixed` part: nested multipart parts are
+  rejected before their contents are parsed. Previously one such part could carry about 128,000 inner parts in a 1 MiB
+  body, all parsed before the request was rejected.
+- `authorize()` is no longer silently dropped when a `functools.wraps` decorator sits between it and the route
+  decorator. Routes registered on a wrapper of an authorized function, or on a function whose wrapper was authorized
+  after registration, were served without authentication.
+- A page on another site can no longer lock a victim out of authorized routes by making the victim's browser fail 50
+  CSRF checks.
+- A request can no longer name the `punycode` codec (or any other charset outside the allowlist) for a form field, a
+  URL-encoded body, or an RFC 5987 parameter. Python's `punycode` decoder is quadratic, and one 1 MiB form request
+  blocked the event loop for about two minutes.
+- A recursive union `response_model` no longer re-projects the same subtree for each union member, which took time
+  exponential in the nesting depth when the response echoed request-shaped data. An object the response reuses
+  still counts toward the work and depth limits at every place it appears, so a small value that shares one list many
+  times cannot expand into a huge JSON body.
+- OpenAPI marks a `public=True` route as unauthenticated even when the same function is protected on another route.
+- A form or parameter charset of `undefined`, or one containing NUL, no longer causes HTTP 500.
+
+### Fixed
+
+- Streaming responses (`StreamingResponse`, `NDJSONResponse`, `EventSourceResponse`) that finished normally under
+  Uvicorn were treated as client disconnects: request-scoped dependencies saw a `ConnectionError` (rolling back
+  transactions), background tasks did not run, and metrics recorded `client_disconnect` and a send failure.
+  This also holds when ASGI middleware is still awaiting after forwarding the final message. A real disconnect
+  before the final message, or a failure reading the connection state, is still reported as a failure.
+- `abort(204)` and `abort(304)` now send an empty response; previously they, and statuses outside 200–599 (now HTTP
+  500), escaped the application with no response sent.
+- A malformed `Content-Type` or part-header parameter, such as `application/json; a*`, no longer causes HTTP 500.
+- An untouched optional file input (a part with `filename=""` and no content) binds as no file instead of failing
+  `UploadedFile | None` validation with 422.
+- An empty `application/x-www-form-urlencoded` body is validated as an empty form, so a `Form()` model whose fields are
+  all optional (for example, only unchecked checkboxes) no longer gets 422.
+- A union `response_model` of dataclasses projects a value through its own class first; `Cat | Dog` no longer
+  serializes a `Dog` as a `Cat` and drops its fields.
+  A member matched only as a virtual subclass (`ABC.register`) keeps its declared order instead of causing HTTP 500.
+- Authorizing a blueprint route's function on another route after the blueprint is registered no longer changes the
+  blueprint route's access, matching the documented registration snapshot.
+- Handlers returning a `list` or mapping containing dataclasses (or `jsonify(...)` of one) are serialized like a bare
+  dataclass instead of failing with HTTP 500, matching the OpenAPI schema.
+- On Windows, `flasgo run --reload` can stop its server child; `Popen.send_signal(SIGINT)` raised `ValueError` there,
+  so the reloader died and left the old server holding the port.
+- The test client's `websocket_connect` keeps an `Origin` header passed in `headers` instead of replacing it with the
+  default `origin`.
+- The test client treats a request target beginning with `//` as a path instead of a host, matching ASGI servers.
+- Upload filenames keep Windows path separators until sanitizing, so `C:\Users\me\report.pdf` becomes `report.pdf`.
 
 ## [0.11.1] - 2026-11-08
 

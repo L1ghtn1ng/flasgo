@@ -212,7 +212,7 @@ class Response:
         headers: Headers | None = None,
         background: BackgroundTasks | None = None,
     ) -> Response:
-        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False, default=_json_default).encode("utf-8")
         return cls(
             body=payload,
             status_code=status_code,
@@ -317,6 +317,15 @@ def status_allows_body(status_code: int) -> bool:
 
 
 ResponseValue = Response | DataclassResponse | str | bytes | Mapping[str, Any] | list[Any] | tuple[Any, ...] | None
+
+
+def _json_default(value: object) -> object:
+    """Serialize dataclass instances nested in JSON containers the same way a bare dataclass return value is."""
+    if is_dataclass(value) and not isinstance(value, type):
+        from .validation import to_jsonable
+
+        return to_jsonable(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def to_response(value: ResponseValue) -> Response:

@@ -216,12 +216,9 @@ async def _resolve_plan(
                             cache[cache_key] = value
                     finally:
                         context.resolving.remove(cache_key)
-                value = validate_value(
-                    binding.annotation,
-                    value,
-                    location=("dependency", binding.name),
-                    budget=budget,
-                )
+                # Provider results are trusted application values, injected exactly as returned: running them through
+                # request validation copied shared containers, rejected Callable/Protocol/Sequence annotations and
+                # duck-typed test overrides, and reported provider bugs to the client as 422s.
             else:
                 raise RuntimeError(f"Unknown endpoint binding source: {binding.source}")
             if index >= len(plan.dependencies):
@@ -284,7 +281,10 @@ async def _resolve_form(
 ) -> object:
     if "form" in cache:
         return cache["form"]
-    if not await request.body():
+    is_form_content = request.content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}
+    # An empty URL-encoded body is a valid form with no fields (for example, only unchecked checkboxes), so it is
+    # validated like any other form and the model decides which fields are missing.
+    if not await request.body() and not (binding.required and request.content_type == "application/x-www-form-urlencoded"):
         if not binding.required:
             return binding.default
         from ._request import FormData
@@ -293,7 +293,7 @@ async def _resolve_form(
             (ValidationIssue(("form",), "missing", "Form data is required."),),
             FormData(),
         )
-    if request.content_type not in {"application/x-www-form-urlencoded", "multipart/form-data"}:
+    if not is_form_content:
         from .exceptions import HTTPException
 
         raise HTTPException(415, "Form() requires URL-encoded or multipart form data.")

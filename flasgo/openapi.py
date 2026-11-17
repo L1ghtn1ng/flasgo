@@ -1,7 +1,7 @@
 import inspect
 import re
 import types
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Annotated, Any, get_args, get_origin
 
 from .auth import HasScope
@@ -19,7 +19,7 @@ _FIXED_PATH_ITEM_METHODS = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH
 def build_openapi_spec(
     *,
     routes: list[Route],
-    route_auth: Mapping[object, object],
+    route_auth: Callable[[Route], object],
     auth_schemes: Mapping[str, dict[str, Any]],
     title: str,
     version: str,
@@ -85,7 +85,7 @@ def _build_operation(
     method: str,
     known_operation_ids: set[str],
     registry: SchemaRegistry,
-    route_auth: Mapping[object, object],
+    route_auth: Callable[[Route], object],
     auth_schemes: Mapping[str, dict[str, Any]],
     csrf_enabled: bool,
     csrf_safe_methods: Collection[str],
@@ -99,7 +99,7 @@ def _build_operation(
         method (str): HTTP method for the operation.
         known_operation_ids (set[str]): Operation IDs already assigned, used to ensure uniqueness.
         registry (SchemaRegistry): Schema registry used to generate component references.
-        route_auth (Mapping[object, object]): Authentication configuration associated with routes.
+        route_auth (Callable[[Route], object]): Returns the route's authentication configuration, or None if public.
         auth_schemes (Mapping[str, dict[str, Any]]): Available OpenAPI security schemes.
         csrf_enabled (bool): Whether CSRF responses should be included for unsafe methods.
         csrf_safe_methods (Collection[str]): Methods exempt from CSRF protection.
@@ -153,7 +153,7 @@ def _build_operation(
         operation["responses"]["429"] = {"description": "Too Many Requests"}
 
     security_name: str | None = None
-    auth = route_auth.get(route.endpoint)
+    auth = route_auth(route)
     backend_name = getattr(auth, "backend", None)
     if isinstance(backend_name, str):
         operation["responses"].setdefault("401", {"description": "Unauthorized"})

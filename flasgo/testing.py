@@ -45,12 +45,17 @@ def _target_scope(target: str) -> dict[str, Any]:
     ``path`` is percent-decoded while ``raw_path`` and ``query_string`` stay encoded as ASCII, so non-ASCII
     text in a test URL is percent-encoded instead of failing a latin-1 encode.
     """
-    parsed = urlsplit(target)
-    raw_path = quote(parsed.path or "/", safe=_PATH_SAFE)
+    if target.startswith("/"):
+        # An origin-form target is a path, even one starting with "//": urlsplit would read "//host/p" as a netloc.
+        path, _, query = target.partition("#")[0].partition("?")
+    else:
+        parsed = urlsplit(target)
+        path, query = parsed.path, parsed.query
+    raw_path = quote(path or "/", safe=_PATH_SAFE)
     return {
         "path": unquote(raw_path),
         "raw_path": raw_path.encode("ascii"),
-        "query_string": quote(parsed.query, safe=_QUERY_SAFE).encode("ascii"),
+        "query_string": quote(query, safe=_QUERY_SAFE).encode("ascii"),
     }
 
 
@@ -846,7 +851,8 @@ class _WebSocketTransport:
             items = cast(Mapping[str, str], self.headers).items() if isinstance(self.headers, Mapping) else self.headers
             normalized_headers.update({key.lower(): value for key, value in items})
         if self.origin is not None:
-            normalized_headers["origin"] = self.origin
+            # An Origin passed in ``headers`` wins over the default, so cross-origin rejection can be tested that way.
+            normalized_headers.setdefault("origin", self.origin)
         cookie_header = _merge_cookie_headers(normalized_headers.get("cookie"), self.client._cookies)
         if cookie_header:
             normalized_headers["cookie"] = cookie_header

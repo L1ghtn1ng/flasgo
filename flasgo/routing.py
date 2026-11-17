@@ -39,6 +39,7 @@ class MatchResult:
     methods: frozenset[str]
     response_model: object = None
     route_id: str = ""
+    public: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -48,6 +49,7 @@ class WebSocketMatchResult:
     route_path: str
     name: str | None
     websocket_parameter: str | None = None
+    public: bool = False
 
 
 class _PathPattern:
@@ -123,6 +125,7 @@ class Route(_PathPattern):
             methods=self.methods,
             response_model=self.response_model,
             route_id=self.route_id,
+            public=self.public,
         )
 
     def path_matches(self, path: str) -> bool:
@@ -163,6 +166,7 @@ class WebSocketRoute(_PathPattern):
             route_path=self.raw_path,
             name=self.name,
             websocket_parameter=self.websocket_parameter,
+            public=self.public,
         )
 
 
