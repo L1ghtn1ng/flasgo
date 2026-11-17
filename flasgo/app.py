@@ -2104,7 +2104,7 @@ class Flasgo(RouteDecorators):
 
         try:
             with self._backend_operation(req, "authentication", "authenticate"):
-                authenticated = await _maybe_await(backend(req))
+                authenticated: AuthIdentity = await _maybe_await(backend(req))
         except Exception:
             self._log_security_event(logging.ERROR, events.backend_error, req=req)
             if self._register_security_failure(req):
