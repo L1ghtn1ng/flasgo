@@ -297,7 +297,8 @@ def _project_value(model: object, value: object, budget: ValidationBudget, depth
             mro = type(value).__mro__
             matching = sorted(
                 (member for member in args if is_dataclass(member) and isinstance(member, type) and isinstance(value, member)),
-                key=mro.index,
+                # A virtual subclass (``ABC.register``) matches without being in the MRO; keep those in declared order.
+                key=lambda member: mro.index(member) if member in mro else len(mro),
             )
             args = (*matching, *(member for member in args if member not in matching))
         for member in args:

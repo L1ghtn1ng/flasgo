@@ -208,9 +208,11 @@ class Blueprint(RouteDecorators):
                 effective_backend = original_auth.backend
             if item.public and effective_permissions:
                 raise ValueError("A protected blueprint route cannot declare public=True.")
+            # Not app.authorize(): the copy wraps the blueprint's own function, which must not inherit this
+            # blueprint's permissions where it is routed elsewhere. The copy's authorization is a snapshot, so
+            # authorizing the original function later does not change this route.
+            app._auth_snapshots.add(endpoint)
             if effective_permissions:
-                # Not app.authorize(): the copy wraps the blueprint's own function, which must not inherit this
-                # blueprint's permissions where it is routed elsewhere.
                 app._set_route_auth(endpoint, effective_permissions, (effective_backend or "default").strip() or "default")
             for rule in (*endpoint_rate_limits(item.endpoint), *rate_limits):
                 rate_limit(rule.requests, per=rule.window_seconds, scope=rule.scope, key_func=rule.key_func)(endpoint)

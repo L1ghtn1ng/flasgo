@@ -95,6 +95,8 @@
 - Streaming responses (`StreamingResponse`, `NDJSONResponse`, `EventSourceResponse`) that finished normally under
   Uvicorn were treated as client disconnects: request-scoped dependencies saw a `ConnectionError` (rolling back
   transactions), background tasks did not run, and metrics recorded `client_disconnect` and a send failure.
+  A client that disconnects while the final message is still being sent, or a failure reading the connection
+  state, is still reported as a failure rather than completion.
 - `abort(204)` and `abort(304)` now send an empty response; previously they, and statuses outside 200–599 (now HTTP
   500), escaped the application with no response sent.
 - A malformed `Content-Type` or part-header parameter, such as `application/json; a*`, no longer causes HTTP 500.
@@ -104,6 +106,9 @@
   all optional (for example, only unchecked checkboxes) no longer gets 422.
 - A union `response_model` of dataclasses projects a value through its own class first; `Cat | Dog` no longer
   serializes a `Dog` as a `Cat` and drops its fields.
+  A member matched only as a virtual subclass (`ABC.register`) keeps its declared order instead of causing HTTP 500.
+- Authorizing a blueprint route's function on another route after the blueprint is registered no longer changes the
+  blueprint route's access, matching the documented registration snapshot.
 - Handlers returning a `list` or mapping containing dataclasses (or `jsonify(...)` of one) are serialized like a bare
   dataclass instead of failing with HTTP 500, matching the OpenAPI schema.
 - On Windows, `flasgo run --reload` can stop its server child; `Popen.send_signal(SIGINT)` raised `ValueError` there,

@@ -297,6 +297,8 @@ class Flasgo(RouteDecorators):
         self._auth_backends: dict[str, AuthBackend] = {"default": _default_auth_backend}
         self._auth_backend_schemes: dict[str, dict[str, Any]] = {}
         self._route_auth: dict[object, RouteAuth] = {}
+        # Blueprint endpoint copies: their authorization is fixed when the blueprint is registered.
+        self._auth_snapshots: set[object] = set()
         self._authorized_wrappers: dict[object, list[object]] = {}
         self._rate_limiter: RateLimitBackend = rate_limiter if rate_limiter is not None else RateLimiter()
         self._session_backend = session_backend
@@ -1138,6 +1140,11 @@ class Flasgo(RouteDecorators):
         auth = self._route_auth.get(endpoint)
         if auth is not None:
             return auth
+        try:
+            if endpoint in self._auth_snapshots:
+                return None
+        except TypeError:
+            pass
         candidate = getattr(endpoint, "__wrapped__", None)
         seen: set[int] = {id(endpoint)}
         while candidate is not None and id(candidate) not in seen and len(seen) < 64:
@@ -1317,6 +1324,7 @@ class Flasgo(RouteDecorators):
             raise TypeError("Expected a Blueprint.")
         routes = list(self._routes)
         auth = dict(self._route_auth)
+        snapshots = set(self._auth_snapshots)
         had_cors = self._has_cors_routes
         try:
             # add_route rejects duplicate names and conflicting routes, so a failure part-way through is rolled back.
@@ -1324,6 +1332,7 @@ class Flasgo(RouteDecorators):
         except Exception:
             self._routes = routes
             self._route_auth = auth
+            self._auth_snapshots = snapshots
             self._has_cors_routes = had_cors
             raise
 

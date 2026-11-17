@@ -1,8 +1,10 @@
 """Regression tests for defects found in the November 2026 bug and security review."""
 
 import asyncio
+import contextlib
 import functools
 import time
+from abc import ABC
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Any, cast
@@ -780,3 +782,140 @@ def test_openapi_security_follows_each_routes_public_flag() -> None:
     paths = app.openapi_spec()["paths"]
     assert "security" in paths["/private"]["get"]
     assert "security" not in paths["/public"]["get"]
+
+
+def _transaction_app(events: list[str]) -> Flasgo:
+    app = Flasgo()
+
+    async def transaction():
+        try:
+            yield "tx"
+        except BaseException as exc:
+            events.append(f"rollback:{type(exc).__name__}")
+            raise
+        else:
+            events.append("commit")
+
+    @app.get("/stream", public=True)
+    def stream(tx: Annotated[str, Depends(transaction)]) -> StreamingResponse:
+        async def content():
+            yield b"a"
+
+        return StreamingResponse(content())
+
+    return app
+
+
+def _http_scope(path: str) -> dict[str, Any]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"host", b"localhost")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("localhost", 80),
+    }
+
+
+def test_disconnect_while_the_final_send_waits_on_flow_control_is_not_completion() -> None:
+    """Model uvicorn 0.54: connection_lost sets the receive event, then resumes writing; the stalled send returns unsent."""
+    events: list[str] = []
+    lost = asyncio.Event()
+    writable = asyncio.Event()
+    disconnected = False
+    delivered_request = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered_request
+        if not delivered_request:
+            delivered_request = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await lost.wait()
+        return {"type": "http.disconnect"}
+
+    def connection_lost() -> None:
+        nonlocal disconnected
+        disconnected = True
+        lost.set()
+        writable.set()
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body" and not message.get("more_body", False):
+            asyncio.get_running_loop().call_soon(connection_lost)
+            await writable.wait()
+        if disconnected:
+            return
+
+    asyncio.run(_transaction_app(events)(_http_scope("/stream"), receive, send))
+    assert events == ["rollback:ConnectionError"]
+
+
+def test_connection_monitor_failure_during_the_final_send_is_not_completion() -> None:
+    events: list[str] = []
+    final_started = asyncio.Event()
+    delivered_request = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered_request
+        if not delivered_request:
+            delivered_request = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await final_started.wait()
+        return {"type": "http.request", "body": b"", "more_body": False}  # not valid after the body was consumed
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.body" and not message.get("more_body", False):
+            final_started.set()
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+    with contextlib.suppress(RuntimeError):
+        asyncio.run(_transaction_app(events)(_http_scope("/stream"), receive, send))
+    assert events == ["rollback:RuntimeError"]
+
+
+@dataclass
+class _Shape(ABC):
+    name: str
+
+
+@dataclass
+class _Circle:
+    name: str
+    radius: int
+
+
+_Shape.register(_Circle)
+
+
+def test_union_member_matched_as_a_virtual_subclass_still_projects() -> None:
+    app = Flasgo()
+
+    @app.get("/shape", public=True, response_model=_Shape | None)
+    def shape() -> Any:
+        return _Circle("c", 2)
+
+    response = TestClient(app).get("/shape")
+    assert response.status_code == 200
+    assert response.json() == {"name": "c"}
+
+
+def test_authorizing_a_blueprint_view_later_does_not_change_the_registered_route() -> None:
+    app = _auth_app()
+    bp = Blueprint("pages", url_prefix="/pages")
+
+    def view() -> str:
+        return "ok"
+
+    bp.add_route("/open", view, public=True)
+    bp.add_route("/plain", view, name="plain")
+    app.register_blueprint(bp)
+    app.add_route("/admin", app.authorize()(view), name="admin")
+
+    client = TestClient(app)
+    assert [client.get(path).status_code for path in ("/pages/open", "/pages/plain", "/admin")] == [200, 200, 401]
