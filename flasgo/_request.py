@@ -1,11 +1,12 @@
 import asyncio
+import binascii
+import codecs
 import json
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from email.parser import BytesParser
-from email.policy import default
 from typing import TYPE_CHECKING, Any, overload, override
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote_to_bytes
 
 from .exceptions import HTTPException, _RequestRejection
 from .types import Receive, Scope
@@ -17,6 +18,22 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_MULTIPART_PARTS = 1_000
 DEFAULT_MAX_FORM_FIELDS = 1_000
+# Browsers emit a few hundred bytes of headers per part; the cap keeps a part's header block from becoming the bulk of
+# a request body that every later parsing step must walk.
+MAX_MULTIPART_PART_HEADER_BYTES = 16_384
+# Request data may name its own text encoding, so only codecs with C implementations and linear decoding are
+# accepted. Python also ships codecs such as ``punycode`` whose pure-Python decoder is quadratic.
+_FORM_CHARSETS = frozenset(
+    codecs.lookup(name).name
+    for name in (
+        "utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be", "ascii",
+        *(f"iso-8859-{number}" for number in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16)),
+        *(f"windows-125{number}" for number in range(9)),
+        "koi8-r", "koi8-u", "mac-roman", "shift_jis", "cp932", "euc-jp", "iso-2022-jp", "gb2312", "gbk", "gb18030",
+        "big5", "cp950", "euc-kr", "cp949",
+    )
+)  # fmt: skip
+_MEDIA_TYPE_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _JSON_BODY_ERROR = "Malformed JSON request body. Send valid JSON and set Content-Type: application/json."
 
 
@@ -58,25 +75,6 @@ def _sanitize_filename(filename: str) -> str:
     return cleaned
 
 
-def _count_multipart_part_delimiters(body: bytes, boundary: bytes) -> int:
-    """Count opening boundary delimiter lines without counting payload substrings."""
-
-    marker = b"--" + boundary
-    count = 0
-    offset = 0
-    while (index := body.find(marker, offset)) >= 0:
-        suffix = index + len(marker)
-        at_line_start = index == 0 or body[index - 1] in (0x0A, 0x0D)
-        if at_line_start and not body.startswith(b"--", suffix):
-            line_end = suffix
-            while line_end < len(body) and body[line_end] in (0x20, 0x09):
-                line_end += 1
-            if line_end == len(body) or body.startswith((b"\r\n", b"\n", b"\r"), line_end):
-                count += 1
-        offset = suffix
-    return count
-
-
 def _decode_headers(raw_headers: list[tuple[bytes, bytes]]) -> dict[str, str]:
     return {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in raw_headers}
 
@@ -95,13 +93,159 @@ def _parse_cookie_values(cookie_headers: list[str]) -> dict[str, list[str]]:
     return cookies
 
 
+def _parse_header_params(value: str) -> tuple[str, dict[str, str]]:
+    """Split a ``value; name=param`` header into its lowercased main value and parameters in one linear pass.
+
+    Quoted strings honour ``\\"`` and ``\\\\`` escapes only, so Windows paths in upload filenames survive intact.
+    RFC 2231/5987 ``name*=charset'lang'percent-encoded`` parameters and RFC 2231 continuations (``name*0``,
+    ``name*1*``, ...) replace their plain form; parameters that cannot be decoded, and parameters without ``=``, are
+    ignored rather than failing the request.
+    """
+    length = len(value)
+    end = value.find(";")
+    if end < 0:
+        end = length
+    main = value[:end].strip().lower()
+    params: dict[str, str] = {}
+    extended: dict[str, str] = {}
+    continuations: dict[str, dict[int, tuple[str, bool]]] = {}
+    index = end
+    while index < length:
+        index += 1  # skip ';'
+        name_end = index
+        while name_end < length and value[name_end] not in "=;":
+            name_end += 1
+        name = value[index:name_end].strip().lower()
+        if name_end >= length or value[name_end] == ";":
+            index = name_end
+            continue
+        index = name_end + 1
+        while index < length and value[index] in " \t":
+            index += 1
+        if index < length and value[index] == '"':
+            index += 1
+            pieces: list[str] = []
+            start = index
+            while index < length and value[index] != '"':
+                if value[index] == "\\" and index + 1 < length and value[index + 1] in '"\\':
+                    pieces.append(value[start:index])
+                    start = index + 1
+                    index += 2
+                    continue
+                index += 1
+            pieces.append(value[start:index])
+            param = "".join(pieces)
+            index += 1  # skip the closing quote (or step past the end of an unterminated value)
+            while index < length and value[index] != ";":
+                index += 1
+        else:
+            param_end = value.find(";", index)
+            if param_end < 0:
+                param_end = length
+            param = value[index:param_end].strip()
+            index = param_end
+        if not name:
+            continue
+        if name.endswith("*") and name.count("*") == 1:
+            decoded = _decode_extended_param(param)
+            if decoded is not None:
+                extended.setdefault(name[:-1], decoded)
+            continue
+        if (continuation := _CONTINUATION_RE.fullmatch(name)) is not None:
+            segments = continuations.setdefault(continuation[1], {})
+            if len(segments) < _MAX_CONTINUATIONS:
+                segments.setdefault(int(continuation[2]), (param, bool(continuation[3])))
+            continue
+        params.setdefault(name, param)
+    for base, segments in continuations.items():
+        joined = _join_continuations(segments)
+        if joined is not None:
+            extended.setdefault(base, joined)
+    params.update(extended)
+    return main, params
+
+
+_CONTINUATION_RE = re.compile(r"([^*]+)\*([0-9]{1,3})(\*?)")
+_MAX_CONTINUATIONS = 64
+
+
+def _join_continuations(segments: Mapping[int, tuple[str, bool]]) -> str | None:
+    """Join RFC 2231 ``name*0``, ``name*1*``, ... segments, or return ``None`` when they cannot be decoded."""
+    if 0 not in segments:
+        return None
+    ordered = []
+    while len(ordered) in segments:
+        ordered.append(segments[len(ordered)])
+    if not any(encoded for _value, encoded in ordered):
+        return "".join(value for value, _encoded in ordered)
+    first, first_encoded = ordered[0]
+    if not first_encoded:
+        return None
+    charset, quote_mark, rest = first.partition("'")
+    _language, quote_mark2, first = rest.partition("'")
+    codec = _form_codec(charset.strip() or "utf-8")
+    if not quote_mark or not quote_mark2 or codec is None:
+        return None
+    try:
+        raw = b"".join(unquote_to_bytes(value) if encoded else value.encode("ascii") for value, encoded in [(first, True), *ordered[1:]])
+        return raw.decode(codec)
+    except UnicodeError:
+        return None
+
+
+_ENCODED_WORDS_RE = re.compile(r"(?:=\?[^?\s]+\?[BbQq]\?[^?\s]*\?=\s*)+")
+_ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([BbQq])\?([^?\s]*)\?=")
+
+
+def _decode_encoded_words(value: str) -> str:
+    """Decode a value made only of RFC 2047 encoded words, as some MIME libraries send filenames; else return it."""
+    if not value.startswith("=?") or not _ENCODED_WORDS_RE.fullmatch(value.strip()):
+        return value
+    pieces = []
+    for charset, encoding, text in _ENCODED_WORD_RE.findall(value):
+        codec = _form_codec(charset.partition("*")[0])
+        if codec is None:
+            return value
+        try:
+            data = text.encode("ascii")
+            raw = binascii.a2b_base64(data) if encoding in "Bb" else binascii.a2b_qp(data, header=True)
+            pieces.append(raw.decode(codec))
+        except UnicodeError, binascii.Error:
+            return value
+    return "".join(pieces)
+
+
+def _decode_extended_param(value: str) -> str | None:
+    """Decode an RFC 5987 ``charset'language'percent-encoded`` value, or return ``None`` when it is malformed."""
+    charset, quote_mark, rest = value.partition("'")
+    _language, quote_mark2, encoded = rest.partition("'")
+    if not quote_mark or not quote_mark2:
+        return None
+    codec = _form_codec(charset.strip() or "utf-8")
+    if codec is None:
+        return None
+    try:
+        return unquote_to_bytes(encoded).decode(codec)
+    except UnicodeDecodeError:
+        return None
+
+
+def _form_codec(charset: str) -> str | None:
+    """Return the canonical codec name for an allowed request charset, or ``None``."""
+    try:
+        name = codecs.lookup(charset).name
+    except LookupError, ValueError:  # unknown names, and names containing NUL
+        return None
+    return name if name in _FORM_CHARSETS else None
+
+
 def _parse_content_type(header_value: str | None) -> tuple[str, dict[str, str]]:
+    """Return the lowercased media type (empty when absent or malformed) and its parameters."""
     if not header_value:
         return "", {}
-    message = BytesParser(policy=default).parsebytes(f"Content-Type: {header_value}\r\n\r\n".encode("latin-1"))
-    content_type = message.get_content_type().lower()
-    params = {key.lower(): value for key, value in message.get_params(header="content-type", failobj=[]) if key.lower() != content_type}
-    params.pop("", None)
+    content_type, params = _parse_header_params(header_value)
+    if not _MEDIA_TYPE_RE.fullmatch(content_type):
+        return "", {}
     return content_type, params
 
 
@@ -179,68 +323,159 @@ class FormData(Mapping[str, str]):
 
 
 def _decode_form_value(payload: bytes, *, charset: str, error_detail: str) -> str:
+    codec = _form_codec(charset)
+    if codec is None:
+        raise HTTPException(400, error_detail)
     try:
-        return payload.decode(charset)
-    except (LookupError, UnicodeDecodeError) as exc:
+        return payload.decode(codec)
+    except UnicodeError as exc:
         raise HTTPException(400, error_detail) from exc
+
+
+_MALFORMED_MULTIPART = "Malformed multipart form data. Ensure the request body matches the declared multipart boundary."
+
+
+def _find_multipart_delimiter(body: bytes, marker: bytes, offset: int) -> tuple[int, bool]:
+    """Return the next delimiter line at or after ``offset`` and whether it closes the body, or ``(-1, False)``."""
+    while (index := body.find(marker, offset)) >= 0:
+        suffix = index + len(marker)
+        if index == 0 or body[index - 1] == 0x0A:
+            closing = body.startswith(b"--", suffix)
+            line_end = suffix + 2 if closing else suffix
+            while line_end < len(body) and body[line_end] in (0x20, 0x09):
+                line_end += 1
+            # Only transport padding may follow a delimiter on its line; "--boundary--tail" inside a payload is data.
+            if body.startswith((b"\r\n", b"\n"), line_end) or (closing and line_end == len(body)):
+                return index, closing
+        offset = suffix
+    return -1, False
+
+
+def _split_multipart_parts(body: bytes, boundary: bytes, *, max_parts: int) -> list[bytes]:
+    """Split a multipart body into raw parts with one linear scan, enforcing ``max_parts`` as parts are found."""
+    marker = b"--" + boundary
+    index, closing = _find_multipart_delimiter(body, marker, 0)
+    if index < 0:
+        raise HTTPException(400, _MALFORMED_MULTIPART)
+    parts: list[bytes] = []
+    while not closing:
+        start = body.index(b"\n", index + len(marker)) + 1
+        next_index, closing = _find_multipart_delimiter(body, marker, start)
+        if next_index < 0:
+            raise HTTPException(400, _MALFORMED_MULTIPART)
+        end = next_index
+        if end > start and body[end - 1] == 0x0A:
+            end -= 2 if end - 1 > start and body[end - 2] == 0x0D else 1
+        parts.append(body[start : max(start, end)])
+        if len(parts) > max_parts:
+            raise _RequestRejection(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.", "multipart_limit")
+        index = next_index
+    return parts
+
+
+def _decode_part_header_text(raw: bytes) -> str:
+    """Decode part header bytes: browsers send UTF-8 filenames unescaped, so fall back to Latin-1 only if needed."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def _parse_part_headers(part: bytes) -> tuple[dict[str, str], bytes]:
+    """Split one raw part into lowercased headers (last value wins) and its payload."""
+    if not part:
+        return {}, b""
+    if part.startswith((b"\r\n", b"\n")):
+        return {}, part[2 if part.startswith(b"\r\n") else 1 :]
+    limit = MAX_MULTIPART_PART_HEADER_BYTES
+    crlf = part.find(b"\r\n\r\n", 0, limit + 4)
+    lf = part.find(b"\n\n", 0, limit + 2)
+    candidates = [(position, size) for position, size in ((crlf, 4), (lf, 2)) if position >= 0]
+    if candidates:
+        header_end, separator = min(candidates)
+    else:
+        # RFC 2046 allows a part with headers and no body (no blank line before the next delimiter).
+        header_end, separator = len(part.rstrip(b"\r\n")), len(part) - len(part.rstrip(b"\r\n"))
+    if header_end > limit:
+        raise _RequestRejection(413, "Multipart part headers exceed the size limit.", "multipart_limit")
+    headers: dict[str, str] = {}
+    current: str | None = None
+    for line in _decode_part_header_text(part[:header_end]).replace("\r\n", "\n").split("\n"):
+        if line[:1] in (" ", "\t") and current is not None:
+            headers[current] = f"{headers[current]} {line.strip()}"
+            continue
+        name, colon, value = line.partition(":")
+        if not colon or not name.strip():
+            raise HTTPException(400, "Malformed multipart form data. Part header lines must be 'Name: value'.")
+        current = name.strip().lower()
+        headers[current] = value.strip()
+    return headers, part[header_end + separator :]
+
+
+def _decode_part_payload(payload: bytes, transfer_encoding: str | None) -> bytes:
+    """Undo a legacy Content-Transfer-Encoding; RFC 7578 deprecates them, but some clients still send base64."""
+    encoding = (transfer_encoding or "").strip().lower()
+    try:
+        if encoding == "base64":
+            return binascii.a2b_base64(payload)
+        if encoding == "quoted-printable":
+            return binascii.a2b_qp(payload)
+    except binascii.Error as exc:
+        raise HTTPException(400, "Malformed multipart form data. A part's transfer encoding could not be decoded.") from exc
+    return payload
 
 
 def _parse_multipart_form(
     body: bytes,
-    content_type: str,
     boundary: str,
     *,
     max_parts: int,
     max_fields: int,
 ) -> FormData:
-    """Parse multipart fields and uploads while enforcing configured field, file, and part limits."""
+    """Parse multipart fields and uploads while enforcing configured field, file, and part limits.
+
+    The parser is linear in the body size: parts are split with ``bytes.find`` and every header is parsed by
+    ``_parse_header_params``. (The stdlib ``email`` parser this replaces is quadratic on some header values.)
+    """
     try:
         boundary_bytes = boundary.encode("ascii")
     except UnicodeEncodeError as exc:
         raise HTTPException(400, "Malformed multipart form data. The boundary must be ASCII text.") from exc
     if not 1 <= len(boundary_bytes) <= 200:
         raise HTTPException(400, "Malformed multipart form data. The boundary length is invalid.")
-    # The email parser has quadratic memory behavior on many tiny parts, so bound the
-    # actual delimiter lines with a cheap raw scan before parsing.
-    if _count_multipart_part_delimiters(body, boundary_bytes) > max_parts:
-        raise _RequestRejection(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.", "multipart_limit")
-    message = BytesParser(policy=default).parsebytes(f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("latin-1") + body)
-    if not message.is_multipart():
-        raise HTTPException(
-            400,
-            "Malformed multipart form data. Ensure the request body matches the declared multipart boundary.",
-        )
 
     fields: dict[str, list[str]] = {}
     files: dict[str, list[UploadedFile]] = {}
-    parts_seen = 0
     fields_seen = 0
-    for part in message.iter_parts():
-        parts_seen += 1
-        if parts_seen > max_parts:
-            raise _RequestRejection(413, "Multipart form data exceeds MAX_MULTIPART_PARTS.", "multipart_limit")
-        if part.is_multipart():
+    for raw_part in _split_multipart_parts(body, boundary_bytes, max_parts=max_parts):
+        headers, raw_payload = _parse_part_headers(raw_part)
+        part_type, type_params = _parse_content_type(headers.get("content-type"))
+        if part_type.startswith("multipart/"):
             raise HTTPException(
                 400,
                 "Nested multipart form data is not supported. Flatten the upload into standard form-data parts.",
             )
-        if part.get_content_disposition() != "form-data":
+        disposition, disposition_params = _parse_header_params(headers.get("content-disposition", ""))
+        if disposition != "form-data":
             continue
 
-        name = part.get_param("name", header="content-disposition")
-        if not isinstance(name, str) or not name:
+        name = disposition_params.get("name")
+        if not name:
             continue
 
-        decoded_payload = part.get_payload(decode=True)
-        payload = decoded_payload if isinstance(decoded_payload, bytes) else b""
-        headers = {key.lower(): value for key, value in part.items()}
-        filename = part.get_filename()
-        if filename:
+        payload = _decode_part_payload(raw_payload, headers.get("content-transfer-encoding"))
+        filename = disposition_params.get("filename")
+        if filename is not None:
+            filename = _decode_encoded_words(filename)
+            # Browsers submit an untouched optional file input as a part with ``filename=""`` and no content;
+            # that means "no file", not a text field.
+            if not filename and not payload:
+                continue
             uploaded = UploadedFile(
                 name=name,
                 filename=_sanitize_filename(filename) or "upload",
                 body=payload,
-                content_type=part.get_content_type(),
+                content_type=part_type or "text/plain",
                 headers=headers,
             )
             files.setdefault(name, []).append(uploaded)
@@ -249,7 +484,7 @@ def _parse_multipart_form(
         fields_seen += 1
         if fields_seen > max_fields:
             raise _RequestRejection(413, "Multipart form data exceeds MAX_FORM_FIELDS.", "form_limit")
-        charset = part.get_content_charset("utf-8") or "utf-8"
+        charset = type_params.get("charset", "utf-8").strip().lower() or "utf-8"
         value = _decode_form_value(
             payload,
             charset=charset,
@@ -401,7 +636,9 @@ class Request:
         max_fields = _scope_positive_int(self.scope, "max_form_fields", DEFAULT_MAX_FORM_FIELDS)
         content_type, params = _parse_content_type(self.headers.get("content-type"))
         if content_type == "application/x-www-form-urlencoded":
-            charset = params.get("charset", "utf-8")
+            charset = _form_codec(params.get("charset", "").strip() or "utf-8")
+            if charset is None:
+                raise HTTPException(400, "Invalid form encoding. Use a supported charset such as UTF-8.")
             decoded = _decode_form_value(
                 await self.body(),
                 charset=charset,
@@ -425,7 +662,6 @@ class Request:
                 )
             form = _parse_multipart_form(
                 await self.body(),
-                self.headers.get("content-type", ""),
                 boundary,
                 max_parts=_scope_positive_int(self.scope, "max_multipart_parts", DEFAULT_MAX_MULTIPART_PARTS),
                 max_fields=max_fields,

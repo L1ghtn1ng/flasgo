@@ -190,10 +190,15 @@ def _stop_reload_child(process: subprocess.Popen[bytes], *, grace_seconds: float
     if process.poll() is not None:
         return
     try:
-        process.send_signal(signal.SIGINT)
+        if os.name == "nt":
+            # Windows Popen.send_signal() accepts only SIGTERM and CTRL_* events and raises ValueError for SIGINT;
+            # SIGTERM maps to TerminateProcess there.
+            process.terminate()
+        else:
+            process.send_signal(signal.SIGINT)
     except ProcessLookupError:
         return  # exited between poll() and the signal
-    except OSError:
+    except OSError, ValueError:
         # SIGINT could not be delivered; fall back to SIGKILL rather than leaving the child running.
         process.kill()
         process.wait()

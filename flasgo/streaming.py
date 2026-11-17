@@ -87,6 +87,8 @@ class StreamingResponse(Response):
         self._used = False
         self._closed = False
         self._source: AsyncIterator[Any] | None = None
+        self._final_message_started = False
+        self._disconnected_before_final = False
         self._metrics_outcome = "producer_failure"
         super().__init__(body=b"", status_code=status_code, headers=dict(headers or {}), content_type=content_type)
 
@@ -225,6 +227,9 @@ class StreamingResponse(Response):
                     if len(payload) > self.max_chunk_bytes:
                         raise ValueError("Stream chunk exceeds max_chunk_bytes.")
                     await self._send_message(send, {"type": "http.response.body", "body": payload, "more_body": True})
+            # Servers may report ``http.disconnect`` as soon as the final message completes the response (uvicorn
+            # does), so once it is in flight the pump's own result decides between completion and failure.
+            self._final_message_started = True
             await self._send_message(send, {"type": "http.response.body", "body": b"", "more_body": False})
         finally:
             await self.aclose()
@@ -241,6 +246,9 @@ class StreamingResponse(Response):
         while True:
             message = await self.receive()
             if message["type"] == "http.disconnect":
+                # A producer that never suspends can finish the whole stream in the same loop step as a real
+                # disconnect, so record which came first while it is still known.
+                self._disconnected_before_final = not self._final_message_started
                 return
             raise RuntimeError("Unexpected ASGI event after the request body was consumed.")
 
@@ -266,7 +274,8 @@ class StreamingResponse(Response):
         try:
             async with timeout:
                 done, _ = await asyncio.wait({pump, disconnect}, return_when=asyncio.FIRST_COMPLETED)
-                if pump in done:
+                client_left_first = disconnect in done and disconnect.exception() is None and self._disconnected_before_final
+                if not client_left_first and (pump in done or self._final_message_started):
                     await pump
                     if self._metrics_outcome != "cleanup_timeout":
                         self._metrics_outcome = "completed"

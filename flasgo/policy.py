@@ -79,7 +79,7 @@ def policy_snapshot(app: Flasgo) -> dict[str, Any]:
     routes = []
     for protocol, collection in (("http", app._routes), ("websocket", app._websocket_routes)):
         for route in collection:
-            auth = app._route_auth.get(route.endpoint)
+            auth = app._auth_for(route.endpoint, public=route.public)
             cors = getattr(route, "cors", None)
             methods = sorted(getattr(route, "methods", ()))
             routes.append(
@@ -218,7 +218,7 @@ def deployment_issues(app: Flasgo) -> list[PolicyIssue]:
     )
     issues = [PolicyIssue(code, message) for condition, code, message in checks if condition]
     for route in (*app._routes, *app._websocket_routes):
-        auth = app._route_auth.get(route.endpoint)
+        auth = app._auth_for(route.endpoint, public=route.public)
         if route.public and auth is not None:
             issues.append(PolicyIssue("FG010", f"Route {route.raw_path} declares public access and authorization.", "error"))
         elif not route.public and auth is None:
