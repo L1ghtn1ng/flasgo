@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-17
+
+### Upgrading from 0.11.1
+
+Review these behaviour changes before upgrading:
+
+- `flasgo db` now merges a `[tool.alembic]` table in `pyproject.toml` with `alembic.ini`. Remove an unused
+  `[tool.alembic]` table or make the two agree.
+- Dependency provider results are injected as returned rather than validated and copied. Handlers now share a
+  provider's `dict` or `list` object, and a provider that returns the wrong type is no longer reported as a 422.
+- Form and RFC 5987 parameter charsets are limited to an allowlist; requests naming another charset get `400`.
+- Multipart requests with a nested multipart part, a part header block over 16 KiB, or a malformed part header line
+  are now rejected.
+- `authorize()` applied to a wrapper of an already-routed function now protects every route on that function except
+  those declared `public=True`.
+
 ### Added
 
 - `flasgo db` now reads Alembic settings from a `[tool.alembic]` table in `pyproject.toml`, alone or merged with
