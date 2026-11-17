@@ -417,7 +417,9 @@ def _decode_part_payload(payload: bytes, transfer_encoding: str | None) -> bytes
     encoding = (transfer_encoding or "").strip().lower()
     try:
         if encoding == "base64":
-            return binascii.a2b_base64(payload)
+            # Strict mode rejects characters outside the base64 alphabet, which the default silently drops; RFC 2045
+            # bodies wrap at 76 characters, so line breaks and other ASCII whitespace are removed first.
+            return binascii.a2b_base64(payload.translate(None, b" \t\r\n"), strict_mode=True)
         if encoding == "quoted-printable":
             return binascii.a2b_qp(payload)
     except binascii.Error as exc:

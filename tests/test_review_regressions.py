@@ -183,7 +183,7 @@ def test_multipart_parser_keeps_supported_encodings() -> None:
     body = _multipart(
         b'Content-Disposition: form-data; name="doc"; filename="C:\\Users\\me\\report.pdf"\r\nContent-Type: application/pdf\r\n\r\nPDF',
         b'Content-Disposition: form-data; name="intl"; filename="x.txt"; filename*=UTF-8\'\'%C3%A9t%C3%A9.txt\r\n\r\n1',
-        b'Content-Disposition: form-data; name="b64"\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=',
+        b'Content-Disposition: form-data; name="b64"\r\nContent-Transfer-Encoding: base64\r\n\r\naGVs\r\nbG8=',
         b'Content-Disposition: form-data; name="latin"\r\nContent-Type: text/plain; charset="iso-8859-1"\r\n\r\n\xe9',
         b'Content-Disposition: form-data; name="quoted"; filename="say \\"hi\\".txt"\r\n\r\nq',
         b'Content-Disposition: form-data; name="empty"\r\n\r\n',
@@ -195,6 +195,13 @@ def test_multipart_parser_keeps_supported_encodings() -> None:
         "fields": {"b64": ["hello"], "latin": ["\u00e9"], "empty": [""]},
         "files": {"doc": [["report.pdf", "PDF"]], "intl": [["\u00e9t\u00e9.txt", "1"]], "quoted": [['say "hi".txt', "q"]]},
     }
+
+
+@pytest.mark.parametrize("payload", [b"!!!", b"aGVsbG8=!!", b"aGVs*bG8=", b"aGVsbG8"])
+def test_invalid_base64_part_is_rejected(payload: bytes) -> None:
+    body = _multipart(b'Content-Disposition: form-data; name="a"\r\nContent-Transfer-Encoding: base64\r\n\r\n' + payload)
+    response = TestClient(_form_app()).post("/form", body=body, headers=_multipart_headers())
+    assert response.status_code == 400
 
 
 def test_untouched_optional_file_input_binds_as_no_file() -> None:
