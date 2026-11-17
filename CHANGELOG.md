@@ -95,8 +95,8 @@
 - Streaming responses (`StreamingResponse`, `NDJSONResponse`, `EventSourceResponse`) that finished normally under
   Uvicorn were treated as client disconnects: request-scoped dependencies saw a `ConnectionError` (rolling back
   transactions), background tasks did not run, and metrics recorded `client_disconnect` and a send failure.
-  A client that disconnects while the final message is still being sent, or a failure reading the connection
-  state, is still reported as a failure rather than completion.
+  This also holds when ASGI middleware is still awaiting after forwarding the final message. A real disconnect
+  before the final message, or a failure reading the connection state, is still reported as a failure.
 - `abort(204)` and `abort(304)` now send an empty response; previously they, and statuses outside 200–599 (now HTTP
   500), escaped the application with no response sent.
 - A malformed `Content-Type` or part-header parameter, such as `application/json; a*`, no longer causes HTTP 500.

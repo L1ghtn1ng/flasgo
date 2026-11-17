@@ -822,12 +822,10 @@ def _http_scope(path: str) -> dict[str, Any]:
     }
 
 
-def test_disconnect_while_the_final_send_waits_on_flow_control_is_not_completion() -> None:
-    """Model uvicorn 0.54: connection_lost sets the receive event, then resumes writing; the stalled send returns unsent."""
+def test_stream_completes_when_middleware_awaits_after_forwarding_the_final_body() -> None:
+    """Uvicorn reports ``http.disconnect`` once the response is complete, while the middleware's send is still running."""
     events: list[str] = []
-    lost = asyncio.Event()
-    writable = asyncio.Event()
-    disconnected = False
+    complete = asyncio.Event()
     delivered_request = False
 
     async def receive() -> dict[str, Any]:
@@ -835,24 +833,20 @@ def test_disconnect_while_the_final_send_waits_on_flow_control_is_not_completion
         if not delivered_request:
             delivered_request = True
             return {"type": "http.request", "body": b"", "more_body": False}
-        await lost.wait()
+        await complete.wait()
         return {"type": "http.disconnect"}
 
-    def connection_lost() -> None:
-        nonlocal disconnected
-        disconnected = True
-        lost.set()
-        writable.set()
-
-    async def send(message: dict[str, Any]) -> None:
+    async def server_send(message: dict[str, Any]) -> None:
         if message["type"] == "http.response.body" and not message.get("more_body", False):
-            asyncio.get_running_loop().call_soon(connection_lost)
-            await writable.wait()
-        if disconnected:
-            return
+            complete.set()
 
-    asyncio.run(_transaction_app(events)(_http_scope("/stream"), receive, send))
-    assert events == ["rollback:ConnectionError"]
+    async def middleware_send(message: dict[str, Any]) -> None:
+        await server_send(message)
+        for _ in range(3):  # e.g. flushing an access log or a tracing span after forwarding
+            await asyncio.sleep(0)
+
+    asyncio.run(_transaction_app(events)(_http_scope("/stream"), receive, middleware_send))
+    assert events == ["commit"]
 
 
 def test_connection_monitor_failure_during_the_final_send_is_not_completion() -> None:
